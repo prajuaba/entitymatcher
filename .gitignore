@@ -1,0 +1,22 @@
+# Go Binaries and Build Artifacts
+backend/server
+*.exe
+*.exe;
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node.js & Frontend dependencies
+frontend/node_modules/
+node_modules/
+frontend/dist/
+
+# Logs & Temporary files
+*.log
+.DS_Store
+.vscode/
+.idea/
+tmp/
+scratch/
