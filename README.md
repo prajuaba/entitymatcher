@@ -37,11 +37,14 @@ winning source and its score.
 ## Measured performance
 
 From `go test ./internal/mockdata/` (4,400 × 4,400 synthetic bilingual records, 19.4M candidate
-pair space, fixed seed):
+pair space, fixed seed). Scale figures are from the opt-in harness
+(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 220,000 × 220,000:
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~7,900 sources/sec |
+| Throughput | ~8,000 sources/sec at 4.4k; ~9,900 at 220k × 220k |
+| Verified scale | 220,000 × 220,000 per side in 22.3s (20 cores), 2.1 GiB peak heap |
+| Scaling | time ~ O(N^1.10) over 22k → 220k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 57.6% |
 | F1 | 73.1% |
@@ -201,9 +204,13 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   comparison. A dictionary-based segmenter would improve this.
 - **Recall is threshold-bound.** 57.6% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
-- **Scale is verified to ~4,400 × 4,400.** The blocking index has frequency cutoffs intended for
-  larger corpora, but the 100,000+ figure this project was originally described with has not been
-  measured. Results are accumulated in memory during a run.
+- **Peak heap is ~2 GiB at 220k × 220k**, and `docker-compose.yml` sets no memory limit. That is
+  2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the
+  corpus. Results accumulate in memory during a run and every row embeds full copies of both
+  records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
+  runtime, since GC CPU fraction falls with scale.
+- **Scaling is O(N^1.10), not linear.** The residual comes from the candidate set growing with
+  corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
 - **`api/handlers.go` still calls the non-error-returning `SaveResults`.** The error-returning
   `SaveResultsCtx` exists and is used by the store layer; the handler should be migrated so a
   persistence failure surfaces to the caller.
