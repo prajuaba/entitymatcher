@@ -62,6 +62,7 @@ type CleanName struct {
 	DistinctiveTokens []string `json:"distinctive_tokens"`
 	Numbers          []string `json:"numbers"`
 	PhoneticKey      string   `json:"phonetic_key"`
+	PhoneticForm     string   `json:"phonetic_form"`
 }
 
 func RunePrefix(s string, n int) string {
@@ -138,6 +139,12 @@ func Normalize(input string) CleanName {
 	sort.Strings(sortedTokens)
 	sortedTokensStr := strings.Join(sortedTokens, " ")
 
+	// Only apply Thai phonetic normalization to strings containing Thai script
+	var phoneticForm string
+	if ContainsThai(text) {
+		phoneticForm = ThaiPhoneticForm(text)
+	}
+
 	return CleanName{
 		Raw:               input,
 		Cleaned:           text,
@@ -145,7 +152,8 @@ func Normalize(input string) CleanName {
 		Tokens:           tokens,
 		DistinctiveTokens: distinctive,
 		Numbers:          numMatches,
-		PhoneticKey:      GeneratePhoneticKey(text),
+		PhoneticKey:      GeneratePhoneticKey(phoneticForm, text),
+		PhoneticForm:     phoneticForm,
 	}
 }
 
@@ -257,8 +265,18 @@ func StripToneMarks(s string) string {
 	return reThaiDiacritics.ReplaceAllString(s, "")
 }
 
-// GeneratePhoneticKey creates a consonant skeleton of the input string
-func GeneratePhoneticKey(s string) string {
+// GeneratePhoneticKey creates a consonant skeleton of the input string.
+// If phoneticForm is provided (non-empty), it derives from the phonetic form (Thai only).
+// Otherwise, it falls back to the original logic for pure-Latin strings.
+func GeneratePhoneticKey(phoneticForm, originalText string) string {
+	// Use phonetic form if available (Thai content only)
+	var s string
+	if phoneticForm != "" {
+		s = phoneticForm
+	} else {
+		s = originalText
+	}
+
 	// Strip tone marks and Thai standalone vowels
 	sClean := StripToneMarks(s)
 

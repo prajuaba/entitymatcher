@@ -12,11 +12,12 @@ type MatchWeights struct {
 }
 
 type AlgorithmToggles struct {
-	UseJaroWinkler bool `json:"use_jaro_winkler"`
-	UseLevenshtein bool `json:"use_levenshtein"`
-	UseTokenSort   bool `json:"use_token_sort"`
-	UsePhonetic    bool `json:"use_phonetic"`
-	UseTrigram     bool `json:"use_trigram"`
+	UseJaroWinkler   bool `json:"use_jaro_winkler"`
+	UseLevenshtein   bool `json:"use_levenshtein"`
+	UseTokenSort     bool `json:"use_token_sort"`
+	UsePhonetic      bool `json:"use_phonetic"`
+	UseTrigram       bool `json:"use_trigram"`
+	UseThaiPhonetic  bool `json:"use_thai_phonetic"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -25,11 +26,12 @@ var DefaultWeights = MatchWeights{
 }
 
 var DefaultAlgorithms = AlgorithmToggles{
-	UseJaroWinkler: true,
-	UseLevenshtein: true,
-	UseTokenSort:   true,
-	UsePhonetic:    true,
-	UseTrigram:     true,
+	UseJaroWinkler:  true,
+	UseLevenshtein:  true,
+	UseTokenSort:    true,
+	UsePhonetic:     true,
+	UseTrigram:      true,
+	UseThaiPhonetic: true,
 }
 
 // JaroWinkler computes rune-safe Jaro-Winkler distance between two strings s1 and s2.
@@ -323,6 +325,26 @@ func CalculateCompositeScore(
 	// Phonetic Match
 	if algos.UsePhonetic && srcName.PhoneticKey != "" && srcName.PhoneticKey == destName.PhoneticKey {
 		reasons = append(reasons, "Exact phonetic consonant key match")
+	}
+
+	// Thai Phonetic Form Match (only when at least one name contains Thai script)
+	var thaiPhoneticScore float64
+	if algos.UseThaiPhonetic && (srcName.PhoneticForm != "" || destName.PhoneticForm != "") {
+		// For mixed pairs (one Thai, one Latin), use the non-empty form or the cleaned original
+		srcPhonetic := srcName.PhoneticForm
+		if srcPhonetic == "" {
+			srcPhonetic = srcName.Cleaned
+		}
+		destPhonetic := destName.PhoneticForm
+		if destPhonetic == "" {
+			destPhonetic = destName.Cleaned
+		}
+
+		thaiPhoneticScore = JaroWinkler(srcPhonetic, destPhonetic)
+		scores = append(scores, thaiPhoneticScore)
+		if thaiPhoneticScore > 0.85 {
+			reasons = append(reasons, "High Thai phonetic form similarity")
+		}
 	}
 
 	var nameScore float64

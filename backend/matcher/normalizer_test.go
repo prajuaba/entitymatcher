@@ -102,8 +102,9 @@ func TestPhoneticKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key1 := GeneratePhoneticKey(tt.input)
-			key2 := GeneratePhoneticKey(tt.expectDifferent)
+			// Pass empty phoneticForm and the text as originalText (since these are pure-Latin test cases)
+			key1 := GeneratePhoneticKey("", tt.input)
+			key2 := GeneratePhoneticKey("", tt.expectDifferent)
 
 			if tt.expectSameKey && key1 != key2 {
 				t.Errorf("GeneratePhoneticKey(%q) = %q; GeneratePhoneticKey(%q) = %q; expected same keys", tt.input, key1, tt.expectDifferent, key2)
