@@ -41,7 +41,7 @@ func resolveGreedy1to1(items []MatchResultItem, cfg Config) []MatchResultItem {
 			// DEFECT 1 FIX: O(1) lookup instead of nested loop
 			runnerUpScore := rank2ScoreMap[item.SourceID]
 
-			canAutoMatch, decisionNote := isAutoMatchable(
+			canAutoMatch, decisionNote := IsAutoMatchable(
 				item.ConfidenceScore,
 				runnerUpScore,
 				cfg.AutoMatchThreshold,

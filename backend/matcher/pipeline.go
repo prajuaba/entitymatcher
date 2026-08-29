@@ -128,12 +128,12 @@ func NewMatchEngine(cfg Config) *MatchEngine {
 	return &MatchEngine{Config: cfg}
 }
 
-// isAutoMatchable determines if a rank-1 match qualifies for auto-matching.
+// IsAutoMatchable determines if a rank-1 match qualifies for auto-matching.
 // It implements two decision rules:
 // (a) Score meets auto-match threshold AND margin meets threshold (conservative rule)
 // (b) Top score is an exact match (>= floor) AND runner-up is below floor (decisive rule)
 // Critical: Rule (b) does NOT fire if both scores are >= floor (that's a genuine tie)
-func isAutoMatchable(topScore, runnerUpScore, autoMatchThreshold, marginThreshold, exactMatchFloor float64) (bool, string) {
+func IsAutoMatchable(topScore, runnerUpScore, autoMatchThreshold, marginThreshold, exactMatchFloor float64) (bool, string) {
 	margin := topScore - runnerUpScore
 
 	// Rule (b): Exact normalized match
@@ -160,8 +160,8 @@ type matchTask struct {
 	source SourceRecord
 }
 
-// scoredCandidate represents a candidate with its calculated score and details
-type scoredCandidate struct {
+// ScoredCandidate represents a candidate with its calculated score and details
+type ScoredCandidate struct {
 	Candidate DestinationRecord
 	ScoreRes  ScoreResult
 }
@@ -225,7 +225,7 @@ func (e *MatchEngine) ExecuteJob(
 					var matchedItems []MatchResultItem
 
 					// Step 1: Score all candidates and keep those above ReviewThreshold
-					var scoredCandidates []scoredCandidate
+					var ScoredCandidates []ScoredCandidate
 
 					for _, cand := range candidates {
 						scoreRes := CalculateCompositeScore(
@@ -252,7 +252,7 @@ func (e *MatchEngine) ExecuteJob(
 
 						// Keep candidates at or above ReviewThreshold
 						if scoreRes.TotalScore >= e.Config.ReviewThreshold {
-							scoredCandidates = append(scoredCandidates, scoredCandidate{
+							ScoredCandidates = append(ScoredCandidates, ScoredCandidate{
 								Candidate: cand,
 								ScoreRes:  scoreRes,
 							})
@@ -260,17 +260,17 @@ func (e *MatchEngine) ExecuteJob(
 					}
 
 					// Step 2: Sort candidates by score descending, then by destination ID for determinism
-					sort.Slice(scoredCandidates, func(i, j int) bool {
-						if scoredCandidates[i].ScoreRes.TotalScore != scoredCandidates[j].ScoreRes.TotalScore {
-							return scoredCandidates[i].ScoreRes.TotalScore > scoredCandidates[j].ScoreRes.TotalScore
+					sort.Slice(ScoredCandidates, func(i, j int) bool {
+						if ScoredCandidates[i].ScoreRes.TotalScore != ScoredCandidates[j].ScoreRes.TotalScore {
+							return ScoredCandidates[i].ScoreRes.TotalScore > ScoredCandidates[j].ScoreRes.TotalScore
 						}
-						return scoredCandidates[i].Candidate.ID < scoredCandidates[j].Candidate.ID
+						return ScoredCandidates[i].Candidate.ID < ScoredCandidates[j].Candidate.ID
 					})
 
 					// Step 3: Create MatchResultItems with Rank, ScoreMargin, and DecisionNote
 					// DEFECT 4: Filter alternatives to retain only rank 1..MaxAlternativesPerSource
 					// This prevents review queue flooding while keeping ranking metrics unchanged
-					for rank, item := range scoredCandidates {
+					for rank, item := range ScoredCandidates {
 						cand := item.Candidate
 						scoreRes := item.ScoreRes
 						rankNum := rank + 1
@@ -283,11 +283,11 @@ func (e *MatchEngine) ExecuteJob(
 						// Compute score margin and runner-up score for rank-1
 						var margin float64
 						var runnerUpScore float64
-						if len(scoredCandidates) > 1 && rank == 0 {
-							runnerUpScore = scoredCandidates[1].ScoreRes.TotalScore
-							margin = scoredCandidates[0].ScoreRes.TotalScore - runnerUpScore
-						} else if rank == 0 && len(scoredCandidates) == 1 {
-							margin = scoredCandidates[0].ScoreRes.TotalScore
+						if len(ScoredCandidates) > 1 && rank == 0 {
+							runnerUpScore = ScoredCandidates[1].ScoreRes.TotalScore
+							margin = ScoredCandidates[0].ScoreRes.TotalScore - runnerUpScore
+						} else if rank == 0 && len(ScoredCandidates) == 1 {
+							margin = ScoredCandidates[0].ScoreRes.TotalScore
 						}
 
 						// Propose decision for rank-1 only
@@ -296,7 +296,7 @@ func (e *MatchEngine) ExecuteJob(
 
 						if rankNum == 1 {
 							// First-ranked candidate: apply decision rules via helper
-							canAutoMatch, decisionNote := isAutoMatchable(
+							canAutoMatch, decisionNote := IsAutoMatchable(
 								scoreRes.TotalScore,
 								runnerUpScore,
 								e.Config.AutoMatchThreshold,
@@ -345,7 +345,7 @@ func (e *MatchEngine) ExecuteJob(
 					}
 
 					// Step 4: Handle NO_MATCH (A4) - when source has no candidates >= ReviewThreshold
-					if len(scoredCandidates) == 0 && e.Config.EmitUnmatched {
+					if len(ScoredCandidates) == 0 && e.Config.EmitUnmatched {
 						note := ""
 						if len(candidates) == 0 {
 							note = "No blocking candidates found"

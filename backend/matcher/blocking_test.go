@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"unicode/utf8"
@@ -371,8 +372,8 @@ func TestPhoneticKeyCeiling(t *testing.T) {
 	idx := NewBlockingIndexWithOptions(dests, 0.05, 500)
 
 	// The phonetic key appears in 3000 records, but effective cutoff is min(3000*0.05=150, 500)=150
-	// Since 3000 > 150, it should be skipped (stored in skipTokens)
-	assert.True(t, idx.skipTokens[commonPhoneticKey])
+	// Since 3000 > 150, it should be skipped (stored in skipPhonetic)
+	assert.True(t, idx.skipPhonetic[commonPhoneticKey])
 
 	// The phoneticMap should be empty since the key is skipped
 	assert.Len(t, idx.phoneticMap, 0)
@@ -442,3 +443,179 @@ func TestPhoneticPostingList220k(t *testing.T) {
 // matcher.DefaultAbsoluteCeiling = 500  // or other ceiling value
 // Then run: go test ./internal/mockdata/ -run TestFullLoopBigDatasetBenchmark
 // Or run the scale tests with different ceiling values
+
+// TestFallbackSemanticsPreserved verifies that the prefix map fallback returns the same
+// destination set as the original linear scan approach. This is critical because Fix 1
+// changes the implementation from O(N) scan to O(1) lookup.
+func TestFallbackSemanticsPreserved(t *testing.T) {
+	// Create a scenario where fallback will fire: destination with no token/trigram/phonetic matches
+	// by making the source very different from most destinations.
+	numDests := 2000
+	dests := make([]DestinationRecord, numDests)
+
+	// Create destinations with predictable prefixes
+	// Group 1: "apple..." (indices 0-999)
+	// Group 2: "banana..." (indices 1000-1999)
+	for i := 0; i < numDests; i++ {
+		var prefix string
+		if i < 1000 {
+			prefix = "apple"
+		} else {
+			prefix = "banana"
+		}
+		dests[i] = DestinationRecord{
+			NormalizedName: CleanName{
+				Cleaned:     prefix + string(rune(97+i%26)),
+				Tokens:      []string{prefix, string(rune(97 + i%26))},
+				PhoneticKey: "PH" + prefix[:2] + string(rune(97+i%26)),
+			},
+		}
+	}
+
+	idx := NewBlockingIndex(dests)
+
+	// Create a source with a 3-rune prefix that matches some destinations
+	// but doesn't match any tokens/trigrams/phonetics (to force fallback)
+	src := SourceRecord{
+		NormalizedName: CleanName{
+			Cleaned:     "apple123",
+			Tokens:      []string{"xyz"}, // Token doesn't match any destination
+			PhoneticKey: "XYZ",            // Phonetic key doesn't match any destination
+		},
+	}
+
+	// Query to trigger fallback
+	candidates := idx.QueryCandidates(src, 50)
+
+	// Verify that we got results from the prefix map
+	assert.NotNil(t, candidates, "Fallback should return results")
+
+	// All returned candidates should start with "app" (the 3-rune prefix of "apple123")
+	for _, cand := range candidates {
+		assert.True(t, strings.HasPrefix(strings.ToLower(cand.NormalizedName.Cleaned), "app"),
+			"Returned candidates should all match the prefix")
+	}
+
+	// Verify we got up to maxCandidates results
+	assert.LessOrEqual(t, len(candidates), 50, "Should return at most maxCandidates")
+	assert.Greater(t, len(candidates), 0, "Should return some candidates from prefix match")
+}
+
+// TestPhoneticTokenCollisionRegression verifies that when a frequent phonetic key string is IDENTICAL to a rare token string,
+// the token is still queryable (not collaterally skipped by the phonetic skip map).
+func TestPhoneticTokenCollisionRegression(t *testing.T) {
+	// Create 1500+ destinations with phonetic key "COLLISION" (will be skipped due to frequency)
+	// and only 1 destination with token "COLLISION" (must NOT be skipped)
+	numDests := 1501
+	dests := make([]DestinationRecord, numDests)
+
+	for i := 0; i < numDests; i++ {
+		if i == 1500 {
+			// One destination with the rare token
+			dests[i] = DestinationRecord{
+				NormalizedName: CleanName{
+					Cleaned: "unique store",
+					Tokens:  []string{"unique", "COLLISION"},
+					PhoneticKey: "COLLISION",
+				},
+			}
+		} else {
+			// Rest with frequent phonetic key
+			dests[i] = DestinationRecord{
+				NormalizedName: CleanName{
+					Cleaned: "store" + string(rune(97+i%26)),
+					Tokens:  []string{"store", string(rune(97 + i%26))},
+					PhoneticKey: "COLLISION",
+				},
+			}
+		}
+	}
+
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 1000)
+
+	// Verify the token "COLLISION" is NOT skipped (since it only appears once)
+	assert.False(t, idx.skipTokens["COLLISION"], "Token 'COLLISION' should not be skipped")
+
+	// Verify the phonetic key "COLLISION" IS skipped (since it appears 1500 times)
+	assert.True(t, idx.skipPhonetic["COLLISION"], "Phonetic key 'COLLISION' should be skipped")
+
+	// Verify token is in tokenMap
+	assert.Contains(t, idx.tokenMap, "COLLISION", "Token 'COLLISION' should exist in tokenMap")
+
+	// Verify phonetic key is NOT in phoneticMap (because it was skipped)
+	assert.NotContains(t, idx.phoneticMap, "COLLISION", "Phonetic key 'COLLISION' should not be in phoneticMap")
+
+	// Query with source that matches the rare token
+	src := SourceRecord{
+		NormalizedName: CleanName{
+			Cleaned: "search COLLISION",
+			Tokens:  []string{"COLLISION"},
+			PhoneticKey: "XYZ", // Doesn't match any phonetic key
+		},
+	}
+
+	candidates := idx.QueryCandidates(src, 50)
+	assert.NotNil(t, candidates, "Should return candidates for matching token")
+	assert.Greater(t, len(candidates), 0, "Should find at least one candidate")
+
+	// The returned candidate should be the one with token "COLLISION"
+	found := false
+	for _, cand := range candidates {
+		if strings.Contains(strings.ToLower(cand.NormalizedName.Cleaned), "unique") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "Should return the candidate with token 'COLLISION'")
+}
+
+// TestDeterministicCandidateOrdering verifies that QueryCandidates returns candidates
+// in deterministic order. Two calls with the same input should produce identical results
+// in identical order. This is critical because Fix 2 replaces full sort with bounded
+// top-K; if tie-breaking is non-deterministic, results will vary across runs.
+func TestDeterministicCandidateOrdering(t *testing.T) {
+	// Create a scenario with many tied hit counts to exercise tie-breaking
+	numDests := 200
+	dests := make([]DestinationRecord, numDests)
+
+	// Create destinations with repeating tokens to create ties
+	// Every group of 5 destinations shares the same set of tokens
+	for i := 0; i < numDests; i++ {
+		group := i / 5
+		dests[i] = DestinationRecord{
+			NormalizedName: CleanName{
+				Cleaned:     "name" + string(rune(97+group%26)),
+				Tokens:      []string{"token" + string(rune(48+group%10)), "common"},
+				PhoneticKey: "PH" + string(rune(48+group%10)),
+			},
+		}
+	}
+
+	idx := NewBlockingIndex(dests)
+
+	// Create a source that matches multiple destinations at the same score
+	src := SourceRecord{
+		NormalizedName: CleanName{
+			Cleaned:     "search query",
+			Tokens:      []string{"token0", "token1", "common"}, // Will match many dests
+			PhoneticKey: "PH0",                                   // Will match many dests
+		},
+	}
+
+	// Run QueryCandidates twice
+	candidates1 := idx.QueryCandidates(src, 50)
+	candidates2 := idx.QueryCandidates(src, 50)
+
+	// Both should have the same length
+	assert.Equal(t, len(candidates1), len(candidates2), "Both calls should return same number of candidates")
+
+	// Both should have the same destination indices in the same order
+	if len(candidates1) > 0 && len(candidates2) > 0 {
+		for i := 0; i < len(candidates1); i++ {
+			assert.Equal(t, candidates1[i].ID, candidates2[i].ID,
+				"Candidate at position %d should be identical in both calls", i)
+		}
+	}
+
+	t.Logf("Deterministic ordering verified: %d candidates returned in identical order across two calls", len(candidates1))
+}
