@@ -64,6 +64,28 @@ type CleanName struct {
 	PhoneticKey      string   `json:"phonetic_key"`
 }
 
+func RunePrefix(s string, n int) string {
+	runes := []rune(s)
+	if n < len(runes) {
+		return string(runes[:n])
+	}
+	return s
+}
+
+func isThai(r rune) bool {
+	return r >= '฀' && r <= '๿'
+}
+
+func isThaiVowel(r rune) bool {
+	switch r {
+	case 'ะ', 'า', 'ำ', // U+0E30, U+0E32, U+0E33
+		'เ', 'แ', 'โ', 'ใ', 'ไ', 'ๅ', 'ๆ': // U+0E40-U+0E46
+		return true
+	default:
+		return false
+	}
+}
+
 // Normalize applies NFC normalization, strips titles/honorifics, cleans special chars,
 // extracts numbers, isolates distinctive tokens, and sorts tokens.
 func Normalize(input string) CleanName {
@@ -73,16 +95,6 @@ func Normalize(input string) CleanName {
 
 	// Extract numbers before stripping
 	numMatches := reNumbers.FindAllString(lower, -1)
-
-	// Strip corporate and personal titles case-insensitively
-	for _, title := range corporateTitles {
-		tLower := strings.ToLower(title)
-		lower = strings.ReplaceAll(lower, tLower, " ")
-	}
-	for _, title := range personalTitles {
-		tLower := strings.ToLower(title)
-		lower = strings.ReplaceAll(lower, tLower, " ")
-	}
 
 	// Strip non-alphanumeric symbols
 	text := reCleanChars.ReplaceAllString(lower, " ")
@@ -94,48 +106,203 @@ func Normalize(input string) CleanName {
 		text = strings.TrimSpace(reMultiSpace.ReplaceAllString(reCleanChars.ReplaceAllString(strings.ToLower(normText), " "), " "))
 	}
 
-	// Tokenize and sort
-	rawTokens := strings.Fields(text)
-	tokens := make([]string, len(rawTokens))
-	copy(tokens, rawTokens)
+	// Tokenize
+	tokens := strings.Fields(text)
 
+	// Strip corporate and personal titles using token-based approach (CRITICAL: C1)
+	tokens = stripTitlesFromTokens(tokens)
+
+	// Rejoin tokens to apply synonym replacement (C2)
+	rejoined := strings.Join(tokens, " ")
+
+	// Apply synonym replacement (C2)
+	rejoined = ReplaceSynonymsInText(rejoined)
+
+	// Re-tokenize after synonym replacement (since canonical forms may be multi-word)
+	tokens = strings.Fields(rejoined)
+
+	// Recompute text after all processing
+	text = strings.Join(tokens, " ")
+
+	// Filter out generic words for distinctive tokens
 	var distinctive []string
-	for _, tok := range rawTokens {
+	for _, tok := range tokens {
 		if !genericWords[tok] {
 			distinctive = append(distinctive, tok)
 		}
 	}
 
-	sort.Strings(tokens)
-	sortedTokens := strings.Join(tokens, " ")
+	// Sort tokens
+	sortedTokens := make([]string, len(tokens))
+	copy(sortedTokens, tokens)
+	sort.Strings(sortedTokens)
+	sortedTokensStr := strings.Join(sortedTokens, " ")
 
 	return CleanName{
 		Raw:               input,
 		Cleaned:           text,
-		SortedTokens:     sortedTokens,
-		Tokens:           rawTokens,
+		SortedTokens:     sortedTokensStr,
+		Tokens:           tokens,
 		DistinctiveTokens: distinctive,
 		Numbers:          numMatches,
 		PhoneticKey:      GeneratePhoneticKey(text),
 	}
 }
 
+func stripTitlesFromTokens(tokens []string) []string {
+	if len(tokens) == 0 {
+		return tokens
+	}
+
+	// Collect tokens to remove by index
+	removeIndices := make(map[int]bool)
+
+	// Process multi-word titles longest-first
+	titleList := make([]string, 0, len(corporateTitles)+len(personalTitles))
+	titleList = append(titleList, corporateTitles...)
+	titleList = append(titleList, personalTitles...)
+
+	// Sort by length descending to handle multi-word titles first
+	sort.Slice(titleList, func(i, j int) bool {
+		return len(titleList[i]) > len(titleList[j])
+	})
+
+	// For multi-word titles: try to match consecutive token sequences
+	for i := 0; i < len(tokens); i++ {
+		for length := 1; length <= len(titleList); length++ {
+			if i+length > len(tokens) {
+				break
+			}
+			// Build candidate phrase from tokens
+			candidate := strings.Join(tokens[i:i+length], " ")
+			candLower := strings.ToLower(candidate)
+			for _, title := range titleList {
+				if strings.ToLower(title) == candLower {
+					// Mark tokens for removal
+					for j := i; j < i+length; j++ {
+						removeIndices[j] = true
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// For single tokens, also consider Thai-specific prefix/suffix stripping (C1.4)
+	for i, tok := range tokens {
+		if removeIndices[i] {
+			continue
+		}
+
+		// Only apply if it's a Thai token
+		if !isThaiToken(tok) {
+			continue
+		}
+
+		// Strip corporate prefixes as prefix only (บริษัท)
+		if strings.HasPrefix(tok, "บริษัท") && len(tok) > len("บริษัท") {
+			after := strings.TrimPrefix(tok, "บริษัท")
+			if len([]rune(after)) >= 2 {
+				tokens[i] = after
+				continue
+			}
+		}
+
+		// Strip corporate suffixes as suffix only (จำกัด, บจก, บมจ, หจก)
+		corpSuffixes := []string{"จำกัด", "บจก", "บมจ", "หจก"}
+		for _, suf := range corpSuffixes {
+			if strings.HasSuffix(tok, suf) && len(tok) > len(suf) {
+				before := strings.TrimSuffix(tok, suf)
+				if len([]rune(before)) >= 2 {
+					tokens[i] = before
+					break
+				}
+			}
+		}
+
+		// Strip personal titles: only as prefix, and not if result would be just a single Thai character
+		personalPrefixes := []string{"นาย", "นาง", "น.ส.", "ด.ช.", "ด.ญ.", "คุณ"}
+		for _, pref := range personalPrefixes {
+			if strings.HasPrefix(tok, pref) && len(tok) > len(pref) {
+				after := strings.TrimPrefix(tok, pref)
+				if len([]rune(after)) >= 2 {
+					tokens[i] = after
+					break
+				}
+			}
+		}
+	}
+
+	// Remove marked tokens
+	result := make([]string, 0, len(tokens))
+	for i, tok := range tokens {
+		if !removeIndices[i] {
+			result = append(result, tok)
+		}
+	}
+
+	return result
+}
+
+func isThaiToken(s string) bool {
+	for _, r := range s {
+		if !isThai(r) && !unicode.IsSpace(r) && !unicode.IsPunct(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func StripToneMarks(s string) string {
 	return reThaiDiacritics.ReplaceAllString(s, "")
 }
 
+// GeneratePhoneticKey creates a consonant skeleton of the input string
 func GeneratePhoneticKey(s string) string {
+	// Strip tone marks and Thai standalone vowels
 	sClean := StripToneMarks(s)
-	var consonants []rune
-	for _, r := range sClean {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			consonants = append(consonants, r)
+
+	// Define Thai vowels to strip: U+0E30, U+0E32, U+0E33, U+0E40-U+0E46, U+0E45
+	reThaiVowels := regexp.MustCompile(`[\x{0E30}\x{0E32}\x{0E33}\x{0E40}-\x{0E46}\x{0E45}]`)
+	sClean = reThaiVowels.ReplaceAllString(sClean, "")
+
+	// Convert to rune slice
+	runes := []rune(sClean)
+	result := []rune{}
+
+	// Process each rune
+	leadingVowel := true
+	for _, r := range runes {
+		// Drop whitespace and non-letter/digit
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			continue
+		}
+
+		// Handle English vowels
+		if !isThai(r) {
+			lowR := unicode.ToLower(r)
+			isVowel := lowR == 'a' || lowR == 'e' || lowR == 'i' || lowR == 'o' || lowR == 'u'
+			// Keep leading vowel; drop others
+			if isVowel {
+				if leadingVowel {
+					result = append(result, r)
+				}
+				// else: drop non-leading vowels
+			} else {
+				result = append(result, r)
+			}
+			leadingVowel = false
+		} else {
+			// Thai consonant/digit/letter: keep if it's not a vowel (already stripped)
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				result = append(result, r)
+				leadingVowel = false
+			}
 		}
 	}
-	if len(consonants) > 8 {
-		return string(consonants[:8])
-	}
-	return string(consonants)
+
+	// Truncate to 8 runes
+	return RunePrefix(string(result), 8)
 }
 
 // CheckBilingualMatch checks if Thai and English tokens have a mapped transliteration match.
