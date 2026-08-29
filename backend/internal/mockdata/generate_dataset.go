@@ -15,6 +15,30 @@ type LabeledPair struct {
 	Category    string
 }
 
+// Thai realistic homophone consonant classes (commonly-occurring substitutions)
+var thaiInitialHomophones = map[rune][]rune{
+	'ศ': {'ส'},           // s class
+	'ส': {'ศ'},           // s class
+	'ท': {'ธ'},           // th class
+	'ธ': {'ท'},           // th class
+	'พ': {'ภ'},           // ph class
+	'ภ': {'พ'},           // ph class
+	'ณ': {'น'},           // n class
+	'น': {'ณ'},           // n class
+}
+
+// applyConsonantVariant replaces the first Thai consonant with a homophone
+func applyConsonantVariant(text string, rng *rand.Rand) string {
+	runes := []rune(text)
+	for i, r := range runes {
+		if homophones, exists := thaiInitialHomophones[r]; exists && len(homophones) > 0 {
+			runes[i] = homophones[rng.Intn(len(homophones))]
+			break
+		}
+	}
+	return string(runes)
+}
+
 // GenerateBigMockDataset generates N paired records with ground-truth labels for evaluation.
 // It includes positive matches and hard negative categories.
 func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.DestinationRecord, map[string]bool, []LabeledPair) {
@@ -185,6 +209,182 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 			Destination: destEngRec,
 			IsMatch:     true,
 			Category:    "ENGLISH_PERSONAL_VARIATION",
+		})
+		pairID++
+	}
+
+	// NEW POSITIVE CATEGORIES: Thai Spelling Variants (4 categories, unpadded and curated)
+	variantCount := (count * 1) / 20 // 5% of dataset for indexed categories
+
+	// Category 4: THAI_VARIANT_SHORT_GIVEN - Homophone consonant substitution in short names
+	shortGivenPairs := []struct {
+		base, variant string
+	}{
+		{"ศิริ", "สิริ"},     {"ณัฐ", "นัฐ"},       {"ธนา", "ทนา"},       {"ภัทร", "พัทร"},
+		{"ศักดิ์", "สักดิ์"},  {"สุข", "สุก"},       {"ชัย", "ไชย"},       {"เอก", "เอ็ก"},
+		{"โชค", "ชค"},       {"ไพศาล", "พิศาล"},   {"ธีร์", "ทีร์"},     {"วุฒิ", "วุฐิ"},
+		{"จรัส", "จรัซ"},     {"ปิติ", "ปีติ"},     {"สุวรรณ", "สุวัน"},
+	}
+	for _, pair := range shortGivenPairs {
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-THAI-VAR-SHORT-%05d", pairID),
+			CustomerNameRaw: pair.base,
+			NormalizedName:  matcher.Normalize(pair.base),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-THAI-VAR-SHORT-%05d", pairID),
+			CustomerNameRaw: pair.variant,
+			NormalizedName:  matcher.Normalize(pair.variant),
+			TransactionDate: baseDate,
+		}
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "THAI_VARIANT_SHORT_GIVEN",
+		})
+		pairID++
+	}
+
+	// Category 5: THAI_VARIANT_FULL_NAME - Homophone substitution in full names (indexed to avoid collision)
+	for i := 0; i < variantCount; i++ {
+		baseFN := fmt.Sprintf("%s%d", thaiFirstNames[i%len(thaiFirstNames)], i+500)
+		baseLN := fmt.Sprintf("%s%d", thaiLastNames[i%len(thaiLastNames)], i+500)
+		fullName := fmt.Sprintf("%s %s", baseFN, baseLN)
+		if i%2 == 0 {
+			baseFN = applyConsonantVariant(baseFN, rng)
+		} else {
+			baseLN = applyConsonantVariant(baseLN, rng)
+		}
+		variant := fmt.Sprintf("%s %s", baseFN, baseLN)
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-THAI-VAR-FULL-%05d", pairID),
+			CustomerNameRaw: fullName,
+			NormalizedName:  matcher.Normalize(fullName),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-THAI-VAR-FULL-%05d", pairID),
+			CustomerNameRaw: variant,
+			NormalizedName:  matcher.Normalize(variant),
+			TransactionDate: baseDate,
+		}
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "THAI_VARIANT_FULL_NAME",
+		})
+		pairID++
+	}
+
+	// Category 6: THAI_VARIANT_LEADING_VOWEL - Vowel position and ใ/ไ confusion (real closed-class variants)
+	// Sub-class A: ใ/ไ confusion (mai muan vs mai malai - THE classic Thai spelling error)
+	maiMuanVariants := []struct {
+		base, variant string
+	}{
+		{"ใจ", "ไจ"}, {"ใจดี", "ไจดี"}, {"ใจงาม", "ไจงาม"}, {"ใจเย็น", "ไจเย็น"},
+		{"ใหม่", "ไหม่"}, {"ใหญ่", "ไหญ่"}, {"ใส", "ไส"}, {"ใสสอาด", "ไสสอาด"},
+		{"ให้", "ไห้"}, {"ใช้", "ไช้"}, {"ใช่", "ไช่"}, {"น้ำใจ", "น้ำไจ"},
+		{"สุใจ", "สุไจ"},
+	}
+	// Sub-class B: Leading vowel reordering (written before consonant, pronounced after - phonetically identical)
+	leadingVowelReorderPairs := []struct {
+		base, variant string
+	}{
+		{"ชัย", "ไชย"}, {"ชัยวัฒน์", "ไชยวัฒน์"}, {"ชัยยา", "ไชยยา"},
+	}
+	allLeadingVowelPairs := append(maiMuanVariants, leadingVowelReorderPairs...)
+	for _, pair := range allLeadingVowelPairs {
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-THAI-VAR-VOWEL-%05d", pairID),
+			CustomerNameRaw: pair.base,
+			NormalizedName:  matcher.Normalize(pair.base),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-THAI-VAR-VOWEL-%05d", pairID),
+			CustomerNameRaw: pair.variant,
+			NormalizedName:  matcher.Normalize(pair.variant),
+			TransactionDate: baseDate,
+		}
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "THAI_VARIANT_LEADING_VOWEL",
+		})
+		pairID++
+	}
+
+	// Category 7: THAI_VARIANT_CORPORATE - Corporate names with homophone variant (indexed)
+	for i := 0; i < variantCount; i++ {
+		baseName := fmt.Sprintf("%s%d", corpPrefixes[i%len(corpPrefixes)], i+1500)
+		variant := applyConsonantVariant(baseName, rng)
+		srcCorpRaw := fmt.Sprintf("บริษัท %s เทคโนโลยี จำกัด", baseName)
+		destCorpRaw := fmt.Sprintf("บริษัท %s เทคโนโลยี จำกัด", variant)
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-THAI-VAR-CORP-%05d", pairID),
+			CustomerNameRaw: srcCorpRaw,
+			NormalizedName:  matcher.Normalize(srcCorpRaw),
+			TransactionDate: baseDate,
+			TransactionType: "TRANSFER",
+		}
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-THAI-VAR-CORP-%05d", pairID),
+			CustomerNameRaw: destCorpRaw,
+			NormalizedName:  matcher.Normalize(destCorpRaw),
+			TransactionDate: baseDate,
+		}
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "THAI_VARIANT_CORPORATE",
 		})
 		pairID++
 	}

@@ -76,16 +76,27 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 
 	// Per-category stats
 	categoryStats := make(map[string]map[string]int)
+	// Score tracking for Thai variant categories (for distribution reporting)
+	categoryScores := make(map[string][]float64) // category -> slice of rank-1 scores for true matches
 
 	for _, src := range sources {
 		truePartnerID := sourceTruePartner[src.ID]
 		autoMatchedID := autoMatches[src.ID]
 
-		// Ensure category stats map exists
+		// Ensure category stats map exists and collect score for true matches
 		for _, pair := range labeledPairs {
 			if pair.Source.ID == src.ID {
 				if _, exists := categoryStats[pair.Category]; !exists {
 					categoryStats[pair.Category] = make(map[string]int)
+				}
+				// Collect score for this source if it's a true match (positive case)
+				if pair.IsMatch {
+					for _, res := range results {
+						if res.SourceID == src.ID && res.Rank == 1 {
+							categoryScores[pair.Category] = append(categoryScores[pair.Category], res.ConfidenceScore)
+							break
+						}
+					}
 				}
 				break
 			}
@@ -226,6 +237,82 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		top1Accuracy = float64(top1Correct) / float64(top1Total)
 	}
 
+	// Calculate score distributions for Thai variant categories
+	thaiVariantCategories := []string{
+		"THAI_VARIANT_SHORT_GIVEN",
+		"THAI_VARIANT_FULL_NAME",
+		"THAI_VARIANT_LEADING_VOWEL",
+		"THAI_VARIANT_CORPORATE",
+	}
+
+	type scoreDistribution struct {
+		Category        string
+		MeanScore       float64
+		TotalPairs      int // Total pairs in this category
+		CountAuto       int // >= 0.90
+		CountReview     int // >= 0.75 (estimated threshold) and < 0.90
+		CountBelowThresh int // < 0.75
+		NotRetrieved    int // Pairs where true partner never ranked #1
+	}
+	var distributions []scoreDistribution
+
+	// Count total pairs per category from labeledPairs
+	categoryPairCounts := make(map[string]int)
+	for _, pair := range labeledPairs {
+		if pair.IsMatch && (pair.Category == "THAI_VARIANT_SHORT_GIVEN" ||
+			pair.Category == "THAI_VARIANT_FULL_NAME" ||
+			pair.Category == "THAI_VARIANT_LEADING_VOWEL" ||
+			pair.Category == "THAI_VARIANT_CORPORATE") {
+			categoryPairCounts[pair.Category]++
+		}
+	}
+
+	for _, cat := range thaiVariantCategories {
+		scores := categoryScores[cat]
+		totalPairs := categoryPairCounts[cat]
+		if totalPairs == 0 {
+			continue
+		}
+
+		// Calculate mean score
+		var sumScore float64
+		for _, s := range scores {
+			sumScore += s
+		}
+		var meanScore float64
+		if len(scores) > 0 {
+			meanScore = sumScore / float64(len(scores))
+		}
+
+		// Count distribution (using 0.90 and 0.75 as thresholds)
+		countAuto := 0
+		countReview := 0
+		countBelow := 0
+
+		for _, s := range scores {
+			if s >= 0.90 {
+				countAuto++
+			} else if s >= 0.75 {
+				countReview++
+			} else {
+				countBelow++
+			}
+		}
+
+		// "Not retrieved" = pairs that had true partner but it never ranked #1
+		notRetrieved := totalPairs - len(scores)
+
+		distributions = append(distributions, scoreDistribution{
+			Category:         cat,
+			MeanScore:        meanScore,
+			TotalPairs:       totalPairs,
+			CountAuto:        countAuto,
+			CountReview:      countReview,
+			CountBelowThresh: countBelow,
+			NotRetrieved:     notRetrieved,
+		})
+	}
+
 	// ===== REPORT =====
 	t.Log("==========================================================")
 	t.Log("         DECISION-LEVEL BENCHMARK REPORT (v2)             ")
@@ -263,6 +350,25 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	t.Logf("----------------------------------------------------------")
 	t.Logf(" Throughput Speed     : %.2f records/sec", recPerSec)
 	t.Log("==========================================================")
+
+	// Thai Spelling Variant Score Distributions
+	if len(distributions) > 0 {
+		t.Log("")
+		t.Log("==========================================================")
+		t.Log("    THAI SPELLING VARIANT SCORE DISTRIBUTIONS              ")
+		t.Log("==========================================================")
+		t.Log("Category                    |  n  | Mean  | Auto (≥0.90) | Review | Below | NotRetr")
+		t.Log("----------------------------|-----|-------|--------------|--------|-------|--------")
+		for _, d := range distributions {
+			autoPercent := 0.0
+			if d.CountAuto+d.CountReview+d.CountBelowThresh > 0 {
+				autoPercent = float64(d.CountAuto) / float64(d.CountAuto+d.CountReview+d.CountBelowThresh) * 100.0
+			}
+			t.Logf("%-28s | %3d | %.3f | %d (%5.1f%%)    | %d      | %d     | %d",
+				d.Category, d.TotalPairs, d.MeanScore, d.CountAuto, autoPercent, d.CountReview, d.CountBelowThresh, d.NotRetrieved)
+		}
+		t.Log("==========================================================")
+	}
 
 	// Structural invariants that MUST always hold
 	if maxDestinationsClaimedBySingleSource > 1 {
