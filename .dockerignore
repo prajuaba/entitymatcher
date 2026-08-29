@@ -1,0 +1,10 @@
+.git
+node_modules
+frontend/dist
+backend/server
+*.log
+scratch
+.tmp
+tmp
+.DS_Store
+.env.local
