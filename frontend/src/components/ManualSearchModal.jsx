@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { Search, X, Link, Calendar } from 'lucide-react'
+import { apiFetch } from '../lib/api.js'
 
 export function ManualSearchModal() {
   const { isManualSearchOpen, setManualSearchOpen, selectedMatch, manualLink, batchID } = useMatcherStore()
@@ -17,7 +18,7 @@ export function ManualSearchModal() {
   const handleSearch = async () => {
     setSearching(true)
     try {
-      const res = await fetch(`/api/destinations/search?batch_id=${batchID}&query=${encodeURIComponent(query)}`)
+      const res = await apiFetch(`/api/destinations/search?batch_id=${batchID}&query=${encodeURIComponent(query)}`)
       if (res.ok) {
         const data = await res.json()
         setCandidates(data || [])

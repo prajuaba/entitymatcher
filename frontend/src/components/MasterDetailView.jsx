@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { CandidateCard } from './CandidateCard'
+import { apiFetch, downloadBlob, getAccessToken } from '../lib/api.js'
 import { Search, Filter, ChevronLeft, ChevronRight, CheckCircle, AlertCircle, XCircle, Download, RefreshCcw } from 'lucide-react'
 
 export function MasterDetailView() {
@@ -24,12 +25,23 @@ export function MasterDetailView() {
     fetchResults()
   }, [])
 
+  const handleExportCSV = async () => {
+    try {
+      const res = await apiFetch(`/api/export/csv?batch_id=${batchID}`)
+      const blob = await res.blob()
+      downloadBlob(blob, `matches-export-${new Date().toISOString()}.csv`)
+    } catch (e) {
+      console.error('Failed to export CSV:', e)
+    }
+  }
+
   const filterTabs = [
     { key: 'ALL', label: 'All Pairs' },
     { key: 'AUTO_MATCHED', label: 'Auto Matched (≥90%)' },
     { key: 'REVIEW_NEEDED', label: 'Review Queue (70-89%)' },
     { key: 'CONFIRMED', label: 'Confirmed' },
     { key: 'REJECTED', label: 'Rejected' },
+    { key: 'NO_MATCH', label: 'Unmatched', icon: 'unmatched' },
   ]
 
   const totalPages = Math.ceil(totalCount / limit) || 1
@@ -68,13 +80,12 @@ export function MasterDetailView() {
             />
           </div>
 
-          <a
-            href={`/api/export/csv?batch_id=${batchID}`}
-            download
+          <button
+            onClick={handleExportCSV}
             className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
           >
             <Download className="w-3.5 h-3.5 text-slate-400" /> Export CSV
-          </a>
+          </button>
         </div>
       </div>
 

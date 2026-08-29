@@ -2,9 +2,10 @@ import React, { useState } from 'react'
 import { TokenDiff } from './TokenDiff'
 import { CheckCircle2, XCircle, Sparkles, Search, Calendar, FileText, Activity } from 'lucide-react'
 import { useMatcherStore } from '../store/useMatcherStore'
+import { can } from '../lib/rbac'
 
 export function CandidateCard({ matchItem }) {
-  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading } = useMatcherStore()
+  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user } = useMatcherStore()
   const [reviewerId, setReviewerId] = useState('reviewer_john')
   const [commentText, setCommentText] = useState('')
 
@@ -18,7 +19,7 @@ export function CandidateCard({ matchItem }) {
     )
   }
 
-  const { source, destination, confidence_score, name_score, date_score, jw_score, lev_score, token_score, trigram_score, match_status, match_reasons } = matchItem
+  const { source, destination, confidence_score, rank, score_margin, decision_note, name_score, date_score, jw_score, lev_score, token_score, trigram_score, match_status, match_reasons } = matchItem
 
   const getStatusBadge = (status) => {
     switch (status) {
@@ -30,9 +31,57 @@ export function CandidateCard({ matchItem }) {
         return <span className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full text-xs font-semibold">REVIEW NEEDED (70-89%)</span>
       case 'REJECTED':
         return <span className="px-3 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/30 rounded-full text-xs font-semibold">REJECTED</span>
+      case 'NO_MATCH':
+        return <span className="px-3 py-1 bg-slate-700/50 text-slate-300 border border-slate-600/50 rounded-full text-xs font-semibold">NO MATCH</span>
       default:
         return <span className="px-3 py-1 bg-slate-800 text-slate-400 border border-slate-700 rounded-full text-xs font-semibold">{status}</span>
     }
+  }
+
+  // Handle NO_MATCH case - no destination
+  if (match_status === 'NO_MATCH' || !destination) {
+    return (
+      <div className="flex flex-col h-full bg-slate-900/60 rounded-xl border border-slate-800 overflow-y-auto p-6 space-y-6">
+        {/* Header Info */}
+        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div>
+            <span className="text-xs font-mono text-slate-500 uppercase tracking-widest">Match ID: {matchItem.id}</span>
+            <h2 className="text-xl font-bold text-slate-100 mt-0.5">Unmatched Record</h2>
+          </div>
+          <div>{getStatusBadge(match_status)}</div>
+        </div>
+
+        {/* Source Only Card */}
+        <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between text-xs font-semibold text-sky-400 uppercase tracking-wider">
+            <span>Source Record</span>
+            <span className="font-mono bg-sky-950 text-sky-300 px-2 py-0.5 rounded border border-sky-800/40">{source?.reference_id}</span>
+          </div>
+          <div className="text-lg font-semibold text-slate-100 leading-snug">{source?.customer_name_raw}</div>
+          <div className="flex items-center gap-4 text-xs text-slate-400 pt-2 border-t border-slate-900">
+            <span className="flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5 text-slate-500" /> {source?.transaction_date ? source.transaction_date.slice(0, 10) : '-'}</span>
+            {source?.transaction_type && <span className="bg-slate-900 px-2 py-0.5 rounded text-slate-400 font-mono">{source.transaction_type}</span>}
+          </div>
+        </div>
+
+        {/* Decision Note */}
+        {decision_note && (
+          <div className="bg-amber-950/40 p-4 rounded-xl border border-amber-800/40 space-y-2">
+            <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wider">Decision Note</h3>
+            <p className="text-xs text-slate-300">{decision_note}</p>
+          </div>
+        )}
+
+        {/* Action Button */}
+        <button
+          onClick={() => setManualSearchOpen(true)}
+          className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-2"
+        >
+          <Search className="w-4 h-4" />
+          Find Match Manually
+        </button>
+      </div>
+    )
   }
 
   return (
@@ -44,6 +93,20 @@ export function CandidateCard({ matchItem }) {
           <h2 className="text-xl font-bold text-slate-100 mt-0.5">Match Pair Analysis</h2>
         </div>
         <div>{getStatusBadge(match_status)}</div>
+      </div>
+
+      {/* Rank & Decision Note */}
+      <div className="flex flex-wrap items-center gap-3">
+        {rank && rank > 1 && (
+          <span className="px-2.5 py-1 bg-amber-950/80 text-amber-300 border border-amber-700/50 rounded-lg text-xs font-semibold">
+            #{rank} Alternative Match
+          </span>
+        )}
+        {decision_note && (
+          <div className="flex-1 px-3 py-2 bg-slate-800/50 border border-slate-700/50 rounded-lg">
+            <p className="text-xs text-slate-300">{decision_note}</p>
+          </div>
+        )}
       </div>
 
       {/* Source vs Destination Comparison Cards */}
@@ -174,61 +237,69 @@ export function CandidateCard({ matchItem }) {
 
       {/* Reviewer Compliance Action Bar */}
       <div className="space-y-3 pt-3 border-t border-slate-800">
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <input
-            type="text"
-            placeholder="Reviewer User ID (e.g. op_john)"
-            value={reviewerId}
-            onChange={(e) => setReviewerId(e.target.value)}
-            className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 font-mono"
-          />
-          <input
-            type="text"
-            placeholder="Compliance Rationale / Comments (e.g. Verified Tax ID match with bank registry)"
-            value={commentText}
-            onChange={(e) => setCommentText(e.target.value)}
-            className="flex-1 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200"
-          />
-        </div>
+        {user && can(user, 'CONFIRM_MATCH') ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <input
+                type="text"
+                placeholder="Reviewer User ID (e.g. op_john)"
+                value={reviewerId}
+                onChange={(e) => setReviewerId(e.target.value)}
+                className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 font-mono"
+              />
+              <input
+                type="text"
+                placeholder="Compliance Rationale / Comments (e.g. Verified Tax ID match with bank registry)"
+                value={commentText}
+                onChange={(e) => setCommentText(e.target.value)}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200"
+              />
+            </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                updateMatchAction(matchItem.id, 'CONFIRM', reviewerId || 'reviewer_op', commentText)
-                setCommentText('')
-              }}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium text-xs flex items-center gap-1.5 transition shadow-sm"
-            >
-              <CheckCircle2 className="w-4 h-4" /> Approve / Confirm
-            </button>
-            <button
-              onClick={() => {
-                updateMatchAction(matchItem.id, 'REJECT', reviewerId || 'reviewer_op', commentText)
-                setCommentText('')
-              }}
-              className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
-            >
-              <XCircle className="w-4 h-4" /> Reject Match
-            </button>
-          </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    updateMatchAction(matchItem.id, 'CONFIRM', reviewerId || 'reviewer_op', commentText)
+                    setCommentText('')
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium text-xs flex items-center gap-1.5 transition shadow-sm"
+                >
+                  <CheckCircle2 className="w-4 h-4" /> Approve / Confirm
+                </button>
+                <button
+                  onClick={() => {
+                    updateMatchAction(matchItem.id, 'REJECT', reviewerId || 'reviewer_op', commentText)
+                    setCommentText('')
+                  }}
+                  className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
+                >
+                  <XCircle className="w-4 h-4" /> Reject Match
+                </button>
+              </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => evaluateLLM(matchItem)}
-              disabled={loading}
-              className="px-3.5 py-2 bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-700/50 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
-            >
-              <Sparkles className="w-4 h-4 text-purple-400" /> LLM Edge-Case Resolver
-            </button>
-            <button
-              onClick={() => setManualSearchOpen(true)}
-              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
-            >
-              <Search className="w-4 h-4 text-slate-400" /> Manual Candidate Search
-            </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => evaluateLLM(matchItem)}
+                  disabled={loading}
+                  className="px-3.5 py-2 bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-700/50 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
+                >
+                  <Sparkles className="w-4 h-4 text-purple-400" /> LLM Edge-Case Resolver
+                </button>
+                <button
+                  onClick={() => setManualSearchOpen(true)}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"
+                >
+                  <Search className="w-4 h-4 text-slate-400" /> Manual Candidate Search
+                </button>
+              </div>
+            </div>
+          </>
+        ) : user && user.role === 'AUDITOR' ? (
+          <div className="p-3 bg-amber-950/40 border border-amber-800/40 rounded-lg">
+            <p className="text-xs text-amber-300">Audit view only — you do not have permission to modify matches.</p>
           </div>
-        </div>
+        ) : null}
       </div>
     </div>
   )

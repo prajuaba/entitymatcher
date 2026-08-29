@@ -7,23 +7,73 @@ import { FileUpload } from './components/FileUpload'
 import { AuditDashboard } from './components/AuditDashboard'
 import { ManualSearchModal } from './components/ManualSearchModal'
 import { LLMAnalysisModal } from './components/LLMAnalysisModal'
-import { Cpu, Sliders, Activity, Database, FileCheck, ShieldCheck } from 'lucide-react'
+import { LoginScreen } from './components/LoginScreen'
+import { Cpu, Sliders, Activity, Database, FileCheck, ShieldCheck, LogOut } from 'lucide-react'
+import { can } from './lib/rbac'
 
 export function App() {
-  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount } = useMatcherStore()
+  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth } = useMatcherStore()
 
   useEffect(() => {
-    // Load benchmark dataset on boot for out-of-the-box demonstration
-    loadSeedDataset()
+    // Initialize auth on mount
+    initAuth()
+  }, [])
+
+  useEffect(() => {
+    if (authChecked && user) {
+      // Load benchmark dataset on boot for out-of-the-box demonstration
+      loadSeedDataset()
+    }
+  }, [authChecked])
+
+  // Listen for unauthorized events
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      logout()
+    }
+    window.addEventListener('auth:unauthorized', handleUnauthorized)
+    return () => window.removeEventListener('auth:unauthorized', handleUnauthorized)
   }, [])
 
   const navItems = [
-    { id: 'results', label: 'Review Queue', icon: FileCheck },
-    { id: 'progress', label: 'Execution Dashboard', icon: Activity, badge: progress.status === 'RUNNING' },
-    { id: 'audit', label: 'Audit Trail & Governance', icon: ShieldCheck },
-    { id: 'config', label: 'Engine Configuration', icon: Sliders },
-    { id: 'ingestion', label: 'Ingestion & Benchmarks', icon: Database },
+    { id: 'results', label: 'Review Queue', icon: FileCheck, capability: 'REVIEW_QUEUE' },
+    { id: 'progress', label: 'Execution Dashboard', icon: Activity, badge: progress.status === 'RUNNING', capability: 'EXECUTION_DASHBOARD' },
+    { id: 'audit', label: 'Audit Trail & Governance', icon: ShieldCheck, capability: 'AUDIT_TRAIL' },
+    { id: 'config', label: 'Engine Configuration', icon: Sliders, capability: 'ENGINE_CONFIG' },
+    { id: 'ingestion', label: 'Ingestion & Benchmarks', icon: Database, capability: 'INGESTION_BENCHMARKS' },
   ]
+
+  // Filter nav items based on user role
+  const allowedNavItems = navItems.filter(item => !item.capability || can(user, item.capability))
+
+  // Redirect to first allowed tab if current tab is not allowed
+  useEffect(() => {
+    if (authChecked && user && activeTab) {
+      const isAllowed = allowedNavItems.some(item => item.id === activeTab)
+      if (!isAllowed && allowedNavItems.length > 0) {
+        setActiveTab(allowedNavItems[0].id)
+      }
+    }
+  }, [authChecked, user])
+
+  // Show loading state while auth is being checked
+  if (!authChecked) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-slate-950 text-slate-100">
+        <div className="flex flex-col items-center gap-4">
+          <div className="p-3 bg-gradient-to-tr from-sky-600 to-emerald-500 text-white rounded-xl shadow-lg shadow-sky-950 animate-pulse">
+            <Cpu className="w-8 h-8" />
+          </div>
+          <p className="text-sm text-slate-400">Initializing...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Show login screen if not authenticated
+  if (!user) {
+    return <LoginScreen />
+  }
 
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans antialiased overflow-hidden">
@@ -43,7 +93,7 @@ export function App() {
 
         {/* Tab Navigation Controls */}
         <nav className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
-          {navItems.map((item) => {
+          {allowedNavItems.map((item) => {
             const Icon = item.icon
             const isActive = activeTab === item.id
             return (
@@ -63,6 +113,30 @@ export function App() {
             )
           })}
         </nav>
+
+        {/* User Profile & Logout */}
+        <div className="flex items-center gap-3 ml-auto">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/80 rounded-lg border border-slate-800">
+            <div>
+              <p className="text-xs font-semibold text-slate-100">{user.name}</p>
+              <p className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                user.role === 'ADMIN' ? 'bg-rose-950/80 text-rose-300 border-rose-700/50' :
+                user.role === 'ENGINEER' ? 'bg-sky-950/80 text-sky-300 border-sky-700/50' :
+                user.role === 'REVIEWER' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50' :
+                'bg-amber-950/80 text-amber-300 border-amber-700/50'
+              }`}>
+                {user.role}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={logout}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            Logout
+          </button>
+        </div>
       </header>
 
       {/* Main Content Area */}

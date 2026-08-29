@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { ShieldCheck, Download, Filter, UserCheck, CheckCircle2, XCircle, Clock, FileSpreadsheet } from 'lucide-react'
+import { apiFetch, downloadBlob } from '../lib/api.js'
 
 export function AuditDashboard() {
-  const { currentBatchId } = useMatcherStore()
+  const { currentBatchId, batchID } = useMatcherStore()
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(false)
   const [userFilter, setUserFilter] = useState('')
@@ -12,10 +13,11 @@ export function AuditDashboard() {
   const fetchAuditLogs = async () => {
     setLoading(true)
     try {
-      const batchParam = currentBatchId ? `batch_id=${currentBatchId}` : ''
+      const batchId = currentBatchId || batchID
+      const batchParam = batchId ? `batch_id=${batchId}` : ''
       const userParam = userFilter ? `&user_id=${encodeURIComponent(userFilter)}` : ''
       const actionParam = actionFilter ? `&action=${encodeURIComponent(actionFilter)}` : ''
-      const res = await fetch(`/api/audit/logs?${batchParam}${userParam}${actionParam}`)
+      const res = await apiFetch(`/api/audit/logs?${batchParam}${userParam}${actionParam}`)
       const data = await res.json()
       setLogs(data.logs || [])
     } catch (e) {
@@ -27,11 +29,18 @@ export function AuditDashboard() {
 
   useEffect(() => {
     fetchAuditLogs()
-  }, [currentBatchId, userFilter, actionFilter])
+  }, [currentBatchId, batchID, userFilter, actionFilter])
 
-  const exportAuditCSV = () => {
-    const batchParam = currentBatchId ? `?batch_id=${currentBatchId}` : ''
-    window.open(`/api/audit/export${batchParam}`, '_blank')
+  const exportAuditCSV = async () => {
+    try {
+      const batchId = currentBatchId || batchID
+      const batchParam = batchId ? `?batch_id=${batchId}` : ''
+      const res = await apiFetch(`/api/audit/export${batchParam}`)
+      const blob = await res.blob()
+      downloadBlob(blob, `audit-export-${new Date().toISOString()}.csv`)
+    } catch (e) {
+      console.error('Failed to export audit CSV:', e)
+    }
   }
 
   return (

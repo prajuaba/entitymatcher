@@ -3,10 +3,12 @@ import { useMatcherStore } from '../store/useMatcherStore'
 import { ConnectionManager } from './ConnectionManager'
 import { FieldMapper } from './FieldMapper'
 import { DictionaryManager } from './DictionaryManager'
+import { SchedulerPanel } from './SchedulerPanel'
+import { can } from '../lib/rbac'
 import { Sliders, CheckSquare, Square, Save, RotateCcw } from 'lucide-react'
 
 export function ConfigPanel() {
-  const { config, updateConfig, fetchConfig, loading } = useMatcherStore()
+  const { config, updateConfig, fetchConfig, loading, user } = useMatcherStore()
   const [localCfg, setLocalCfg] = useState(config)
   const [savedMessage, setSavedMessage] = useState(false)
   const [introspectedSrcCols, setIntrospectedSrcCols] = useState([])
@@ -209,6 +211,57 @@ export function ConfigPanel() {
           })}
         </div>
       </div>
+
+      {/* Matching Strategy & Advanced Settings */}
+      <div className="bg-slate-950/80 p-6 rounded-xl border border-slate-800 space-y-5">
+        <h3 className="text-sm font-semibold text-slate-200 border-b border-slate-900 pb-2">Advanced Matching Strategy</h3>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="text-xs font-medium text-slate-300 block mb-2">Assignment Strategy</label>
+            <select
+              value={localCfg.assignment_strategy || 'GREEDY_1_1'}
+              onChange={(e) => setLocalCfg({ ...localCfg, assignment_strategy: e.target.value })}
+              className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+            >
+              <option value="GREEDY_1_1">Greedy 1:1 Matching</option>
+              <option value="TOP_1">Top-1 Priority</option>
+              <option value="ALL_CANDIDATES">All Candidates</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">How to handle multiple candidates per source record</p>
+          </div>
+
+          <div>
+            <div className="flex justify-between text-xs font-medium text-slate-300 mb-2">
+              <span>Score Margin Threshold</span>
+              <span className="font-mono text-sky-400 font-bold">{Math.round((localCfg.margin_threshold || 0.10) * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={localCfg.margin_threshold || 0.10}
+              onChange={(e) => setLocalCfg({ ...localCfg, margin_threshold: parseFloat(e.target.value) })}
+              className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-500"
+            />
+            <p className="text-[11px] text-slate-500 mt-1">Minimum gap between best and second-best candidate required for auto-match</p>
+          </div>
+        </div>
+
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={localCfg.emit_unmatched || false}
+            onChange={(e) => setLocalCfg({ ...localCfg, emit_unmatched: e.target.checked })}
+            className="w-4 h-4 rounded border-slate-700 accent-emerald-600 cursor-pointer"
+          />
+          <span className="text-xs text-slate-300">Include unmatched source records in results</span>
+        </label>
+      </div>
+
+      {/* Scheduler Panel (Admin only) */}
+      {can(user, 'SCHEDULER_CONFIG') && <SchedulerPanel />}
     </div>
   )
 }

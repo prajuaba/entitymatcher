@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { apiFetch, getAccessToken } from '../lib/api.js'
 
 export const useMatcherStore = create((set, get) => ({
   activeTab: 'results',
@@ -6,11 +7,19 @@ export const useMatcherStore = create((set, get) => ({
   loading: false,
   error: null,
 
+  // Authentication
+  token: null,
+  user: null,
+  authChecked: false,
+
   // Engine Configuration
   config: {
     auto_match_threshold: 0.90,
     review_threshold: 0.70,
     date_tolerance_days: 30,
+    margin_threshold: 0.10,
+    assignment_strategy: 'GREEDY_1_1',
+    emit_unmatched: false,
     weights: {
       name_weight: 0.85,
       date_weight: 0.15,
@@ -29,7 +38,9 @@ export const useMatcherStore = create((set, get) => ({
     batch_id: '',
     total_sources: 0,
     processed_sources: 0,
-    total_matches: 0,
+    total_candidate_pairs: 0,
+    no_match_count: 0,
+    total_decisions: 0,
     auto_matched: 0,
     review_needed: 0,
     status: 'IDLE',
@@ -67,9 +78,67 @@ export const useMatcherStore = create((set, get) => ({
   setManualSearchOpen: (open) => set({ isManualSearchOpen: open }),
   setLLMModalOpen: (open) => set({ isLLMModalOpen: open }),
 
+  // Authentication methods
+  initAuth: async () => {
+    const token = localStorage.getItem('entity_matcher_token')
+    if (token) {
+      set({ token })
+      try {
+        await get().fetchMe()
+      } catch (e) {
+        console.error('Failed to fetch user on init:', e)
+        localStorage.removeItem('entity_matcher_token')
+        set({ token: null, user: null })
+      }
+    }
+    set({ authChecked: true })
+  },
+
+  login: async (username, password) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        set({ token: data.token, user: data.user, loading: false })
+        localStorage.setItem('entity_matcher_token', data.token)
+        return { success: true, user: data.user }
+      } else {
+        const errorText = await res.text()
+        set({ error: errorText, loading: false })
+        return { success: false, error: errorText }
+      }
+    } catch (e) {
+      set({ error: e.message, loading: false })
+      return { success: false, error: e.message }
+    }
+  },
+
+  logout: () => {
+    set({ token: null, user: null })
+    localStorage.removeItem('entity_matcher_token')
+  },
+
+  fetchMe: async () => {
+    try {
+      const res = await apiFetch('/api/auth/me')
+      if (res.ok) {
+        const user = await res.json()
+        set({ user })
+      }
+    } catch (e) {
+      console.error('Failed to fetch user:', e)
+      throw e
+    }
+  },
+
   fetchConfig: async () => {
     try {
-      const res = await fetch('/api/config')
+      const res = await apiFetch('/api/config')
       if (res.ok) {
         const cfg = await res.json()
         set({ config: cfg })
@@ -82,7 +151,7 @@ export const useMatcherStore = create((set, get) => ({
   updateConfig: async (newCfg) => {
     set({ loading: true })
     try {
-      const res = await fetch('/api/config', {
+      const res = await apiFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCfg),
@@ -99,7 +168,7 @@ export const useMatcherStore = create((set, get) => ({
   loadSeedDataset: async () => {
     set({ loading: true, error: null })
     try {
-      const res = await fetch('/api/seed', { method: 'POST' })
+      const res = await apiFetch('/api/seed', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
         set({ batchID: data.batch_id })
@@ -113,7 +182,7 @@ export const useMatcherStore = create((set, get) => ({
   loadBigSeedDataset: async () => {
     set({ loading: true, error: null })
     try {
-      const res = await fetch('/api/seed/big', { method: 'POST' })
+      const res = await apiFetch('/api/seed/big', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
         set({ batchID: data.batch_id })
@@ -127,7 +196,7 @@ export const useMatcherStore = create((set, get) => ({
   uploadFiles: async (payload) => {
     set({ loading: true, error: null })
     try {
-      const res = await fetch('/api/upload', {
+      const res = await apiFetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -150,11 +219,12 @@ export const useMatcherStore = create((set, get) => ({
     set({ loading: true, activeTab: 'progress' })
 
     try {
-      const res = await fetch(`/api/match/run?batch_id=${bId}`, { method: 'POST' })
+      const res = await apiFetch(`/api/match/run?batch_id=${bId}`, { method: 'POST' })
       if (!res.ok) throw new Error('Failed to start matching job')
 
       // Listen to SSE progress updates
-      const eventSource = new EventSource(`/api/match/progress?batch_id=${bId}`)
+      const token = getAccessToken()
+      const eventSource = new EventSource(`/api/match/progress?batch_id=${bId}&access_token=${token || ''}`)
       eventSource.onmessage = (event) => {
         const p = JSON.parse(event.data)
         set({ progress: p })
@@ -187,7 +257,7 @@ export const useMatcherStore = create((set, get) => ({
         limit: limit.toString(),
       })
 
-      const res = await fetch(`/api/match/results?${queryParams}`)
+      const res = await apiFetch(`/api/match/results?${queryParams}`)
       if (res.ok) {
         const data = await res.json()
         set({
@@ -204,7 +274,7 @@ export const useMatcherStore = create((set, get) => ({
   updateMatchAction: async (matchID, action, userID = 'reviewer_op', reviewComments = '') => {
     const { batchID } = get()
     try {
-      const res = await fetch('/api/match/action', {
+      const res = await apiFetch('/api/match/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -227,7 +297,7 @@ export const useMatcherStore = create((set, get) => ({
   manualLink: async (sourceID, destinationID) => {
     const { batchID } = get()
     try {
-      const res = await fetch('/api/match/manual-link', {
+      const res = await apiFetch('/api/match/manual-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ batch_id: batchID, source_id: sourceID, destination_id: destinationID }),
@@ -260,7 +330,7 @@ export const useMatcherStore = create((set, get) => ({
         ],
       }
 
-      const res = await fetch('/api/llm/evaluate', {
+      const res = await apiFetch('/api/llm/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
