@@ -118,7 +118,7 @@ func TestPostgresSaveAndReadRoundTrip(t *testing.T) {
 		},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	retrieved, ok := store.GetResults(batchID)
 	require.True(t, ok)
@@ -198,7 +198,7 @@ func TestPostgresUpdateMatchStatus(t *testing.T) {
 		},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	err := store.UpdateMatchStatus(batchID, matchID, "CONFIRMED")
 	require.NoError(t, err)

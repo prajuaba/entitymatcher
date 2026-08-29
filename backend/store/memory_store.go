@@ -72,10 +72,6 @@ func (s *Store) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.De
 	return src, dst, ok1 && ok2
 }
 
-func (s *Store) SaveResults(batchID string, results []matcher.MatchResultItem) {
-	_ = s.SaveResultsCtx(context.Background(), batchID, results)
-}
-
 func (s *Store) SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

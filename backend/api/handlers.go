@@ -19,12 +19,12 @@ import (
 )
 
 type Server struct {
-	store            *store.Store
+	store            store.Repository
 	llmResolver      *matcher.LLMResolver
 	schedulerManager *matcher.SchedulerManager
 }
 
-func NewServer(st *store.Store) *Server {
+func NewServer(st store.Repository) *Server {
 	srv := &Server{
 		store:            st,
 		llmResolver:      matcher.NewLLMResolver(),
@@ -305,7 +305,16 @@ func (s *Server) runBatchAndPersist(ctx context.Context, batchID string) (matche
 	elapsed := time.Since(startTime)
 	elapsedMs := elapsed.Milliseconds()
 
-	s.store.SaveResults(batchID, results)
+	// Persist results with error handling
+	err := s.store.SaveResultsCtx(ctx, batchID, results)
+	if err != nil {
+		// Create FAILED progress with all fields from engine's progress
+		failedProgress := progress
+		failedProgress.Status = "FAILED"
+		s.store.UpdateProgress(failedProgress)
+		return matcher.ReconcileOutcome{}, fmt.Errorf("batch %s: persist results failed: %w", batchID, err)
+	}
+
 	s.store.UpdateProgress(progress)
 
 	// Count match statuses
@@ -333,7 +342,7 @@ func (s *Server) runBatchAndPersist(ctx context.Context, batchID string) (matche
 		ElapsedMs:         elapsedMs,
 	}
 
-	// Fire webhooks asynchronously
+	// Fire webhooks asynchronously only after successful persistence
 	go s.fireWebhooks(batchID, outcome)
 
 	return outcome, nil

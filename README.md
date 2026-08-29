@@ -211,9 +211,6 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   runtime, since GC CPU fraction falls with scale.
 - **Scaling is O(N^1.10), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
-- **`api/handlers.go` still calls the non-error-returning `SaveResults`.** The error-returning
-  `SaveResultsCtx` exists and is used by the store layer; the handler should be migrated so a
-  persistence failure surfaces to the caller.
 - **Transliteration is dictionary-based**, not a phonetic model — coverage is limited to the mapped
   pairs plus the synonym dictionary.
 - **Demo users are compiled in.** There is no user management, registration, or password rotation.

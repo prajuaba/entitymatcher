@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -112,14 +111,6 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 // GetDataset retrieves source and destination records for a batch.
 func (s *PostgresStore) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {
 	return nil, nil, false
-}
-
-// SaveResults delegates to SaveResultsCtx and logs any errors (cannot fail silently).
-func (s *PostgresStore) SaveResults(batchID string, results []matcher.MatchResultItem) {
-	ctx := context.Background()
-	if err := s.SaveResultsCtx(ctx, batchID, results); err != nil {
-		log.Printf("ERROR SaveResults failed for batch %s: %v - data loss possible, old results destroyed", batchID, err)
-	}
 }
 
 // SaveResultsCtx stores match results for a batch with proper transaction handling.

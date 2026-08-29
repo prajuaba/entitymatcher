@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestResultIndexCorrectness(t *testing.T) {
 		{ID: "item-3", BatchID: batchID, MatchStatus: "CONFIRMED"},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	index := store.resultIndex[batchID]
 	if len(index) != 3 {
@@ -51,7 +52,7 @@ func TestManualLinkMaintainsIndex(t *testing.T) {
 	results := []matcher.MatchResultItem{
 		{ID: "existing-item", BatchID: batchID, MatchStatus: "AUTO_MATCHED"},
 	}
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	newItem, err := store.ManualLink(batchID, "src1", "dst1")
 	if err != nil {
@@ -85,7 +86,7 @@ func TestUpdateMatchStatusO1(t *testing.T) {
 		{ID: "item-2", BatchID: batchID, MatchStatus: "REVIEW_NEEDED"},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	// Check that resultIndex is populated
 	index := store.resultIndex[batchID]
@@ -117,7 +118,7 @@ func TestGetResultByIDHit(t *testing.T) {
 		{ID: "item-2", BatchID: batchID, MatchStatus: "REVIEW_NEEDED"},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	item, found := store.GetResultByID(batchID, "item-2")
 	if !found {
@@ -138,7 +139,7 @@ func TestGetResultByIDMiss(t *testing.T) {
 		{ID: "item-1", BatchID: batchID, MatchStatus: "AUTO_MATCHED"},
 	}
 
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 
 	// Test invalid batch ID
 	_, found := store.GetResultByID("invalid-batch", "item-1")
@@ -162,7 +163,7 @@ func TestDeleteBatchRemovesEverything(t *testing.T) {
 	results := []matcher.MatchResultItem{{ID: "res1", BatchID: batchID, MatchStatus: "AUTO_MATCHED"}}
 
 	store.SaveDataset(batchID, sources, dests)
-	store.SaveResults(batchID, results)
+	store.SaveResultsCtx(context.Background(), batchID, results)
 	store.UpdateProgress(matcher.BatchProgress{BatchID: batchID, Status: "COMPLETED"})
 
 	// Register an SSE client
@@ -227,11 +228,11 @@ func TestListBatchesSummary(t *testing.T) {
 	results2 := []matcher.MatchResultItem{{ID: "res3"}, {ID: "res4"}, {ID: "res5"}}
 
 	store.SaveDataset(batchID1, sources1, dests1)
-	store.SaveResults(batchID1, results1)
+	store.SaveResultsCtx(context.Background(), batchID1, results1)
 	store.UpdateProgress(matcher.BatchProgress{BatchID: batchID1, Status: "COMPLETED", StartedAt: time.Now()})
 
 	store.SaveDataset(batchID2, sources2, dests2)
-	store.SaveResults(batchID2, results2)
+	store.SaveResultsCtx(context.Background(), batchID2, results2)
 	store.UpdateProgress(matcher.BatchProgress{BatchID: batchID2, Status: "RUNNING", StartedAt: time.Now()})
 
 	summaries := store.ListBatches()

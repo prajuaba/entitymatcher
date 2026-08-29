@@ -32,7 +32,6 @@ type Repository interface {
 	GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool)
 
 	// Results management
-	SaveResults(batchID string, results []matcher.MatchResultItem)
 	SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error
 	GetResults(batchID string) ([]matcher.MatchResultItem, bool)
 	GetResultByID(batchID, matchID string) (matcher.MatchResultItem, bool)
