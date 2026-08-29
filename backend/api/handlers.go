@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -14,18 +15,34 @@ import (
 
 	"entitymatcher/matcher"
 	"entitymatcher/store"
-	"entitymatcher/testdata"
+	"entitymatcher/internal/mockdata"
 )
 
 type Server struct {
-	store       *store.Store
-	llmResolver *matcher.LLMResolver
+	store            *store.Store
+	llmResolver      *matcher.LLMResolver
+	schedulerManager *matcher.SchedulerManager
 }
 
 func NewServer(st *store.Store) *Server {
-	return &Server{
-		store:       st,
-		llmResolver: matcher.NewLLMResolver(),
+	srv := &Server{
+		store:            st,
+		llmResolver:      matcher.NewLLMResolver(),
+		schedulerManager: matcher.NewSchedulerManager(),
+	}
+
+	// Wire the reconcile function so scheduled jobs actually run matching
+	srv.schedulerManager.SetReconcileFunc(func(ctx context.Context, batchID string) (matcher.ReconcileOutcome, error) {
+		return srv.runBatchAndPersist(ctx, batchID)
+	})
+
+	return srv
+}
+
+// StopScheduler gracefully stops the scheduler during shutdown.
+func (s *Server) StopScheduler() {
+	if s.schedulerManager != nil {
+		s.schedulerManager.Stop()
 	}
 }
 
@@ -33,6 +50,350 @@ func enableCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+}
+
+// validateAndMergeConfig merges a partial config update into the existing config.
+// Returns the merged config and an error if validation fails.
+func validateAndMergeConfig(existing matcher.Config, update map[string]json.RawMessage) (matcher.Config, error) {
+	// Start with existing config
+	merged := existing
+
+	// Helper to parse a float64 value
+	parseFloat := func(raw json.RawMessage) (*float64, error) {
+		var v float64
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse an int value
+	parseInt := func(raw json.RawMessage) (*int, error) {
+		var v int
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse a string value
+	parseString := func(raw json.RawMessage) (*string, error) {
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse a bool value
+	parseBool := func(raw json.RawMessage) (*bool, error) {
+		var v bool
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse MatchWeights
+	parseWeights := func(raw json.RawMessage) (*matcher.MatchWeights, error) {
+		var v matcher.MatchWeights
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse AlgorithmToggles
+	parseAlgorithms := func(raw json.RawMessage) (*matcher.AlgorithmToggles, error) {
+		var v matcher.AlgorithmToggles
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Helper to parse ColumnMapping
+	parseColumnMapping := func(raw json.RawMessage) (*matcher.ColumnMapping, error) {
+		var v matcher.ColumnMapping
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, err
+		}
+		return &v, nil
+	}
+
+	// Process each field that is present in the update
+	if raw, exists := update["auto_match_threshold"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid auto_match_threshold: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("auto_match_threshold must be between 0 and 1")
+			}
+			merged.AutoMatchThreshold = *val
+		}
+	}
+
+	if raw, exists := update["review_threshold"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid review_threshold: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("review_threshold must be between 0 and 1")
+			}
+			merged.ReviewThreshold = *val
+		}
+	}
+
+	if raw, exists := update["margin_threshold"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid margin_threshold: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("margin_threshold must be between 0 and 1")
+			}
+			merged.MarginThreshold = *val
+		}
+	}
+
+	if raw, exists := update["date_tolerance_days"]; exists {
+		val, err := parseInt(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid date_tolerance_days: %v", err)
+		}
+		if val != nil {
+			if *val < 0 {
+				return merged, fmt.Errorf("date_tolerance_days must be >= 0")
+			}
+			merged.DateToleranceDays = *val
+		}
+	}
+
+	if raw, exists := update["worker_count"]; exists {
+		val, err := parseInt(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid worker_count: %v", err)
+		}
+		if val != nil {
+			if *val < 1 || *val > 256 {
+				return merged, fmt.Errorf("worker_count must be between 1 and 256")
+			}
+			merged.WorkerCount = *val
+		}
+	}
+
+	if raw, exists := update["max_candidates_per_src"]; exists {
+		val, err := parseInt(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid max_candidates_per_src: %v", err)
+		}
+		if val != nil {
+			if *val < 1 || *val > 1000 {
+				return merged, fmt.Errorf("max_candidates_per_src must be between 1 and 1000")
+			}
+			merged.MaxCandidatesPerSrc = *val
+		}
+	}
+
+	if raw, exists := update["assignment_strategy"]; exists {
+		val, err := parseString(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid assignment_strategy: %v", err)
+		}
+		if val != nil {
+			valid := false
+			for _, strategy := range []string{"GREEDY_1_1", "TOP_1", "ALL_CANDIDATES"} {
+				if *val == strategy {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return merged, fmt.Errorf("assignment_strategy must be one of GREEDY_1_1, TOP_1, ALL_CANDIDATES")
+			}
+			merged.AssignmentStrategy = *val
+		}
+	}
+
+	if raw, exists := update["emit_unmatched"]; exists {
+		val, err := parseBool(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid emit_unmatched: %v", err)
+		}
+		if val != nil {
+			merged.EmitUnmatched = *val
+		}
+	}
+
+	if raw, exists := update["weights"]; exists {
+		val, err := parseWeights(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid weights: %v", err)
+		}
+		if val != nil {
+			if val.NameWeight <= 0 || val.DateWeight <= 0 {
+				return merged, fmt.Errorf("name_weight and date_weight must both be > 0")
+			}
+			merged.Weights = *val
+		}
+	}
+
+	if raw, exists := update["algorithms"]; exists {
+		val, err := parseAlgorithms(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid algorithms: %v", err)
+		}
+		if val != nil {
+			merged.Algorithms = *val
+		}
+	}
+
+	if raw, exists := update["column_mapping"]; exists {
+		val, err := parseColumnMapping(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid column_mapping: %v", err)
+		}
+		if val != nil {
+			merged.ColumnMapping = *val
+		}
+	}
+
+	// Validate cross-field constraints
+	if merged.ReviewThreshold > merged.AutoMatchThreshold {
+		return merged, fmt.Errorf("review_threshold must be <= auto_match_threshold")
+	}
+
+	return merged, nil
+}
+
+// isAnomalous checks if a reconciliation run shows anomalous behavior.
+func isAnomalous(outcome matcher.ReconcileOutcome) bool {
+	if outcome.TotalSources == 0 {
+		return false
+	}
+	autoMatchRate := float64(outcome.AutoMatched) / float64(outcome.TotalSources)
+	noMatchRate := float64(outcome.NoMatch) / float64(outcome.TotalSources)
+	return autoMatchRate < 0.5 || noMatchRate > 0.3
+}
+
+// runBatchAndPersist executes a reconciliation job, saves results, and fires webhooks.
+// Called by both the HTTP handler and the scheduled job.
+func (s *Server) runBatchAndPersist(ctx context.Context, batchID string) (matcher.ReconcileOutcome, error) {
+	sources, dests, ok := s.store.GetDataset(batchID)
+	if !ok {
+		return matcher.ReconcileOutcome{}, fmt.Errorf("dataset for batch_id not found")
+	}
+
+	cfg := s.store.GetConfig()
+	engine := matcher.NewMatchEngine(cfg)
+
+	startTime := time.Now()
+	results, progress := engine.ExecuteJob(
+		ctx,
+		batchID,
+		sources,
+		dests,
+		func(p matcher.BatchProgress) {
+			s.store.UpdateProgress(p)
+		},
+	)
+	elapsed := time.Since(startTime)
+	elapsedMs := elapsed.Milliseconds()
+
+	s.store.SaveResults(batchID, results)
+	s.store.UpdateProgress(progress)
+
+	// Count match statuses
+	autoMatched := int64(0)
+	reviewNeeded := int64(0)
+	noMatch := int64(0)
+	for _, r := range results {
+		switch r.MatchStatus {
+		case "AUTO_MATCHED", "CONFIRMED":
+			autoMatched++
+		case "REVIEW_NEEDED":
+			reviewNeeded++
+		case "NO_MATCH":
+			noMatch++
+		}
+	}
+
+	outcome := matcher.ReconcileOutcome{
+		BatchID:           batchID,
+		TotalSources:      len(sources),
+		TotalDestinations: len(dests),
+		AutoMatched:       autoMatched,
+		ReviewNeeded:      reviewNeeded,
+		NoMatch:           noMatch,
+		ElapsedMs:         elapsedMs,
+	}
+
+	// Fire webhooks asynchronously
+	go s.fireWebhooks(batchID, outcome)
+
+	return outcome, nil
+}
+
+// fireWebhooks dispatches webhooks for a completed batch based on config.
+func (s *Server) fireWebhooks(batchID string, outcome matcher.ReconcileOutcome) {
+	cfg := s.schedulerManager.GetConfig()
+
+	// Gate on webhook URL + NotifyOn* flags, NOT on Enabled
+	if cfg.WebhookURL == "" {
+		return
+	}
+
+	// Create background context for webhook dispatch
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Dispatch RECONCILIATION_COMPLETED if NotifyOnSuccess is set
+	if cfg.NotifyOnSuccess {
+		payload := matcher.WebhookPayload{
+			Event:             "RECONCILIATION_COMPLETED",
+			BatchID:           batchID,
+			TotalSources:      outcome.TotalSources,
+			TotalDestinations: outcome.TotalDestinations,
+			AutoMatchedCount:  outcome.AutoMatched,
+			ReviewNeededCount: outcome.ReviewNeeded,
+			Timestamp:         time.Now(),
+			Message:           fmt.Sprintf("Batch %s reconciliation completed with %d auto-matched results", batchID, outcome.AutoMatched),
+		}
+		if outcome.ElapsedMs > 0 {
+			payload.ThroughputPerSec = float64(outcome.TotalSources) / (float64(outcome.ElapsedMs) / 1000.0)
+		}
+		if err := s.schedulerManager.DispatchWebhook(ctx, payload); err != nil {
+			log.Printf("Failed to dispatch success webhook: %v", err)
+		}
+	}
+
+	// Dispatch ANOMALY_DETECTED if NotifyOnAnomaly is set AND run is anomalous
+	if cfg.NotifyOnAnomaly && isAnomalous(outcome) {
+		payload := matcher.WebhookPayload{
+			Event:             "ANOMALY_DETECTED",
+			BatchID:           batchID,
+			TotalSources:      outcome.TotalSources,
+			TotalDestinations: outcome.TotalDestinations,
+			AutoMatchedCount:  outcome.AutoMatched,
+			ReviewNeededCount: outcome.ReviewNeeded,
+			Timestamp:         time.Now(),
+			Message:           fmt.Sprintf("Anomaly detected in batch %s: auto-match rate %.1f%%, no-match rate %.1f%%",
+				batchID,
+				(float64(outcome.AutoMatched)/float64(outcome.TotalSources))*100,
+				(float64(outcome.NoMatch)/float64(outcome.TotalSources))*100),
+		}
+		if outcome.ElapsedMs > 0 {
+			payload.ThroughputPerSec = float64(outcome.TotalSources) / (float64(outcome.ElapsedMs) / 1000.0)
+		}
+		if err := s.schedulerManager.DispatchWebhook(ctx, payload); err != nil {
+			log.Printf("Failed to dispatch anomaly webhook: %v", err)
+		}
+	}
 }
 
 func (s *Server) HandleConfig(w http.ResponseWriter, r *http.Request) {
@@ -49,14 +410,25 @@ func (s *Server) HandleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "PUT" || r.Method == "POST" {
-		var cfg matcher.Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		// Decode into map[string]json.RawMessage for selective merge
+		var updates map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 			http.Error(w, "Invalid request JSON", http.StatusBadRequest)
 			return
 		}
-		s.store.UpdateConfig(cfg)
+
+		// Get existing config and merge with updates
+		existing := s.store.GetConfig()
+		merged, err := validateAndMergeConfig(existing, updates)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Store the merged config
+		s.store.UpdateConfig(merged)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(cfg)
+		json.NewEncoder(w).Encode(merged)
 		return
 	}
 
@@ -159,6 +531,9 @@ func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	s.store.SaveDataset(payload.BatchID, sources, destinations)
 
+	// Record the batch as the scheduler's current target
+	s.schedulerManager.SetLastBatchID(payload.BatchID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":            "success",
@@ -185,27 +560,15 @@ func (s *Server) HandleRunMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sources, dests, ok := s.store.GetDataset(batchID)
-	if !ok {
-		http.Error(w, "Dataset for batch_id not found", http.StatusNotFound)
-		return
-	}
-
-	cfg := s.store.GetConfig()
-	engine := matcher.NewMatchEngine(cfg)
-
+	// Run matching in background using the shared path
 	go func() {
-		results, progress := engine.ExecuteJob(
-			context.Background(),
-			batchID,
-			sources,
-			dests,
-			func(p matcher.BatchProgress) {
-				s.store.UpdateProgress(p)
-			},
-		)
-		s.store.SaveResults(batchID, results)
-		s.store.UpdateProgress(progress)
+		// Use a reasonable timeout for the handler call
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
+		defer cancel()
+		_, err := s.runBatchAndPersist(ctx, batchID)
+		if err != nil {
+			log.Printf("HandleRunMatch error for batch %s: %v", batchID, err)
+		}
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -333,7 +696,6 @@ type ActionPayload struct {
 	BatchID        string `json:"batch_id"`
 	MatchID        string `json:"match_id"`
 	Action         string `json:"action"` // CONFIRM | REJECT | UNLINK
-	UserID         string `json:"user_id,omitempty"`
 	ReviewComments string `json:"review_comments,omitempty"`
 }
 
@@ -387,9 +749,11 @@ func (s *Server) HandleMatchAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := payload.UserID
-	if userID == "" {
-		userID = "reviewer_op"
+	// Get user ID from JWT claims
+	claims := ClaimsFrom(r.Context())
+	userID := ""
+	if claims != nil {
+		userID = claims.UserID
 	}
 
 	// Record compliance audit log entry
@@ -619,6 +983,9 @@ func (s *Server) HandleSeedDataset(w http.ResponseWriter, r *http.Request) {
 	wUpload := &responseRecorder{header: make(http.Header), body: &bytes.Buffer{}}
 	s.HandleUpload(wUpload, rUpload)
 
+	// SetLastBatchID is already called inside HandleUpload via our earlier change
+	s.schedulerManager.SetLastBatchID(batchID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "benchmark_dataset_loaded",
@@ -635,9 +1002,12 @@ func (s *Server) HandleSeedBigDataset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	batchID := "big-mock-batch-4000"
-	sources, dests, _, _ := testdata.GenerateBigMockDataset(1000)
+	sources, dests, _, _ := mockdata.GenerateBigMockDataset(1000)
 
 	s.store.SaveDataset(batchID, sources, dests)
+
+	// Record the batch as the scheduler's current target
+	s.schedulerManager.SetLastBatchID(batchID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -725,10 +1095,9 @@ func (s *Server) HandleSchedulerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schedulerMgr := matcher.NewSchedulerManager()
 	if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(schedulerMgr.GetConfig())
+		json.NewEncoder(w).Encode(s.schedulerManager.GetConfig())
 		return
 	}
 
@@ -738,7 +1107,16 @@ func (s *Server) HandleSchedulerConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
 			return
 		}
-		schedulerMgr.UpdateConfig(cfg)
+
+		// Validate cron expression if enabled and expression is provided
+		if cfg.Enabled && cfg.CronExpression != "" {
+			if err := s.schedulerManager.ValidateCronExpression(cfg.CronExpression); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid cron expression: %v", err), http.StatusBadRequest)
+				return
+			}
+		}
+
+		s.schedulerManager.UpdateConfig(cfg)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cfg)
 		return
