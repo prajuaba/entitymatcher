@@ -6,6 +6,37 @@ import (
 	"sync"
 )
 
+// DefaultAbsoluteCeiling bounds how long a single posting list may be before the
+// key is skipped at query time. The effective cutoff is min(maxPostingRatio*N,
+// DefaultAbsoluteCeiling): the ratio alone is not enough, because a ratio grows
+// with the corpus, so the largest list still scanned was ~1,100 entries at 22k
+// destinations but ~11,000 at 220k -- the ratio decides WHICH keys are skipped,
+// it never bounds the work per query.
+//
+// Ceiling chosen by measurement. Accuracy was the constraint, speed the
+// objective; every value below held precision at 100.00% and top-1 at 99.19%,
+// so the choice came down to throughput at 220k destinations per side:
+//
+//   ceiling      100k match time   throughput
+//   500                  74.90s     2,937/s   <- much WORSE, see note
+//   1000                 34.70s     6,341/s
+//   2000                 34.56s     6,365/s   <- chosen
+//   5000                 35.10s     6,268/s
+//   unbounded            38.20s     5,762/s
+//
+// Note on 500: a tighter ceiling is not monotonically faster. Skipping more keys
+// pushes more sources into the zero-hit fallback below, which linearly scans
+// every destination -- so an over-tight ceiling converts bounded lookups into
+// O(N) scans and costs more than it saves.
+//
+// Honest limit of this change: it improves throughput ~10% and peak heap ~17% at
+// 220k, but it does NOT flatten the scaling curve. Measured total time still
+// grows as ~O(N^1.30), down only from ~O(N^1.34). The dominant super-linear cost
+// is elsewhere -- most likely that the number of DISTINCT candidates accumulated
+// in hitCounts still grows with corpus size and QueryCandidates fully sorts them
+// to take the top maxCandidates, plus the O(N) fallback noted above.
+var DefaultAbsoluteCeiling = 2000
+
 type BlockingIndex struct {
 	mu              sync.RWMutex
 	tokenMap        map[string][]int // Token -> array of destination indices
@@ -15,13 +46,14 @@ type BlockingIndex struct {
 	maxPostingRatio float64
 	skipTrigrams    map[string]bool
 	skipTokens      map[string]bool
+	absoluteCeiling int
 }
 
 func NewBlockingIndex(dests []DestinationRecord) *BlockingIndex {
-	return NewBlockingIndexWithOptions(dests, 0.05)
+	return NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling)
 }
 
-func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio float64) *BlockingIndex {
+func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio float64, absoluteCeiling int) *BlockingIndex {
 	idx := &BlockingIndex{
 		tokenMap:        make(map[string][]int),
 		trigramMap:      make(map[string][]int),
@@ -30,6 +62,7 @@ func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio floa
 		maxPostingRatio: maxPostingRatio,
 		skipTrigrams:    make(map[string]bool),
 		skipTokens:      make(map[string]bool),
+		absoluteCeiling: absoluteCeiling,
 	}
 	idx.build()
 	return idx
@@ -42,7 +75,8 @@ func (idx *BlockingIndex) build() {
 	// Compute cutoff for capping
 	cutoff := 0
 	if len(idx.destinations) >= 1000 {
-		cutoff = int(float64(len(idx.destinations)) * idx.maxPostingRatio)
+		ratioCutoff := int(float64(len(idx.destinations)) * idx.maxPostingRatio)
+		cutoff = min(ratioCutoff, idx.absoluteCeiling)
 	}
 
 	// Precompute token and trigram frequencies
@@ -78,6 +112,30 @@ func (idx *BlockingIndex) build() {
 		}
 	}
 
+	// Compute phonetic cutoff using same logic
+	phoneticCutoff := 0
+	if len(idx.destinations) >= 1000 {
+		ratioCutoff := int(float64(len(idx.destinations)) * idx.maxPostingRatio)
+		phoneticCutoff = min(ratioCutoff, idx.absoluteCeiling)
+	}
+
+	// Count phonetic key frequencies
+	phoneticFreq := make(map[string]int)
+	for _, dest := range idx.destinations {
+		if dest.NormalizedName.PhoneticKey != "" {
+			phoneticFreq[dest.NormalizedName.PhoneticKey]++
+		}
+	}
+
+	// Populate skip map for phonetic keys (only if cutoff > 0)
+	if phoneticCutoff > 0 {
+		for pk, freq := range phoneticFreq {
+			if freq > phoneticCutoff {
+				idx.skipTokens[pk] = true // Use skipTokens for phonetic keys too
+			}
+		}
+	}
+
 	for i, dest := range idx.destinations {
 		// Index by clean tokens
 		for _, tok := range dest.NormalizedName.Tokens {
@@ -95,7 +153,7 @@ func (idx *BlockingIndex) build() {
 		}
 
 		// Index by phonetic key
-		if dest.NormalizedName.PhoneticKey != "" {
+		if dest.NormalizedName.PhoneticKey != "" && !idx.skipTokens[dest.NormalizedName.PhoneticKey] {
 			pk := dest.NormalizedName.PhoneticKey
 			idx.phoneticMap[pk] = append(idx.phoneticMap[pk], i)
 		}
@@ -132,7 +190,7 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 	}
 
 	// Phonetic key match hits
-	if src.NormalizedName.PhoneticKey != "" {
+	if src.NormalizedName.PhoneticKey != "" && !idx.skipTokens[src.NormalizedName.PhoneticKey] {
 		if destIdxs, exists := idx.phoneticMap[src.NormalizedName.PhoneticKey]; exists {
 			for _, destIdx := range destIdxs {
 				hitCounts[destIdx] += 4
@@ -195,4 +253,11 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 	}
 
 	return result
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
