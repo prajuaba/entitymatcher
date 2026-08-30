@@ -41,7 +41,7 @@ winning source and its score.
 
 ## Measured performance
 
-From `go test ./internal/mockdata/` (4,400 × 4,400 synthetic bilingual records, 19.4M candidate
+From `go test ./internal/mockdata/` (4,720 × 4,720 synthetic bilingual records, 22.3M candidate
 pair space, fixed seed). Scale figures are from the opt-in harness
 (`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 220,000 × 220,000:
 
@@ -51,15 +51,15 @@ pair space, fixed seed). Scale figures are from the opt-in harness
 | Verified scale | 220,000 × 220,000 per side in 28.3s (20 cores), 2.5 GiB peak heap |
 | Scaling | time ~ O(N^1.05) over 22k → 220k |
 | Decision precision | 100.00% |
-| Decision recall (auto-match) | 57.6% |
-| F1 | 73.1% |
-| Top-1 ranking accuracy | 99.19% |
-| Candidate rows per source | 3.15 |
+| Decision recall (auto-match) | 59.0% |
+| F1 | 74.2% |
+| Top-1 ranking accuracy | 98.84% |
+| Candidate rows per source | 2.76 |
 | Max destinations auto-matched per source | 1 |
 | Max sources claiming one destination | 1 |
 
-**Read these two numbers together.** Top-1 ranking accuracy (99.19%) is how often the correct
-partner is ranked first — that is the quality of the *scorer*. Recall (57.6%) is how often the
+**Read these two numbers together.** Top-1 ranking accuracy (98.84%) is how often the correct
+partner is ranked first — that is the quality of the *scorer*. Recall (59.0%) is how often the
 engine is confident enough to decide *without a human* — that is the calibration of the
 *thresholds*. The gap is deliberate: the remainder goes to the review queue rather than being
 auto-matched on thin evidence. Lower `margin_threshold` or `auto_match_threshold` to trade
@@ -223,7 +223,7 @@ well-calibrated for the review band and extrapolating outside it.
 - **Thai word segmentation.** Tokenization is whitespace-based. Thai is frequently written without
   inter-word spaces, so unspaced company names lean on the trigram metric rather than token
   comparison. A dictionary-based segmenter would improve this.
-- **Recall is threshold-bound.** 57.6% of true pairs are auto-matched at the default thresholds;
+- **Recall is threshold-bound.** 59.0% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
 - **Peak heap is ~2 GiB at 220k × 220k**, and `docker-compose.yml` sets no memory limit. That is
   2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the
