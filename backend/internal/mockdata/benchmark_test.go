@@ -3,6 +3,7 @@ package mockdata
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +78,11 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	// Per-category stats
 	categoryStats := make(map[string]map[string]int)
 	// Score tracking for Thai variant categories (for distribution reporting)
-	categoryScores := make(map[string][]float64) // category -> slice of rank-1 scores for true matches
+	// categoryScores maps category -> list of (score, isCorrect) for rank-1 matches
+	categoryScores := make(map[string][]struct {
+		score     float64
+		isCorrect bool
+	})
 
 	for _, src := range sources {
 		truePartnerID := sourceTruePartner[src.ID]
@@ -93,7 +98,11 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 				if pair.IsMatch {
 					for _, res := range results {
 						if res.SourceID == src.ID && res.Rank == 1 {
-							categoryScores[pair.Category] = append(categoryScores[pair.Category], res.ConfidenceScore)
+							isCorrect := (res.DestinationID == truePartnerID)
+							categoryScores[pair.Category] = append(categoryScores[pair.Category], struct {
+								score     float64
+								isCorrect bool
+							}{res.ConfidenceScore, isCorrect})
 							break
 						}
 					}
@@ -237,22 +246,25 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		top1Accuracy = float64(top1Correct) / float64(top1Total)
 	}
 
-	// Calculate score distributions for Thai variant categories
+	// Calculate score distributions for Thai variant categories and bilingual categories
 	thaiVariantCategories := []string{
 		"THAI_VARIANT_SHORT_GIVEN",
 		"THAI_VARIANT_FULL_NAME",
 		"THAI_VARIANT_LEADING_VOWEL",
 		"THAI_VARIANT_CORPORATE",
+		"BILINGUAL_IN_DICTIONARY",
+		"BILINGUAL_OUT_OF_DICT",
 	}
 
 	type scoreDistribution struct {
 		Category        string
 		MeanScore       float64
 		TotalPairs      int // Total pairs in this category
-		CountAuto       int // >= 0.90
-		CountReview     int // >= 0.75 (estimated threshold) and < 0.90
-		CountBelowThresh int // < 0.75
-		NotRetrieved    int // Pairs where true partner never ranked #1
+		CountAutoCorrect int // Rank-1 with CORRECT partner and score >= 0.90
+		CountAutoWrong  int // Rank-1 with WRONG partner and score >= 0.90
+		CountReview     int // Rank-1 with CORRECT partner, score >= 0.75 and < 0.90
+		CountBelowThresh int // Rank-1 with CORRECT partner, score < 0.75
+		NotRetrieved    int // Pairs where true partner never ranked #1 (includes wrong matches)
 	}
 	var distributions []scoreDistribution
 
@@ -262,51 +274,68 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		if pair.IsMatch && (pair.Category == "THAI_VARIANT_SHORT_GIVEN" ||
 			pair.Category == "THAI_VARIANT_FULL_NAME" ||
 			pair.Category == "THAI_VARIANT_LEADING_VOWEL" ||
-			pair.Category == "THAI_VARIANT_CORPORATE") {
+			pair.Category == "THAI_VARIANT_CORPORATE" ||
+			pair.Category == "BILINGUAL_IN_DICTIONARY" ||
+			pair.Category == "BILINGUAL_OUT_OF_DICT") {
 			categoryPairCounts[pair.Category]++
 		}
 	}
 
 	for _, cat := range thaiVariantCategories {
-		scores := categoryScores[cat]
+		scoreList := categoryScores[cat]
 		totalPairs := categoryPairCounts[cat]
 		if totalPairs == 0 {
 			continue
 		}
 
-		// Calculate mean score
+		// Calculate mean score (only for correct matches)
 		var sumScore float64
-		for _, s := range scores {
-			sumScore += s
+		correctCount := 0
+		for _, item := range scoreList {
+			if item.isCorrect {
+				sumScore += item.score
+				correctCount++
+			}
 		}
 		var meanScore float64
-		if len(scores) > 0 {
-			meanScore = sumScore / float64(len(scores))
+		if correctCount > 0 {
+			meanScore = sumScore / float64(correctCount)
 		}
 
 		// Count distribution (using 0.90 and 0.75 as thresholds)
-		countAuto := 0
+		// Only CORRECT rank-1 matches contribute to the breakdown
+		countAutoCorrect := 0
+		countAutoWrong := 0
 		countReview := 0
 		countBelow := 0
 
-		for _, s := range scores {
-			if s >= 0.90 {
-				countAuto++
-			} else if s >= 0.75 {
-				countReview++
+		for _, item := range scoreList {
+			if item.isCorrect {
+				if item.score >= 0.90 {
+					countAutoCorrect++
+				} else if item.score >= 0.75 {
+					countReview++
+				} else {
+					countBelow++
+				}
 			} else {
-				countBelow++
+				// Wrong partner but scored >= 0.90
+				if item.score >= 0.90 {
+					countAutoWrong++
+				}
 			}
 		}
 
-		// "Not retrieved" = pairs that had true partner but it never ranked #1
-		notRetrieved := totalPairs - len(scores)
+		// "Not retrieved" = pairs where true partner never ranked #1
+		// This includes cases where rank-1 exists but is wrong
+		notRetrieved := totalPairs - len(scoreList)
 
 		distributions = append(distributions, scoreDistribution{
 			Category:         cat,
 			MeanScore:        meanScore,
 			TotalPairs:       totalPairs,
-			CountAuto:        countAuto,
+			CountAutoCorrect: countAutoCorrect,
+			CountAutoWrong:   countAutoWrong,
 			CountReview:      countReview,
 			CountBelowThresh: countBelow,
 			NotRetrieved:     notRetrieved,
@@ -351,21 +380,86 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	t.Logf(" Throughput Speed     : %.2f records/sec", recPerSec)
 	t.Log("==========================================================")
 
+	// BILINGUAL DICTIONARY RETRIEVAL DIAGNOSIS
+	// Diagnose why IN_DICTIONARY pairs are not being retrieved/ranked
+	t.Log("")
+	t.Log("==========================================================")
+	t.Log("    BILINGUAL DICTIONARY RETRIEVAL DIAGNOSIS              ")
+	t.Log("==========================================================")
+
+	bilingualInDictSources := make(map[string]*matcher.SourceRecord)
+	for _, pair := range labeledPairs {
+		if pair.Category == "BILINGUAL_IN_DICTIONARY" && pair.IsMatch {
+			bilingualInDictSources[pair.Source.ID] = &pair.Source
+		}
+	}
+
+	for srcID, src := range bilingualInDictSources {
+		// Find the true destination for this source
+		var trueDestID string
+		for _, pair := range labeledPairs {
+			if pair.Source.ID == srcID && pair.IsMatch && pair.Category == "BILINGUAL_IN_DICTIONARY" {
+				trueDestID = pair.Destination.ID
+				break
+			}
+		}
+
+		if trueDestID == "" {
+			continue
+		}
+
+		// Check if this source/destination pair appears in results
+		var foundInResults bool
+		var rank1Score float64
+		var rank1Dest string
+
+		for _, res := range results {
+			if res.SourceID == srcID && res.DestinationID == trueDestID {
+				foundInResults = true
+				if res.Rank == 1 {
+					rank1Score = res.ConfidenceScore
+				}
+				break
+			}
+		}
+
+		// Get rank-1 match for this source (if any)
+		for _, res := range results {
+			if res.SourceID == srcID && res.Rank == 1 {
+				rank1Dest = res.DestinationID
+				rank1Score = res.ConfidenceScore
+				break
+			}
+		}
+
+		if !foundInResults {
+			t.Logf("SOURCE %s (%q)", srcID, src.CustomerNameRaw)
+			t.Logf("  TRUE PARTNER: %s (not retrieved as candidate)", trueDestID)
+			t.Logf("  RANK-1 MATCH: %s (score=%.4f) — true partner never considered", rank1Dest, rank1Score)
+		} else {
+			t.Logf("SOURCE %s (%q)", srcID, src.CustomerNameRaw)
+			t.Logf("  TRUE PARTNER: %s (found in candidates)", trueDestID)
+			t.Logf("  RANK-1 MATCH: %s (score=%.4f)", rank1Dest, rank1Score)
+		}
+	}
+	t.Log("==========================================================")
+
 	// Thai Spelling Variant Score Distributions
 	if len(distributions) > 0 {
 		t.Log("")
 		t.Log("==========================================================")
-		t.Log("    THAI SPELLING VARIANT SCORE DISTRIBUTIONS              ")
+		t.Log("    SCORE DISTRIBUTIONS (Rank-1 Matches Only)              ")
 		t.Log("==========================================================")
-		t.Log("Category                    |  n  | Mean  | Auto (≥0.90) | Review | Below | NotRetr")
-		t.Log("----------------------------|-----|-------|--------------|--------|-------|--------")
+		t.Log("Category                    |  n  | Mean | AutoOK | AutoWrong | Review | Below | NotRetr")
+		t.Log("----------------------------|-----|------|--------|-----------|--------|-------|--------")
 		for _, d := range distributions {
+			correctAtRank1 := d.CountAutoCorrect + d.CountReview + d.CountBelowThresh
 			autoPercent := 0.0
-			if d.CountAuto+d.CountReview+d.CountBelowThresh > 0 {
-				autoPercent = float64(d.CountAuto) / float64(d.CountAuto+d.CountReview+d.CountBelowThresh) * 100.0
+			if correctAtRank1 > 0 {
+				autoPercent = float64(d.CountAutoCorrect) / float64(correctAtRank1) * 100.0
 			}
-			t.Logf("%-28s | %3d | %.3f | %d (%5.1f%%)    | %d      | %d     | %d",
-				d.Category, d.TotalPairs, d.MeanScore, d.CountAuto, autoPercent, d.CountReview, d.CountBelowThresh, d.NotRetrieved)
+			t.Logf("%-28s | %3d | %.3f | %d(%5.1f%%) | %d        | %d      | %d     | %d",
+				d.Category, d.TotalPairs, d.MeanScore, d.CountAutoCorrect, autoPercent, d.CountAutoWrong, d.CountReview, d.CountBelowThresh, d.NotRetrieved)
 		}
 		t.Log("==========================================================")
 	}
@@ -409,5 +503,81 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		t.Errorf("Decision-level accuracy %.2f%% is below measurement floor of 30%%. "+
 			"Top-1 ranking quality is %.2f%% (check if scorer regressed).",
 			accuracy*100, top1Accuracy*100)
+	}
+}
+
+// TestCanonicalFormUniqueness verifies that no two UNRELATED entities in the generated dataset
+// have the same canonical (phonetically normalized) form. This catches collisions that exist
+// only after Thai normalization (e.g., silent marks, leading vowels, homophone consonants).
+// Ground-truth match pairs are expected to have the same canonical form.
+func TestCanonicalFormUniqueness(t *testing.T) {
+	// Generate the dataset
+	datasetSize := 2000
+	sources, dests, groundTruthMatches, _ := GenerateBigMockDataset(datasetSize)
+
+	// Build canonical form -> entity list, tracking which entities are legitimately paired
+	type entityInfo struct {
+		id       string
+		raw      string
+		isSource bool
+	}
+	canonicalMap := make(map[string][]entityInfo)
+
+	// Collect all source entity canonical forms
+	for _, src := range sources {
+		canonical := src.NormalizedName.PhoneticForm
+		if canonical == "" {
+			canonical = src.NormalizedName.Cleaned
+		}
+		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{src.ID, src.CustomerNameRaw, true})
+	}
+
+	// Collect all destination entity canonical forms
+	for _, dst := range dests {
+		canonical := dst.NormalizedName.PhoneticForm
+		if canonical == "" {
+			canonical = dst.NormalizedName.Cleaned
+		}
+		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{dst.ID, dst.CustomerNameRaw, false})
+	}
+
+	// Check for UNRELATED collisions: entities with the same canonical form that are NOT ground-truth pairs
+	var collisions []string
+	for canonical, entities := range canonicalMap {
+		if len(entities) > 1 {
+			// For each pair of entities with this canonical form, check if they're a ground-truth match
+			for i := 0; i < len(entities); i++ {
+				for j := i + 1; j < len(entities); j++ {
+					ent1, ent2 := entities[i], entities[j]
+					// Skip if both are sources or both are destinations (those can't be matches)
+					if ent1.isSource == ent2.isSource {
+						// Both source or both dest - this is a collision
+						collisions = append(collisions, fmt.Sprintf("COLLISION: canonical %q (%.30s...)", canonical, canonical))
+						collisions = append(collisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent1.isSource], ent1.id, ent1.raw))
+						collisions = append(collisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent2.isSource], ent2.id, ent2.raw))
+					} else {
+						// One source, one dest - check if it's a ground-truth match
+						var srcID, destID string
+						if ent1.isSource {
+							srcID, destID = ent1.id, ent2.id
+						} else {
+							srcID, destID = ent2.id, ent1.id
+						}
+						matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+						if !groundTruthMatches[matchKey] {
+							// They're not supposed to match but have same canonical form - collision!
+							collisions = append(collisions, fmt.Sprintf("COLLISION: canonical %q (%.30s...)", canonical, canonical))
+							collisions = append(collisions, fmt.Sprintf("  SRC %s: %q", srcID, entities[i].raw))
+							collisions = append(collisions, fmt.Sprintf("  DST %s: %q", destID, entities[j].raw))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(collisions) > 0 {
+		t.Errorf("Found canonical-form collisions (unrelated entities with identical phonetic form):\n%s",
+			strings.Join(collisions, "\n"))
 	}
 }

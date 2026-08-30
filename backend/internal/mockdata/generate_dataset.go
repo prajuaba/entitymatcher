@@ -389,6 +389,260 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 		pairID++
 	}
 
+	// POSITIVE BILINGUAL CATEGORIES: Thai-Latin Cross-Script Matching
+
+	// Category 8: BILINGUAL_IN_DICTIONARY - Uses entities that ARE in the hardcoded map (memorization)
+	// These 9 pairs are the ones hardcoded in matcher/normalizer.go
+	// Make Thai side unique with full surnames to avoid collision, Latin side unindexed
+	bilingualInDictPairs := []struct {
+		thaiUnique, latin string
+	}{
+		{"ชื่อหนึ่งบัญชาการสยาม", "siam"},
+		{"ท่าขมสูงกรุงเทพมหานคร", "bangkok"},
+		{"คณะบัญชีกสิกรไทย", "kasikornbank"},
+		{"เครือข่ายเอไอเอสนานาชาติ", "ais"},
+		{"โครงการจัดการเจริญโภคภัณฑ์", "charoen pokphand"},
+		{"ตัวแทนอย่างสมชายผู้บริหาร", "somchai"},
+		{"ดีกรีศศาสตร์อารียา", "areeya"},
+		{"องค์กรวีระชัยวิจัยพัฒนา", "weerachai"},
+		{"ระบบจัดการพงษ์สวัสดิ์ต่างประเทศ", "pongsawat"},
+	}
+	for idx, pair := range bilingualInDictPairs {
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+
+		// Alternate direction: even indices Thai->Latin, odd indices Latin->Thai
+		var srcRaw, destRaw string
+		if idx%2 == 0 {
+			srcRaw = pair.thaiUnique  // Thai with unique surname
+			destRaw = pair.latin       // Latin unindexed
+		} else {
+			srcRaw = pair.latin        // Latin unindexed
+			destRaw = pair.thaiUnique  // Thai with unique surname
+		}
+
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-BILINGUAL-DICT-%05d", pairID),
+			CustomerNameRaw: srcRaw,
+			NormalizedName:  matcher.Normalize(srcRaw),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-BILINGUAL-DICT-%05d", pairID),
+			CustomerNameRaw: destRaw,
+			NormalizedName:  matcher.Normalize(destRaw),
+			TransactionDate: baseDate,
+		}
+
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "BILINGUAL_IN_DICTIONARY",
+		})
+		pairID++
+	}
+
+	// Category 9: BILINGUAL_OUT_OF_DICT - Real Thai names with RTGS romanizations NOT in the hardcoded map (generalization)
+	// These pairs use completely unique Thai names not in the corpus, with RTGS romanization.
+	// Use place names, less common personal names, and corporate names to ensure uniqueness.
+	bilingualOutOfDictPairs := []struct {
+		thaiUnique, latinUnique string
+	}{
+		{"ท่อมระนัง สัตยาพร", "Suchat Pracharoen"},
+		{"ท่าแพร่ศิลป์ ประเทศ", "Suchart Sangpradit"},       // RTGS variant
+		{"บ้านศรีสะพัน มงคลนิเวศ", "Prasert Chantarangsul"},
+		{"บ้านแหลม วิชัยวัฒนา", "Wichai Sirinimit"},
+		{"คลองแสนแสบ เวิ้งวังวิจิตร", "Vichai Namprasit"},      // variant
+		{"แม่ประมาณสุข ธรรมรักษ์", "Thanakorn Phromarak"},
+		{"ไร่เหมืองชัยภูมิ สัตชัย", "Napha Khunchai"},
+		{"หนองวัวซอรจนา กมลาวรรณ", "Kamon Sukhumvit"},
+		{"วังสะพัน ศักดิ์สยามสิทธิ์", "Sakchai Sitthiprom"},
+		{"บ่อวิน เบญจพลอรุณ", "Bunmi Ratchapruk"},
+		{"โครงการตั้งนครดุษฎี", "Boonmee Settakul"},          // variant
+		{"บ้านปงน้ำเย็นชัย", "Chan Namdamrong"},
+		{"โครงการสวนป่าแสนทรัพย์", "Jan Sitsuktham"},               // variant
+		{"ศรีสมุทรเจดีย์ศิลป์", "Saengthong Suthisak"},
+		{"บ้านกว่างไผ่ประสิทธิ์", "Rungroj Phakarom"},
+		{"หนองผึ้งส่วนราชการเรื่อง", "Phimchai Thairat"},
+		{"ไม้โครงสร้างชลธารา", "Chonthicha Nilthai"},
+		{"เขตภูเก็ตบ้านนรา", "Narong Prachachuen"},
+		{"เขตนวมพระนครสิทธิ์", "Narongse Sothawech"},        // variant
+		{"เขตพยุหะอรุณธารา", "Arun Rungsawang"},
+		{"ท่อมสิงห์เมฆาศรี", "Metha Kananek"},
+		{"โครงการน้ำชลสิทธิ์ไทยปูนอินดัสเทรี", "Thai Cement International Holdings"},
+		{"บริษัทชุมชนสมเด็จพระนเรศวรอนุสรณ์", "Eastern Siam Concrete Works"},
+		{"บริษัทการขนส่งเอกชนรัฐการจัดการ", "Asian Airways Logistics"},
+		{"เขตธัญบุรีท่องเที่ยวพัฒนา", "Phetchabun Tourism Services"},
+		{"เขตข่วงท่าแพสินค้า", "Udon Thani International"},
+		{"เขตชั้นเลิศท่าบ่อจังหวัร", "Sakon Nakhon Regional"},
+		{"บริษัทพนันน้ำหลวงเขต", "Maha Sarakham Cooperative"},
+		{"บ้านศรีฟ้าครบถ้วนศิลป์", "Loei Provincial Authority"},
+		{"โครงการชั้นราษฎรสิทธิ์", "Nakhon Phanom Federation"},
+	}
+	for idx, pair := range bilingualOutOfDictPairs {
+		srcID := fmt.Sprintf("src-%05d", pairID)
+		destID := fmt.Sprintf("dest-%05d", pairID)
+
+		// Vary direction: every 3rd is Thai->Latin, others are Latin->Thai
+		var srcRaw, destRaw string
+		if idx%3 == 0 {
+			srcRaw = pair.thaiUnique    // Thai with unique name
+			destRaw = pair.latinUnique  // Latin with unique name
+		} else {
+			srcRaw = pair.latinUnique   // Latin with unique name
+			destRaw = pair.thaiUnique   // Thai with unique name
+		}
+
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-BILINGUAL-OUTDICT-%05d", pairID),
+			CustomerNameRaw: srcRaw,
+			NormalizedName:  matcher.Normalize(srcRaw),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-BILINGUAL-OUTDICT-%05d", pairID),
+			CustomerNameRaw: destRaw,
+			NormalizedName:  matcher.Normalize(destRaw),
+			TransactionDate: baseDate,
+		}
+
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+
+		matchKey := fmt.Sprintf("%s_%s", srcID, destID)
+		groundTruthMatches[matchKey] = true
+
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     true,
+			Category:    "BILINGUAL_OUT_OF_DICT",
+		})
+		pairID++
+	}
+
+	// Category 10: NEG_BILINGUAL_FALSE_FRIEND - Completely unique Thai and English names that should NOT match each other
+	// Using completely new names not in the corpus to ensure they remain TN (true negatives).
+	bilingualFalseFriendPairs := []struct {
+		thai, latin string
+	}{
+		{"เชิดชัย ตันไทย", "Somchit Johnson"},
+		{"วรสิทธิ์ สุขวิสัย", "Somsak Lee"},
+		{"วิพัฒน์ คงสมพงษ์", "Wichian Brown"},
+		{"วิเศษ ศิลภา", "Wichit Davis"},
+		{"สิรินธร นิลนอก", "Siri Smith"},
+		{"สิริสาร ลิ่มค้อ", "Siril Williams"},
+		{"ชัยพร ชิณะวรรณ", "Chai Miller"},
+		{"ชาญชัย นวลสวรรค์", "Chay Wilson"},
+		{"ธรรมชาตินรงค์ สหระ", "Tam Anderson"},
+		{"ธรรมวิทย์ ศรีหา", "Thum Taylor"},
+		{"นรเศร ภูมิศรี", "Nara Thomas"},
+		{"นรพิพัฒน์ กลิ่นมะลิ", "Naran Jackson"},
+		{"ปรีชา อินทร์ศิลป์", "Priya White"},
+		{"ปรีชากร โครงสร้าง", "Preeya Harris"},
+		{"สิชน ธรรมชั้น", "Sichon Martin"},
+		{"สิชล ทองมนต์", "Sichol Garcia"},
+		{"วรรณวัฒน์ คำหา", "Wanna Rodriguez"},
+		{"วรรณพร ศรีบูชา", "Wanit Martinez"},
+		{"กฤษณพล ลี้แล", "Krish Robinson"},
+		{"กฤษณสิลป์ จันทศรี", "Krishna Clark"},
+		{"นิรามล ทรัพย์เศรษฐ", "Neera Lewis"},
+		{"นิรทา พุ่มพวง", "Neran Lee"},
+		{"สมรสาตรี ธรรมรักษ์", "Somrasa Walker"},
+		{"สมรสา เจริญสิน", "Samrasa Hall"},
+		{"ศิลปกร แก้วกำแพง", "Sil Young"},
+		{"ศิลปสิน อังคาร", "Silp Hernandez"},
+		{"นันทศรี โกศล", "Nan King"},
+		{"นันทีย์ มูนเนือง", "Nant Wright"},
+		{"โยธินวร นิ่มนวล", "Yothin Lopez"},
+		{"โยธิน สระดี", "Yodin Hill"},
+		{"ธรรมชาติสิลป์ ลิ้มปิยะ", "Thamachai Scott"},
+		{"ธรรมชาตินอก ผลิเสรี", "Thammachai Green"},
+		{"กมลา วัฒนาพร", "Kamala Adams"},
+		{"กมลาพร ชื่นสวัสดิ์", "Kamela Nelson"},
+		{"ขจรศักดิ์ กิจสวัสดิ์", "Khachon Carter"},
+		{"ขจรศักดี้ อินทร์สิทธิ์", "Khachorn Mitchell"},
+		{"บัญชา คุณรัตน์", "Bancha Perez"},
+		{"บัญชาพร ไทรทอง", "Buncha Roberts"},
+		{"นิพัฒน์สิน ศรีบัณฑิต", "Niphat Phillips"},
+		{"นิพัฒนา นิยมนีย์", "Niphon Campbell"},
+		{"ศรัณยา ชุมชอบ", "Saran Parker"},
+		{"ศรัณย์ นะภักดี", "Sarin Evans"},
+		{"ธวัชชัยกร ศิริวงษ์", "Thawachai Edwards"},
+		{"ธวัชชัย สารศิลป์", "Thavachai Collins"},
+		{"วารีนันท์ พลธีร", "Wari Reyes"},
+		{"วารี เหลี่ยมกา", "Waree Morris"},
+		{"เอกรัฐสิทธิ์ ทีระวัฒน์", "Ekarat Murphy"},
+		{"เอกรัฐ คำศิริ", "Ekarath Rogers"},
+		{"อัจฉริยะวัฒน์ เกื้อกูล", "Achariya Morgan"},
+		{"อัจฉริยะพร นิลประสาท", "Achariyah Peterson"},
+		{"บรรจงชัย ลิ่มรักษ์", "Banjong Gray"},
+		{"บรรจง สุรศิลป์", "Banjon Ramirez"},
+	}
+	for negIdx, pair := range bilingualFalseFriendPairs {
+		srcID := fmt.Sprintf("src-neg-bilingual-%05d", negIdx+1)
+		destID := fmt.Sprintf("dest-neg-bilingual-%05d", negIdx+1)
+
+		// Vary direction to avoid patterns
+		var srcRaw, destRaw string
+		if negIdx%2 == 0 {
+			srcRaw = pair.thai
+			destRaw = pair.latin
+		} else {
+			srcRaw = pair.latin
+			destRaw = pair.thai
+		}
+
+		srcRec := matcher.SourceRecord{
+			ID:              srcID,
+			BatchID:         batchID,
+			ReferenceID:     fmt.Sprintf("REF-NEG-BILINGUAL-FRIEND-%05d", negIdx+1),
+			CustomerNameRaw: srcRaw,
+			NormalizedName:  matcher.Normalize(srcRaw),
+			TransactionDate: baseDate,
+			TransactionType: "PAYMENT",
+		}
+
+		destRec := matcher.DestinationRecord{
+			ID:              destID,
+			BatchID:         batchID,
+			CustomerID:      fmt.Sprintf("CUST-NEG-BILINGUAL-FRIEND-%05d", negIdx+1),
+			CustomerNameRaw: destRaw,
+			NormalizedName:  matcher.Normalize(destRaw),
+			TransactionDate: baseDate,
+		}
+
+		sources = append(sources, srcRec)
+		dests = append(dests, destRec)
+
+		pairs = append(pairs, LabeledPair{
+			Source:      srcRec,
+			Destination: destRec,
+			IsMatch:     false,
+			Category:    "NEG_BILINGUAL_FALSE_FRIEND",
+		})
+		negCount++
+	}
+
 	// NEGATIVE MATCHES: ~40% of dataset (8 per iteration to distribute across 8 categories)
 	negativeCount := (count * 2) / 5
 	for i := 0; i < negativeCount; i++ {
