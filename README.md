@@ -188,12 +188,28 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
 
 **Auth** — `POST /api/auth/login`, `GET /api/auth/me`
 
-**Engine** — `GET|PUT /api/config`, `POST /api/upload`, `POST /api/match/run`,
+**Engine** — `GET|PUT /api/config`, `POST /api/upload` (JSON records),
+`POST /api/upload/file` (multipart `.csv`/`.xlsx`/`.xls`), `POST /api/match/run`,
 `GET /api/match/progress` (SSE), `GET /api/match/results`, `POST /api/match/action`,
 `POST /api/match/manual-link`, `GET /api/destinations/search`, `GET /api/export/csv`,
 `POST /api/llm/evaluate`
 
+`POST /api/upload/file` takes `source_file` and `destination_file`, plus optional
+`batch_id`, `column_mapping` (JSON) and `source_sheet`/`destination_sheet` for Excel.
+Files are read through the same connectors used elsewhere. Requests are capped at 50 MiB
+and 50,000 rows per file; hitting the row cap sets `truncated` and a warning in the
+response rather than silently returning a short dataset.
+
 **Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`
+
+**Calibration** (ADMIN) — `POST /api/calibration/fit`, `GET /api/calibration/status`
+
+Fit trains on reviewer decisions in the audit log and reports Brier and ECE before and
+after against a holdout. It requires at least 20 labelled observations: below that the
+holdout is too small for those metrics to mean anything, and an empty holdout scores 0.0,
+which is indistinguishable from a perfect calibrator. Both responses carry a caveat that
+the training data comes almost entirely from the review queue, so any fitted calibrator is
+well-calibrated for the review band and extrapolating outside it.
 
 **Governance** — `GET /api/audit/logs`, `GET /api/audit/export`
 
