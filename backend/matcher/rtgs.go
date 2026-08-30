@@ -39,7 +39,23 @@ func romanizeSyllable(syl Syllable) string {
 	}
 
 	// Romanize vowel
-	vowel := romanizeVowel(syl.Vowel)
+	// Implicit vowel rule (task-documented approximation): when no vowel is written,
+	// a syllable that closes on its own final consonant is pronounced with an
+	// inherent "o" (e.g. กร with no written vowel and final ร -> "kon"-like); a
+	// syllable with no final of its own (it bridges into the next consonant, e.g.
+	// the ธ in ธนากร) is pronounced with inherent "a". This mirrors real Thai
+	// orthography (cf. ถนน "thanon": first syllable ถ -> "tha", second syllable
+	// นน -> "non").
+	var vowel string
+	if syl.Vowel == "" {
+		if syl.Final != "" {
+			vowel = "o"
+		} else {
+			vowel = "a"
+		}
+	} else {
+		vowel = romanizeVowel(syl.Vowel)
+	}
 	sb.WriteString(vowel)
 
 	// Romanize final consonant
@@ -154,15 +170,12 @@ func romanizeInitial(initial string) string {
 	}
 }
 
-// romanizeVowel maps Thai vowels to RTGS romanization
-// Handles written vowels and approximations for rare ones
-// Implicit vowel (when empty): defaults to "a"
+// romanizeVowel maps Thai vowels to RTGS romanization for WRITTEN vowels.
+// The implicit-vowel case (vowel == "") is handled by the caller (romanizeSyllable),
+// which needs Syllable.Final to choose between the "a" (open, bridges to next
+// consonant) and "o" (closed, own final) approximations. This function should
+// never be called with an empty vowel string.
 func romanizeVowel(vowel string) string {
-	if vowel == "" {
-		// Implicit vowel: default to "a"
-		return "a"
-	}
-
 	// Check for compound vowels first (must be checked before component vowels)
 	// Compound patterns: เ-ีย (ia), เ-ือ (uea), ั-ว (ua)
 	if strings.Contains(vowel, "เ") && strings.Contains(vowel, "ย") && strings.Contains(vowel, "ี") {
