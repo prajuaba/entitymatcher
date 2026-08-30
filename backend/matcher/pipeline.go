@@ -39,6 +39,7 @@ type MatchResultItem struct {
 	DestinationID   string             `json:"destination_id"`
 	Destination     *DestinationRecord `json:"destination,omitempty"`
 	ConfidenceScore float64            `json:"confidence_score"`
+	CalibratedScore float64            `json:"calibrated_score"` // Calibrated probability P(match), mirrors ConfidenceScore when calibration disabled
 	NameScore       float64            `json:"name_score"`
 	DateScore       float64            `json:"date_score"`
 	JWScore         float64            `json:"jw_score"`
@@ -67,6 +68,7 @@ type Config struct {
 	AssignmentStrategy      string           `json:"assignment_strategy"`        // Default: "GREEDY_1_1"
 	EmitUnmatched           bool             `json:"emit_unmatched"`             // Default: true
 	MaxAlternativesPerSource int              `json:"max_alternatives_per_source"` // Default: 5. Use negative to keep all alternatives.
+	CalibrationEnabled       bool             `json:"calibration_enabled"`         // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
 }
 
 func DefaultConfig() Config {
@@ -84,6 +86,7 @@ func DefaultConfig() Config {
 		AssignmentStrategy:      "GREEDY_1_1",
 		EmitUnmatched:           true,
 		MaxAlternativesPerSource: 5,
+		CalibrationEnabled:       false,
 	}
 }
 
@@ -103,7 +106,8 @@ type BatchProgress struct {
 }
 
 type MatchEngine struct {
-	Config Config
+	Config      Config
+	calibrator  Calibrator // Optional calibrator for converting raw scores to probabilities
 }
 
 func NewMatchEngine(cfg Config) *MatchEngine {
@@ -125,7 +129,14 @@ func NewMatchEngine(cfg Config) *MatchEngine {
 	if cfg.MaxAlternativesPerSource == 0 {
 		cfg.MaxAlternativesPerSource = 5
 	}
-	return &MatchEngine{Config: cfg}
+	return &MatchEngine{Config: cfg, calibrator: nil}
+}
+
+// SetCalibrator assigns a fitted Calibrator to the engine for score calibration.
+// If the engine's CalibrationEnabled is true and a calibrator is set, scores will be
+// calibrated to probabilities P(match) for threshold comparisons.
+func (e *MatchEngine) SetCalibrator(cal Calibrator) {
+	e.calibrator = cal
 }
 
 // IsAutoMatchable determines if a rank-1 match qualifies for auto-matching.
@@ -294,15 +305,35 @@ func (e *MatchEngine) ExecuteJob(
 							margin = ScoredCandidates[0].ScoreRes.TotalScore
 						}
 
+						// Compute calibrated score if enabled
+						calibratedScore := scoreRes.TotalScore
+						if e.Config.CalibrationEnabled && e.calibrator != nil {
+							calibratedScore = e.calibrator.Calibrate(scoreRes.TotalScore)
+						}
+
+						// Compute calibrated runner-up score for threshold decisions
+						calibratedRunnerUpScore := runnerUpScore
+						if rankNum == 1 && runnerUpScore > 0 && e.Config.CalibrationEnabled && e.calibrator != nil {
+							calibratedRunnerUpScore = e.calibrator.Calibrate(runnerUpScore)
+						}
+
 						// Propose decision for rank-1 only
 						status := "REVIEW_NEEDED"
 						note := ""
 
 						if rankNum == 1 {
 							// First-ranked candidate: apply decision rules via helper
+							// Use calibrated score for decisions if calibration is enabled, else use raw score
+							decisionScore := scoreRes.TotalScore
+							decisionRunnerUp := runnerUpScore
+							if e.Config.CalibrationEnabled && e.calibrator != nil {
+								decisionScore = calibratedScore
+								decisionRunnerUp = calibratedRunnerUpScore
+							}
+
 							canAutoMatch, decisionNote := IsAutoMatchable(
-								scoreRes.TotalScore,
-								runnerUpScore,
+								decisionScore,
+								decisionRunnerUp,
 								e.Config.AutoMatchThreshold,
 								e.Config.MarginThreshold,
 								e.Config.ExactMatchFloor,
@@ -331,6 +362,7 @@ func (e *MatchEngine) ExecuteJob(
 							DestinationID:   cand.ID,
 							Destination:     &candCopy,
 							ConfidenceScore: scoreRes.TotalScore,
+							CalibratedScore: calibratedScore,
 							NameScore:       scoreRes.NameScore,
 							DateScore:       scoreRes.DateScore,
 							JWScore:         scoreRes.JWScore,
