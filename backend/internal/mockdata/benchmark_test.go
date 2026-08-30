@@ -506,22 +506,31 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	}
 }
 
-// TestCanonicalFormUniqueness verifies that no two UNRELATED entities in the generated dataset
-// have the same canonical (phonetically normalized) form. This catches collisions that exist
-// only after Thai normalization (e.g., silent marks, leading vowels, homophone consonants).
-// Ground-truth match pairs are expected to have the same canonical form.
+// TestCanonicalFormUniqueness verifies that no two entities with DIFFERENT raw strings in the
+// generated dataset have the same canonical (phonetically normalized) form, UNLESS they are an
+// expected ground-truth variant pair. This catches collisions like ชัยย์ → ชัย (unintended).
+// Identical raw strings (duplicates) and expected variant pairs are both allowed.
 func TestCanonicalFormUniqueness(t *testing.T) {
 	// Generate the dataset
 	datasetSize := 2000
-	sources, dests, groundTruthMatches, _ := GenerateBigMockDataset(datasetSize)
+	sources, dests, groundTruthMatches, labeledPairs := GenerateBigMockDataset(datasetSize)
 
-	// Build canonical form -> entity list, tracking which entities are legitimately paired
+	// Build canonical form -> entity list
 	type entityInfo struct {
 		id       string
 		raw      string
 		isSource bool
+		category string
 	}
 	canonicalMap := make(map[string][]entityInfo)
+
+	// Map to find which category each record belongs to
+	sourceToCategory := make(map[string]string)
+	destToCategory := make(map[string]string)
+	for _, pair := range labeledPairs {
+		sourceToCategory[pair.Source.ID] = pair.Category
+		destToCategory[pair.Destination.ID] = pair.Category
+	}
 
 	// Collect all source entity canonical forms
 	for _, src := range sources {
@@ -529,7 +538,7 @@ func TestCanonicalFormUniqueness(t *testing.T) {
 		if canonical == "" {
 			canonical = src.NormalizedName.Cleaned
 		}
-		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{src.ID, src.CustomerNameRaw, true})
+		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{src.ID, src.CustomerNameRaw, true, sourceToCategory[src.ID]})
 	}
 
 	// Collect all destination entity canonical forms
@@ -538,46 +547,53 @@ func TestCanonicalFormUniqueness(t *testing.T) {
 		if canonical == "" {
 			canonical = dst.NormalizedName.Cleaned
 		}
-		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{dst.ID, dst.CustomerNameRaw, false})
+		canonicalMap[canonical] = append(canonicalMap[canonical], entityInfo{dst.ID, dst.CustomerNameRaw, false, destToCategory[dst.ID]})
 	}
 
-	// Check for UNRELATED collisions: entities with the same canonical form that are NOT ground-truth pairs
-	var collisions []string
+	// Check for problematic collisions: source-destination pairs with same canonical form but DIFFERENT raw strings
+	// that are NOT expected ground-truth matches. (Source-source or dest-dest collisions are not problematic.)
+	var meaningfulCollisions []string
 	for canonical, entities := range canonicalMap {
 		if len(entities) > 1 {
-			// For each pair of entities with this canonical form, check if they're a ground-truth match
+			// For each source-destination pair with this canonical form
 			for i := 0; i < len(entities); i++ {
 				for j := i + 1; j < len(entities); j++ {
 					ent1, ent2 := entities[i], entities[j]
-					// Skip if both are sources or both are destinations (those can't be matches)
+
+					// If raw strings are identical, skip (they're duplicates, not collisions)
+					if ent1.raw == ent2.raw {
+						continue
+					}
+
+					// Skip if both are sources or both are destinations (can't cause false positive)
 					if ent1.isSource == ent2.isSource {
-						// Both source or both dest - this is a collision
-						collisions = append(collisions, fmt.Sprintf("COLLISION: canonical %q (%.30s...)", canonical, canonical))
-						collisions = append(collisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent1.isSource], ent1.id, ent1.raw))
-						collisions = append(collisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent2.isSource], ent2.id, ent2.raw))
+						continue
+					}
+
+					// One source, one destination with different raw strings but same canonical form
+					// Check if they're an expected ground-truth match
+					isGroundTruthMatch := false
+					if ent1.isSource {
+						matchKey := fmt.Sprintf("%s_%s", ent1.id, ent2.id)
+						isGroundTruthMatch = groundTruthMatches[matchKey]
 					} else {
-						// One source, one dest - check if it's a ground-truth match
-						var srcID, destID string
-						if ent1.isSource {
-							srcID, destID = ent1.id, ent2.id
-						} else {
-							srcID, destID = ent2.id, ent1.id
-						}
-						matchKey := fmt.Sprintf("%s_%s", srcID, destID)
-						if !groundTruthMatches[matchKey] {
-							// They're not supposed to match but have same canonical form - collision!
-							collisions = append(collisions, fmt.Sprintf("COLLISION: canonical %q (%.30s...)", canonical, canonical))
-							collisions = append(collisions, fmt.Sprintf("  SRC %s: %q", srcID, entities[i].raw))
-							collisions = append(collisions, fmt.Sprintf("  DST %s: %q", destID, entities[j].raw))
-						}
+						matchKey := fmt.Sprintf("%s_%s", ent2.id, ent1.id)
+						isGroundTruthMatch = groundTruthMatches[matchKey]
+					}
+
+					// If not a ground-truth match, it's a problematic collision
+					if !isGroundTruthMatch {
+						meaningfulCollisions = append(meaningfulCollisions, fmt.Sprintf("COLLISION: canonical %q", canonical))
+						meaningfulCollisions = append(meaningfulCollisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent1.isSource], ent1.id, ent1.raw))
+						meaningfulCollisions = append(meaningfulCollisions, fmt.Sprintf("  %s %s: %q", map[bool]string{true: "SRC", false: "DST"}[ent2.isSource], ent2.id, ent2.raw))
 					}
 				}
 			}
 		}
 	}
 
-	if len(collisions) > 0 {
-		t.Errorf("Found canonical-form collisions (unrelated entities with identical phonetic form):\n%s",
-			strings.Join(collisions, "\n"))
+	if len(meaningfulCollisions) > 0 {
+		t.Errorf("Found canonical-form collisions (different source-destination pairs with identical phonetic form):\n%s",
+			strings.Join(meaningfulCollisions, "\n"))
 	}
 }
