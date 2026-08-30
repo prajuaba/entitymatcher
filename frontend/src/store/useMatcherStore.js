@@ -214,6 +214,37 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
+  uploadDataFiles: async (formData) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await apiFetch('/api/upload/file', {
+        method: 'POST',
+        body: formData,
+      })
+      const raw = await res.text()
+      if (!res.ok) {
+        let message = raw.trim()
+        try {
+          const parsed = JSON.parse(raw)
+          message = parsed.message || parsed.error || message
+        } catch (e) {
+          // raw is plain text, use as-is
+        }
+        if (!message) {
+          message = `File upload failed (${res.status})`
+        }
+        throw new Error(message)
+      } else {
+        const data = JSON.parse(raw)
+        set({ batchID: data.batch_id, loading: false })
+        return data
+      }
+    } catch (e) {
+      set({ error: e.message, loading: false })
+      throw e
+    }
+  },
+
   runMatching: async (batchIdToRun) => {
     const bId = batchIdToRun || get().batchID
     set({ loading: true, activeTab: 'progress' })

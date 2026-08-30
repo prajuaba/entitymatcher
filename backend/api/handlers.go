@@ -6,22 +6,29 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"entitymatcher/internal/mockdata"
 	"entitymatcher/matcher"
 	"entitymatcher/store"
-	"entitymatcher/internal/mockdata"
 )
 
 type Server struct {
 	store            store.Repository
 	llmResolver      *matcher.LLMResolver
 	schedulerManager *matcher.SchedulerManager
+	calibratorMu     sync.RWMutex
+	calibrator       matcher.Calibrator
 }
 
 func NewServer(st store.Repository) *Server {
@@ -44,6 +51,22 @@ func (s *Server) StopScheduler() {
 	if s.schedulerManager != nil {
 		s.schedulerManager.Stop()
 	}
+}
+
+// SetCalibrator installs cal as the calibrator used by subsequent match runs (each run
+// constructs a fresh matcher.MatchEngine, so the engine can't hold this itself — the Server
+// holds it and wires it into each new engine in runBatchAndPersist). Passing nil clears it.
+func (s *Server) SetCalibrator(cal matcher.Calibrator) {
+	s.calibratorMu.Lock()
+	defer s.calibratorMu.Unlock()
+	s.calibrator = cal
+}
+
+// GetCalibrator returns the currently installed calibrator, or nil if none has been set.
+func (s *Server) GetCalibrator() matcher.Calibrator {
+	s.calibratorMu.RLock()
+	defer s.calibratorMu.RUnlock()
+	return s.calibrator
 }
 
 func enableCORS(w http.ResponseWriter) {
@@ -291,6 +314,9 @@ func (s *Server) runBatchAndPersist(ctx context.Context, batchID string) (matche
 
 	cfg := s.store.GetConfig()
 	engine := matcher.NewMatchEngine(cfg)
+	if cal := s.GetCalibrator(); cal != nil {
+		engine.SetCalibrator(cal)
+	}
 
 	startTime := time.Now()
 	results, progress := engine.ExecuteJob(
@@ -391,7 +417,7 @@ func (s *Server) fireWebhooks(batchID string, outcome matcher.ReconcileOutcome) 
 			AutoMatchedCount:  outcome.AutoMatched,
 			ReviewNeededCount: outcome.ReviewNeeded,
 			Timestamp:         time.Now(),
-			Message:           fmt.Sprintf("Anomaly detected in batch %s: auto-match rate %.1f%%, no-match rate %.1f%%",
+			Message: fmt.Sprintf("Anomaly detected in batch %s: auto-match rate %.1f%%, no-match rate %.1f%%",
 				batchID,
 				(float64(outcome.AutoMatched)/float64(outcome.TotalSources))*100,
 				(float64(outcome.NoMatch)/float64(outcome.TotalSources))*100),
@@ -451,6 +477,77 @@ type DatasetPayload struct {
 	Destinations  []map[string]interface{} `json:"destinations"`
 }
 
+// buildSourceRecords converts raw source rows into matcher.SourceRecord values using cfg's
+// column mapping. Extracted verbatim from HandleUpload's inline loop (no behavior change).
+func buildSourceRecords(raw []map[string]interface{}, batchID string, cfg matcher.Config) []matcher.SourceRecord {
+	sources := make([]matcher.SourceRecord, 0, len(raw))
+	for i, rawMap := range raw {
+		refID := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.RefIDSrc)
+		if refID == "" {
+			refID = matcher.ExtractFieldValue(rawMap, "reference_id")
+		}
+		if refID == "" {
+			refID = fmt.Sprintf("SRC-%04d", i+1)
+		}
+
+		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsSrc)
+
+		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldSrc)
+		txDate, _ := time.Parse("2006-01-02", dateStr)
+		if txDate.IsZero() {
+			txDate = time.Now()
+		}
+
+		txType := matcher.ExtractFieldValue(rawMap, "transaction_type")
+
+		sources = append(sources, matcher.SourceRecord{
+			ID:              fmt.Sprintf("src-%d", i+1),
+			BatchID:         batchID,
+			ReferenceID:     refID,
+			CustomerNameRaw: nameStr,
+			NormalizedName:  matcher.Normalize(nameStr),
+			TransactionDate: txDate,
+			TransactionType: txType,
+			Attributes:      rawMap,
+		})
+	}
+	return sources
+}
+
+// buildDestinationRecords converts raw destination rows into matcher.DestinationRecord values
+// using cfg's column mapping. Extracted verbatim from HandleUpload's inline loop (no behavior change).
+func buildDestinationRecords(raw []map[string]interface{}, batchID string, cfg matcher.Config) []matcher.DestinationRecord {
+	destinations := make([]matcher.DestinationRecord, 0, len(raw))
+	for i, rawMap := range raw {
+		custID := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.RefIDDest)
+		if custID == "" {
+			custID = matcher.ExtractFieldValue(rawMap, "customer_id")
+		}
+		if custID == "" {
+			custID = fmt.Sprintf("DEST-%04d", i+1)
+		}
+
+		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsDest)
+
+		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldDest)
+		txDate, _ := time.Parse("2006-01-02", dateStr)
+		if txDate.IsZero() {
+			txDate = time.Now()
+		}
+
+		destinations = append(destinations, matcher.DestinationRecord{
+			ID:              fmt.Sprintf("dest-%d", i+1),
+			BatchID:         batchID,
+			CustomerID:      custID,
+			CustomerNameRaw: nameStr,
+			NormalizedName:  matcher.Normalize(nameStr),
+			TransactionDate: txDate,
+			Attributes:      rawMap,
+		})
+	}
+	return destinations
+}
+
 func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	if r.Method == "OPTIONS" {
@@ -477,66 +574,8 @@ func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		s.store.UpdateConfig(cfg)
 	}
 
-	sources := make([]matcher.SourceRecord, 0, len(payload.Sources))
-	for i, rawMap := range payload.Sources {
-		refID := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.RefIDSrc)
-		if refID == "" {
-			refID = matcher.ExtractFieldValue(rawMap, "reference_id")
-		}
-		if refID == "" {
-			refID = fmt.Sprintf("SRC-%04d", i+1)
-		}
-
-		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsSrc)
-
-		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldSrc)
-		txDate, _ := time.Parse("2006-01-02", dateStr)
-		if txDate.IsZero() {
-			txDate = time.Now()
-		}
-
-		txType := matcher.ExtractFieldValue(rawMap, "transaction_type")
-
-		sources = append(sources, matcher.SourceRecord{
-			ID:              fmt.Sprintf("src-%d", i+1),
-			BatchID:         payload.BatchID,
-			ReferenceID:     refID,
-			CustomerNameRaw: nameStr,
-			NormalizedName:  matcher.Normalize(nameStr),
-			TransactionDate: txDate,
-			TransactionType: txType,
-			Attributes:      rawMap,
-		})
-	}
-
-	destinations := make([]matcher.DestinationRecord, 0, len(payload.Destinations))
-	for i, rawMap := range payload.Destinations {
-		custID := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.RefIDDest)
-		if custID == "" {
-			custID = matcher.ExtractFieldValue(rawMap, "customer_id")
-		}
-		if custID == "" {
-			custID = fmt.Sprintf("DEST-%04d", i+1)
-		}
-
-		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsDest)
-
-		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldDest)
-		txDate, _ := time.Parse("2006-01-02", dateStr)
-		if txDate.IsZero() {
-			txDate = time.Now()
-		}
-
-		destinations = append(destinations, matcher.DestinationRecord{
-			ID:              fmt.Sprintf("dest-%d", i+1),
-			BatchID:         payload.BatchID,
-			CustomerID:      custID,
-			CustomerNameRaw: nameStr,
-			NormalizedName:  matcher.Normalize(nameStr),
-			TransactionDate: txDate,
-			Attributes:      rawMap,
-		})
-	}
+	sources := buildSourceRecords(payload.Sources, payload.BatchID, cfg)
+	destinations := buildDestinationRecords(payload.Destinations, payload.BatchID, cfg)
 
 	s.store.SaveDataset(payload.BatchID, sources, destinations)
 
@@ -551,6 +590,200 @@ func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		"destination_count": len(destinations),
 		"column_mapping":    cfg.ColumnMapping,
 	})
+}
+
+// MaxUploadBytes caps a single multipart ingestion request.
+const MaxUploadBytes = 50 << 20 // 50 MiB
+
+// MaxIngestRecords caps rows read from one uploaded file. Matches the clamp
+// ceiling inside the CSV/Excel connectors' FetchRecords.
+const MaxIngestRecords = 50000
+
+// saveUploadedFileToTemp validates the extension of an uploaded multipart file, copies its
+// content to a new temp file on disk, and returns the temp file's path. The caller owns the
+// returned path and is responsible for os.Remove'ing it once done.
+func saveUploadedFileToTemp(fh *multipart.FileHeader) (string, error) {
+	multipartFile, err := fh.Open()
+	if err != nil {
+		return "", fmt.Errorf("failed to open uploaded file: %w", err)
+	}
+	defer multipartFile.Close()
+
+	ext := strings.ToLower(filepath.Ext(fh.Filename))
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
+		return "", fmt.Errorf("unsupported file extension %q: allowed extensions are .csv, .xlsx, .xls", ext)
+	}
+
+	tmpFile, err := os.CreateTemp("", "ingest-*"+ext)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	tmpPath := tmpFile.Name()
+
+	if _, err := io.Copy(tmpFile, multipartFile); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	// Close explicitly and check the error: a deferred Close would discard a
+	// write error from the final flush, which would leave a silently truncated
+	// file for the connector to parse.
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	return tmpPath, nil
+}
+
+// HandleUploadFile ingests a source and destination dataset from real CSV/Excel files
+// submitted as multipart/form-data, using the matcher.CSVConnector / matcher.ExcelConnector
+// FetchRecords implementations rather than accepting pre-parsed JSON arrays.
+func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadBytes)
+	err := r.ParseMultipartForm(MaxUploadBytes)
+	if err != nil {
+		http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	batchID := r.FormValue("batch_id")
+	if batchID == "" {
+		batchID = fmt.Sprintf("batch-%d", time.Now().UnixNano())
+	}
+
+	columnMappingStr := r.FormValue("column_mapping")
+	cfg := s.store.GetConfig()
+	if columnMappingStr != "" {
+		var cm matcher.ColumnMapping
+		if err := json.Unmarshal([]byte(columnMappingStr), &cm); err != nil {
+			http.Error(w, "Invalid column_mapping JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg.ColumnMapping = cm
+		s.store.UpdateConfig(cfg)
+	}
+
+	sourceFile, sourceHeader, err := r.FormFile("source_file")
+	if err != nil {
+		http.Error(w, "source_file is required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer sourceFile.Close()
+
+	sourcePath, err := saveUploadedFileToTemp(sourceHeader)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer os.Remove(sourcePath)
+
+	sourceExt := strings.ToLower(filepath.Ext(sourceHeader.Filename))
+	var sourceType matcher.SourceType
+	if sourceExt == ".csv" {
+		sourceType = matcher.SourceTypeCSV
+	} else {
+		sourceType = matcher.SourceTypeExcel
+	}
+
+	sourceSheet := r.FormValue("source_sheet")
+	sourceConnCfg := matcher.ConnectionConfig{
+		Type:     sourceType,
+		FilePath: sourcePath,
+	}
+	if sourceType == matcher.SourceTypeExcel && sourceSheet != "" {
+		sourceConnCfg.ExtraParams = map[string]interface{}{"sheet": sourceSheet}
+	}
+
+	sourceConn, err := matcher.NewDataConnector(sourceConnCfg)
+	if err != nil {
+		http.Error(w, "Failed to initialize connector for source_file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sourceRows, err := sourceConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
+	if err != nil {
+		http.Error(w, "Failed to read source_file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	destinationFile, destinationHeader, err := r.FormFile("destination_file")
+	if err != nil {
+		http.Error(w, "destination_file is required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer destinationFile.Close()
+
+	destinationPath, err := saveUploadedFileToTemp(destinationHeader)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer os.Remove(destinationPath)
+
+	destinationExt := strings.ToLower(filepath.Ext(destinationHeader.Filename))
+	var destType matcher.SourceType
+	if destinationExt == ".csv" {
+		destType = matcher.SourceTypeCSV
+	} else {
+		destType = matcher.SourceTypeExcel
+	}
+
+	destSheet := r.FormValue("destination_sheet")
+	destConnCfg := matcher.ConnectionConfig{
+		Type:     destType,
+		FilePath: destinationPath,
+	}
+	if destType == matcher.SourceTypeExcel && destSheet != "" {
+		destConnCfg.ExtraParams = map[string]interface{}{"sheet": destSheet}
+	}
+
+	destConn, err := matcher.NewDataConnector(destConnCfg)
+	if err != nil {
+		http.Error(w, "Failed to initialize connector for destination_file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	destRows, err := destConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
+	if err != nil {
+		http.Error(w, "Failed to read destination_file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	truncated := len(sourceRows) == MaxIngestRecords || len(destRows) == MaxIngestRecords
+
+	sources := buildSourceRecords(sourceRows, batchID, cfg)
+	destinations := buildDestinationRecords(destRows, batchID, cfg)
+
+	s.store.SaveDataset(batchID, sources, destinations)
+	s.schedulerManager.SetLastBatchID(batchID)
+
+	resp := map[string]interface{}{
+		"status":            "success",
+		"batch_id":          batchID,
+		"source_count":      len(sources),
+		"destination_count": len(destinations),
+		"column_mapping":    cfg.ColumnMapping,
+		"truncated":         truncated,
+	}
+
+	if truncated {
+		resp["warning"] = fmt.Sprintf("one or more files returned the maximum of %d rows; additional rows may have been truncated. Increase MaxIngestRecords or split the file if this is unexpected.", MaxIngestRecords)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) HandleRunMatch(w http.ResponseWriter, r *http.Request) {
@@ -781,9 +1014,9 @@ func (s *Server) HandleMatchAction(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":       "success",
-		"match_id":     payload.MatchID,
-		"new_status":   targetStatus,
+		"status":     "success",
+		"match_id":   payload.MatchID,
+		"new_status": targetStatus,
 	})
 }
 
@@ -1232,3 +1465,267 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 }
 func (r *responseRecorder) WriteHeader(statusCode int) { r.status = statusCode }
 
+// MinCalibrationObservations is the minimum number of labelled observations required
+// before HandleCalibrationFit will fit and persist a calibrator. Below this, the
+// every-5th-element holdout in splitObservations is too small (or empty) for the
+// reported Brier/ECE metrics to mean anything -- an empty holdout scores 0.0, which
+// is indistinguishable from a perfect calibrator. Rejecting is safer than persisting
+// a model whose quality was never actually measured.
+const MinCalibrationObservations = 20
+
+func splitObservations(obs []matcher.LabelledScore) (train, holdout []matcher.LabelledScore) {
+	for i, o := range obs {
+		if i%5 == 4 {
+			holdout = append(holdout, o)
+		} else {
+			train = append(train, o)
+		}
+	}
+	return train, holdout
+}
+
+func brierScore(obs []matcher.LabelledScore, predictFn func(score float64) float64) float64 {
+	if len(obs) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, o := range obs {
+		p := predictFn(o.Score)
+		y := 0.0
+		if o.IsMatch {
+			y = 1.0
+		}
+		diff := p - y
+		sum += diff * diff
+	}
+	return sum / float64(len(obs))
+}
+
+func expectedCalibrationError(obs []matcher.LabelledScore, predictFn func(score float64) float64) float64 {
+	const numBins = 10
+	if len(obs) == 0 {
+		return 0
+	}
+	type bin struct {
+		sumPred float64
+		sumY    float64
+		count   int
+	}
+	bins := make([]bin, numBins)
+	for _, o := range obs {
+		p := predictFn(o.Score)
+		if p < 0 {
+			p = 0
+		}
+		if p > 1 {
+			p = 1
+		}
+		idx := int(p * float64(numBins))
+		if idx >= numBins {
+			idx = numBins - 1
+		}
+		y := 0.0
+		if o.IsMatch {
+			y = 1.0
+		}
+		bins[idx].sumPred += p
+		bins[idx].sumY += y
+		bins[idx].count++
+	}
+	var ece float64
+	total := float64(len(obs))
+	for _, b := range bins {
+		if b.count == 0 {
+			continue
+		}
+		meanPred := b.sumPred / float64(b.count)
+		meanY := b.sumY / float64(b.count)
+		weight := float64(b.count) / total
+		diff := meanPred - meanY
+		if diff < 0 {
+			diff = -diff
+		}
+		ece += weight * diff
+	}
+	return ece
+}
+
+type CalibrationFitRequest struct {
+	BatchID string `json:"batch_id"`
+}
+
+type CalibrationFitResponse struct {
+	Status           string         `json:"status"`
+	ModelID          string         `json:"model_id"`
+	BatchID          string         `json:"batch_id"`
+	ObservationCount int            `json:"observation_count"`
+	PositiveCount    int            `json:"positive_count"`
+	NegativeCount    int            `json:"negative_count"`
+	TrainCount       int            `json:"train_count"`
+	HoldoutCount     int            `json:"holdout_count"`
+	BrierScoreBefore float64        `json:"brier_score_before"`
+	BrierScoreAfter  float64        `json:"brier_score_after"`
+	ECEScoreBefore   float64        `json:"ece_score_before"`
+	ECEScoreAfter    float64        `json:"ece_score_after"`
+	ByPreviousStatus map[string]int `json:"by_previous_status"`
+	Caveat           string         `json:"caveat"`
+}
+
+func (s *Server) HandleCalibrationFit(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CalibrationFitRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // tolerate empty body -> batch_id ""
+	}
+
+	obs, err := s.store.CalibrationObservations(req.BatchID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to load calibration observations: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	stats, err := s.store.CalibrationObservationStats(req.BatchID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to load calibration observation stats: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if len(obs) < MinCalibrationObservations {
+		http.Error(w, fmt.Sprintf(
+			"insufficient calibration observations: have %d, need at least %d; "+
+				"reviewer decisions are the only source of labels, so review more pairs before fitting",
+			len(obs), MinCalibrationObservations), http.StatusBadRequest)
+		return
+	}
+
+	train, holdout := splitObservations(obs)
+
+	cal, err := matcher.FitCalibrator(train)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	identity := func(score float64) float64 { return score }
+	brierBefore := brierScore(holdout, identity)
+	brierAfter := brierScore(holdout, cal.Calibrate)
+	eceBefore := expectedCalibrationError(holdout, identity)
+	eceAfter := expectedCalibrationError(holdout, cal.Calibrate)
+
+	modelJSON, err := json.Marshal(cal)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to serialize fitted calibrator: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fittedBy := ""
+	if claims := ClaimsFrom(r.Context()); claims != nil {
+		fittedBy = claims.UserID
+	}
+
+	model := store.CalibrationModel{
+		FittedBy:         fittedBy,
+		BatchID:          req.BatchID,
+		ObservationCount: stats.Total,
+		PositiveCount:    stats.Positive,
+		BrierScore:       brierAfter,
+		ECEScore:         eceAfter,
+		ModelJSON:        string(modelJSON),
+		Active:           true,
+	}
+
+	saved, err := s.store.SaveCalibrationModel(model)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to persist calibration model: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Install immediately so subsequent match runs pick it up as soon as calibration is
+	// enabled in config -- fitting and enabling remain separate operator decisions.
+	s.SetCalibrator(cal)
+
+	resp := CalibrationFitResponse{
+		Status:           "fitted",
+		ModelID:          saved.ID,
+		BatchID:          req.BatchID,
+		ObservationCount: stats.Total,
+		PositiveCount:    stats.Positive,
+		NegativeCount:    stats.Negative,
+		TrainCount:       len(train),
+		HoldoutCount:     len(holdout),
+		BrierScoreBefore: brierBefore,
+		BrierScoreAfter:  brierAfter,
+		ECEScoreBefore:   eceBefore,
+		ECEScoreAfter:    eceAfter,
+		ByPreviousStatus: stats.ByPreviousStatus,
+		Caveat: "Training data is drawn almost entirely from the human review queue " +
+			"(auto-matched pairs are rarely reviewed and so rarely labelled). This calibrator " +
+			"is well-calibrated for the review-band score range and is extrapolating outside it.",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+type CalibrationStatusResponse struct {
+	CalibrationEnabled bool                    `json:"calibration_enabled"`
+	HasActiveModel     bool                    `json:"has_active_model"`
+	ActiveModel        *store.CalibrationModel `json:"active_model,omitempty"`
+	ObservationCount   int                     `json:"observation_count"`
+	PositiveCount      int                     `json:"positive_count"`
+	NegativeCount      int                     `json:"negative_count"`
+	ByPreviousStatus   map[string]int          `json:"by_previous_status"`
+	Caveat             string                  `json:"caveat"`
+}
+
+func (s *Server) HandleCalibrationStatus(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cfg := s.store.GetConfig()
+
+	model, hasActive, err := s.store.GetActiveCalibrationModel()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to load active calibration model: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	stats, err := s.store.CalibrationObservationStats("")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to load calibration observation stats: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp := CalibrationStatusResponse{
+		CalibrationEnabled: cfg.CalibrationEnabled,
+		HasActiveModel:     hasActive,
+		ObservationCount:   stats.Total,
+		PositiveCount:      stats.Positive,
+		NegativeCount:      stats.Negative,
+		ByPreviousStatus:   stats.ByPreviousStatus,
+		Caveat: "Training data is drawn almost entirely from the human review queue " +
+			"(auto-matched pairs are rarely reviewed and so rarely labelled). Any active " +
+			"calibrator is well-calibrated for the review-band score range and is " +
+			"extrapolating outside it.",
+	}
+	if hasActive {
+		resp.ActiveModel = &model
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}

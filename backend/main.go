@@ -24,6 +24,22 @@ func main() {
 	memStore := store.NewStore()
 	server := api.NewServer(memStore)
 
+	// Load a previously-fitted, active calibration model (if any) so it's ready the moment
+	// CalibrationEnabled is turned on -- fitting/persisting a model and enabling calibration for
+	// matching runs are separate, independent operator decisions.
+	if activeModel, ok, err := memStore.GetActiveCalibrationModel(); err != nil {
+		log.Printf("Failed to check for an active calibration model: %v", err)
+	} else if ok {
+		cal, err := store.UnmarshalCalibrator([]byte(activeModel.ModelJSON))
+		if err != nil {
+			log.Printf("Failed to load active calibration model %s: %v", activeModel.ID, err)
+		} else {
+			server.SetCalibrator(cal)
+			log.Printf("Loaded active calibration model %s (fitted %s, %d observations)",
+				activeModel.ID, activeModel.CreatedAt.Format(time.RFC3339), activeModel.ObservationCount)
+		}
+	}
+
 	mux := http.NewServeMux()
 
 	// Middleware helper to apply CORS and route protection
@@ -65,6 +81,14 @@ func main() {
 	mux.HandleFunc("/api/upload",
 		corsHandler(chainMiddleware(
 			http.HandlerFunc(server.HandleUpload),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Upload from real CSV/Excel files (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/upload/file",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleUploadFile),
 			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
 			api.RequireAuth,
 		)).ServeHTTP)
@@ -174,6 +198,22 @@ func main() {
 		corsHandler(chainMiddleware(
 			http.HandlerFunc(server.HandleExportAuditCSV),
 			api.RequireRole(api.RoleAdmin, api.RoleAuditor),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Calibration fit (ADMIN only)
+	mux.HandleFunc("/api/calibration/fit",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleCalibrationFit),
+			api.RequireRole(api.RoleAdmin),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Calibration status (ADMIN only)
+	mux.HandleFunc("/api/calibration/status",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleCalibrationStatus),
+			api.RequireRole(api.RoleAdmin),
 			api.RequireAuth,
 		)).ServeHTTP)
 

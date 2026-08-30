@@ -484,6 +484,19 @@ func (c *CSVConnector) TestConnection(ctx context.Context) error {
 	if c.Config.FilePath == "" && len(c.Config.ManualData) == 0 {
 		return fmt.Errorf("CSV file path or content required")
 	}
+	if len(c.Config.ManualData) > 0 {
+		return nil
+	}
+	f, err := os.Open(c.Config.FilePath)
+	if err != nil {
+		return fmt.Errorf("cannot open CSV file: %w", err)
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	_, err = r.Read()
+	if err != nil {
+		return fmt.Errorf("cannot parse CSV file: %w", err)
+	}
 	return nil
 }
 
@@ -591,6 +604,14 @@ func (c *ExcelConnector) TestConnection(ctx context.Context) error {
 	if c.Config.FilePath == "" && len(c.Config.ManualData) == 0 {
 		return fmt.Errorf("Excel file path or content required")
 	}
+	if len(c.Config.ManualData) > 0 {
+		return nil
+	}
+	f, err := excelize.OpenFile(c.Config.FilePath)
+	if err != nil {
+		return fmt.Errorf("cannot open Excel file: %w", err)
+	}
+	defer f.Close()
 	return nil
 }
 

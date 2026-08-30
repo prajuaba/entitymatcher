@@ -203,15 +203,19 @@ export function ConnectionManager({ onSchemaIntrospected }) {
                 onChange={(e) => {
                   const file = e.target.files[0]
                   if (file) {
-                    const reader = new FileReader()
-                    reader.onload = (evt) => {
-                      const text = evt.target.result
-                      const firstLine = text.split('\n')[0]
-                      const headers = firstLine.split(',').map((h) => h.trim().replace(/^"|"$/g, ''))
-                      setSrcCols(headers)
-                      setSrcStatus({ success: true, message: `Parsed CSV file ${file.name}! Detected ${headers.length} headers.` })
+                    if (file.name.toLowerCase().endsWith('.csv')) {
+                      const reader = new FileReader()
+                      reader.onload = (evt) => {
+                        const text = evt.target.result
+                        const firstLine = text.split('\n')[0]
+                        const headers = firstLine.split(',').map((h) => h.trim().replace(/^"|"$/g, ''))
+                        setSrcCols(headers)
+                        setSrcStatus({ success: true, message: `Previewed headers from ${file.name} (${headers.length} columns). This does not load data — use the Data Ingestion tab to upload the file.` })
+                      }
+                      reader.readAsText(file)
+                    } else {
+                      setSrcStatus({ success: false, message: `Cannot preview headers for Excel file ${file.name} in the browser. Use the Data Ingestion tab to upload the file, or use Introspect Schema with a server file path.` })
                     }
-                    reader.readAsText(file)
                   }
                 }}
                 className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-slate-300 font-mono text-xs file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-sky-950 file:text-sky-300"
@@ -321,15 +325,19 @@ export function ConnectionManager({ onSchemaIntrospected }) {
                 onChange={(e) => {
                   const file = e.target.files[0]
                   if (file) {
-                    const reader = new FileReader()
-                    reader.onload = (evt) => {
-                      const text = evt.target.result
-                      const firstLine = text.split('\n')[0]
-                      const headers = firstLine.split(',').map((h) => h.trim().replace(/^"|"$/g, ''))
-                      setDestCols(headers)
-                      setDestStatus({ success: true, message: `Parsed CSV file ${file.name}! Detected ${headers.length} headers.` })
+                    if (file.name.toLowerCase().endsWith('.csv')) {
+                      const reader = new FileReader()
+                      reader.onload = (evt) => {
+                        const text = evt.target.result
+                        const firstLine = text.split('\n')[0]
+                        const headers = firstLine.split(',').map((h) => h.trim().replace(/^"|"$/g, ''))
+                        setDestCols(headers)
+                        setDestStatus({ success: true, message: `Previewed headers from ${file.name} (${headers.length} columns). This does not load data — use the Data Ingestion tab to upload the file.` })
+                      }
+                      reader.readAsText(file)
+                    } else {
+                      setDestStatus({ success: false, message: `Cannot preview headers for Excel file ${file.name} in the browser. Use the Data Ingestion tab to upload the file, or use Introspect Schema with a server file path.` })
                     }
-                    reader.readAsText(file)
                   }
                 }}
                 className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-slate-300 font-mono text-xs file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-purple-950 file:text-purple-300"

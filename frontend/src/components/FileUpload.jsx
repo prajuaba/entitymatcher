@@ -4,13 +4,51 @@ import { FieldMapper } from './FieldMapper'
 import { Upload, Database, FileText, CheckCircle2, Play, Settings } from 'lucide-react'
 
 export function FileUpload() {
-  const { uploadFiles, loadSeedDataset, loadBigSeedDataset, runMatching, loading, error, config } = useMatcherStore()
+  const { uploadFiles, uploadDataFiles, loadSeedDataset, loadBigSeedDataset, runMatching, loading, error, config } = useMatcherStore()
   const [sourcesText, setSourcesText] = useState('')
   const [destsText, setDestsText] = useState('')
   const [detectedSrcCols, setDetectedSrcCols] = useState([])
   const [detectedDestCols, setDetectedDestCols] = useState([])
   const [showMapper, setShowMapper] = useState(false)
   const [activeMapping, setActiveMapping] = useState(config.column_mapping)
+
+  const [sourceFile, setSourceFile] = useState(null)
+  const [destFile, setDestFile] = useState(null)
+  const [sourceSheet, setSourceSheet] = useState('')
+  const [destSheet, setDestSheet] = useState('')
+  const [fileUploadResult, setFileUploadResult] = useState(null)
+  const [fileUploadError, setFileUploadError] = useState(null)
+  const [fileUploading, setFileUploading] = useState(false)
+
+  const handleFileUpload = async () => {
+    if (!sourceFile || !destFile) return
+    setFileUploading(true)
+    setFileUploadResult(null)
+    setFileUploadError(null)
+
+    const formData = new FormData()
+    formData.append('source_file', sourceFile)
+    formData.append('destination_file', destFile)
+    formData.append('column_mapping', JSON.stringify(activeMapping))
+
+    if (sourceSheet.trim()) {
+      formData.append('source_sheet', sourceSheet.trim())
+    }
+
+    if (destSheet.trim()) {
+      formData.append('destination_sheet', destSheet.trim())
+    }
+
+    try {
+      const result = await uploadDataFiles(formData)
+      setFileUploadResult(result)
+      await runMatching(result.batch_id)
+    } catch (e) {
+      setFileUploadError(e.message)
+    } finally {
+      setFileUploading(false)
+    }
+  }
 
   // Auto-detect JSON keys whenever text changes
   useEffect(() => {
@@ -174,6 +212,101 @@ export function FileUpload() {
             <Upload className="w-4 h-4" /> Stream Ingest & Execute Matching
           </button>
         </div>
+      </div>
+
+      {/* File Upload Section (CSV / Excel) */}
+      <div className="bg-slate-950/80 p-6 rounded-xl border border-slate-800 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+            <FileText className="w-4 h-4 text-sky-400" /> Upload CSV / Excel Files
+          </h3>
+          <p className="text-xs text-slate-400 mt-1">Upload source and destination files for matching with optional sheet names.</p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Source File */}
+          <div>
+            <label className="text-xs text-slate-400 block font-mono mb-1.5">Source File</label>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={(e) => setSourceFile(e.target.files[0] || null)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-slate-300 font-mono text-xs file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-sky-950 file:text-sky-300"
+            />
+            {sourceFile && (
+              <p className="text-[11px] text-slate-500 mt-1 truncate">{sourceFile.name}</p>
+            )}
+            {sourceFile && /\.(xlsx|xls)$/i.test(sourceFile.name) && (
+              <input
+                type="text"
+                value={sourceSheet}
+                onChange={(e) => setSourceSheet(e.target.value)}
+                placeholder="Sheet name (optional)"
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-sky-500 mt-2"
+              />
+            )}
+          </div>
+
+          {/* Destination File */}
+          <div>
+            <label className="text-xs text-slate-400 block font-mono mb-1.5">Destination File</label>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={(e) => setDestFile(e.target.files[0] || null)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-slate-300 font-mono text-xs file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-purple-950 file:text-purple-300"
+            />
+            {destFile && (
+              <p className="text-[11px] text-slate-500 mt-1 truncate">{destFile.name}</p>
+            )}
+            {destFile && /\.(xlsx|xls)$/i.test(destFile.name) && (
+              <input
+                type="text"
+                value={destSheet}
+                onChange={(e) => setDestSheet(e.target.value)}
+                placeholder="Sheet name (optional)"
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-purple-500 mt-2"
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <button
+            onClick={handleFileUpload}
+            disabled={!sourceFile || !destFile || fileUploading || loading}
+            className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {fileUploading ? (
+              <>
+                <Upload className="w-4 h-4 animate-spin" /> Uploading...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 fill-white" /> Upload & Run Matching
+              </>
+            )}
+          </button>
+        </div>
+
+        {fileUploadError && (
+          <div className="p-2.5 rounded text-xs flex items-center gap-2 bg-rose-950/60 text-rose-300 border border-rose-800">
+            <span>⚠</span> {fileUploadError}
+          </div>
+        )}
+
+        {fileUploadResult && (
+          <>
+            <div className="bg-emerald-950/60 text-emerald-300 border border-emerald-800 rounded-lg p-2.5 text-xs">
+              Source records: {fileUploadResult.source_count} &middot; Destination records: {fileUploadResult.destination_count}
+            </div>
+            {fileUploadResult.truncated && (
+              <div className="bg-amber-950/60 text-amber-300 border border-amber-700 rounded-lg p-2.5 text-xs font-semibold">
+                ⚠ {fileUploadResult.warning}
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   )
