@@ -4,8 +4,9 @@ Entity resolution for Thai and English individuals and legal entities, with a hu
 review queue, a compliance audit trail, and pluggable data connectors.
 
 **Scope note:** the engine handles Thai-vs-Thai and English-vs-English matching well, including Thai
-homophone spelling variants. It does **not** currently match the same entity written in Thai script
-against Latin script — see *Cross-script matching* under Known limitations.
+homophone spelling variants. Cross-script matching (the same entity in Thai script and Latin script)
+retrieves candidates via RTGS romanization but does not yet auto-match them — see *Cross-script
+matching* under Known limitations for the measurement and why.
 
 Every number and capability below is measured or exercised by a test in this repo. Where something
 is partial, it says so.
@@ -215,23 +216,31 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   runtime, since GC CPU fraction falls with scale.
 - **Scaling is O(N^1.10), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
-- **Cross-script matching does not work.** Measured, not estimated: the benchmark's bilingual
-  categories score **TP=0** — for entities in the hardcoded transliteration map as well as outside
-  it. The map is not merely narrow, it is unreachable: a Thai string and a Latin string share no
-  tokens and no trigrams, so the blocking index never surfaces the pair and `CheckBilingualMatch`
-  never runs. Any fix must reach the blocking layer, not just the scorer.
+- **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
+  records are now matched through RTGS romanization: a Thai syllable segmenter determines consonant
+  position, `RomanizeThai` produces the romanization, and a shared phonetic skeleton puts both
+  scripts in one space that the blocking index and the scorer both use. Retrieval works — for
+  entities in the transliteration map, unretrieved pairs went from 7 of 9 to **0**; for entities
+  outside it, from 20 of 30 to **3**, with mean score rising from 0.000 to 0.755.
 
-  A partial fix was attempted and reverted. Mapping Thai to RTGS romanization and reducing both
-  scripts to a shared phonetic skeleton does work for some names (สุชาติ/Suchat and นภา/Napha
-  converge exactly), but reliable romanization needs Thai **syllable segmentation** — without it,
-  consonant position must be guessed, and the guess fails on most CV syllables (สมชาย reduces to
-  `tmchn` rather than `smch`, because the initial ส is followed by a consonant and is misread as
-  final). The attempt cost 100% precision, 63 English true positives, and delivered no bilingual
-  gain, so it was not kept.
+  Auto-matching still does not fire for out-of-dictionary pairs, and the measurement shows this is a
+  property of the feature rather than of the threshold:
 
-  There is also an inherent tension worth knowing before attempting it: collapsing phonetics
-  aggressively enough to unify scripts made the deliberate false-friend pair วิชัย/Wichian produce
-  identical forms. The `NEG_BILINGUAL_FALSE_FRIEND` category (n=52) exists to hold that line.
+      OUT_OF_DICT true pairs     n=16  min 0.705  p50 0.761  max 0.800  mean 0.755
+      FALSE_FRIEND must-reject   n=41  min 0.702  p50 0.762  max 0.828  mean 0.761
+
+  The distributions overlap completely and the false friends average *higher*. No threshold
+  separates them; lowering `auto_match_threshold` would admit more wrong matches than right ones.
+  The cause is that the phonetic skeleton drops vowels, and Thai names draw on a small consonant
+  inventory, so สมชาย/Somsak (different people) and สุชาติ ประเจริญ/Suchat Prachaerin (same person)
+  look equally alike once vowels are gone. Comparing full romanizations with vowels retained is the
+  next lever; `NEG_BILINGUAL_FALSE_FRIEND` (n=52) is in place to measure whether it holds precision.
+
+  The syllable segmenter is 6-of-8 accurate on its target cases. The two failures are
+  Sanskrit/Pali-derived words where a written vowel is silent (ประเสริฐ, สุชาติ); resolving those
+  needs a lexicon, and the correct expectations are kept in the test table rather than fitted to the
+  implementation.
+
 - **Demo users are compiled in.** There is no user management, registration, or password rotation.
 
 See `BACKLOG.md` for the remediation backlog this codebase was built against.
