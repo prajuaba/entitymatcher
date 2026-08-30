@@ -18,10 +18,10 @@ import (
 // TestIsAnomalousLowAutoMatchRate tests anomaly detection for low auto-match rate
 func TestIsAnomalousLowAutoMatchRate(t *testing.T) {
 	outcome := matcher.ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       40,  // 40% - below 50% threshold
-		ReviewNeeded:      50,
-		NoMatch:           10,
+		TotalSources: 100,
+		AutoMatched:  40, // 40% - below 50% threshold
+		ReviewNeeded: 50,
+		NoMatch:      10,
 	}
 
 	if !isAnomalous(outcome) {
@@ -32,10 +32,10 @@ func TestIsAnomalousLowAutoMatchRate(t *testing.T) {
 // TestIsAnomalousHighNoMatchRate tests anomaly detection for high no-match rate
 func TestIsAnomalousHighNoMatchRate(t *testing.T) {
 	outcome := matcher.ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       60,
-		ReviewNeeded:      10,
-		NoMatch:           31,  // 31% - above 30% threshold
+		TotalSources: 100,
+		AutoMatched:  60,
+		ReviewNeeded: 10,
+		NoMatch:      31, // 31% - above 30% threshold
 	}
 
 	if !isAnomalous(outcome) {
@@ -46,10 +46,10 @@ func TestIsAnomalousHighNoMatchRate(t *testing.T) {
 // TestIsAnomalousNormal tests anomaly detection for normal rates
 func TestIsAnomalousNormal(t *testing.T) {
 	outcome := matcher.ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       70,  // 70% - above 50% threshold
-		ReviewNeeded:      15,
-		NoMatch:           15,  // 15% - below 30% threshold
+		TotalSources: 100,
+		AutoMatched:  70, // 70% - above 50% threshold
+		ReviewNeeded: 15,
+		NoMatch:      15, // 15% - below 30% threshold
 	}
 
 	if isAnomalous(outcome) {
@@ -60,10 +60,10 @@ func TestIsAnomalousNormal(t *testing.T) {
 // TestIsAnomalousEmptyBatch tests anomaly detection for empty batch (no divide-by-zero)
 func TestIsAnomalousEmptyBatch(t *testing.T) {
 	outcome := matcher.ReconcileOutcome{
-		TotalSources:      0,
-		AutoMatched:       0,
-		ReviewNeeded:      0,
-		NoMatch:           0,
+		TotalSources: 0,
+		AutoMatched:  0,
+		ReviewNeeded: 0,
+		NoMatch:      0,
 	}
 
 	// Should not panic
@@ -77,10 +77,10 @@ func TestIsAnomalousEmptyBatch(t *testing.T) {
 func TestIsAnomalousEdgeCases(t *testing.T) {
 	// Exactly at 50% auto-match (not anomalous)
 	outcome := matcher.ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       50,  // Exactly 50%
-		ReviewNeeded:      40,
-		NoMatch:           10,
+		TotalSources: 100,
+		AutoMatched:  50, // Exactly 50%
+		ReviewNeeded: 40,
+		NoMatch:      10,
 	}
 
 	if isAnomalous(outcome) {
@@ -89,10 +89,10 @@ func TestIsAnomalousEdgeCases(t *testing.T) {
 
 	// Exactly at 30% no-match (not anomalous, threshold is > 30%)
 	outcome2 := matcher.ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       60,
-		ReviewNeeded:      10,
-		NoMatch:           30,  // Exactly 30%
+		TotalSources: 100,
+		AutoMatched:  60,
+		ReviewNeeded: 10,
+		NoMatch:      30, // Exactly 30%
 	}
 
 	if isAnomalous(outcome2) {
@@ -150,7 +150,7 @@ func TestWebhookDispatchGenericFormat(t *testing.T) {
 	srv := NewServer(st)
 
 	cfg := srv.schedulerManager.GetConfig()
-	cfg.WebhookURL = server.URL  // Generic URL
+	cfg.WebhookURL = server.URL // Generic URL
 	cfg.NotifyOnSuccess = true
 	srv.schedulerManager.UpdateConfig(cfg)
 
@@ -199,8 +199,8 @@ func TestWebhookDispatchNoNotifications(t *testing.T) {
 
 	cfg := srv.schedulerManager.GetConfig()
 	cfg.WebhookURL = server.URL
-	cfg.NotifyOnSuccess = false   // Disable success notifications
-	cfg.NotifyOnAnomaly = false   // Disable anomaly notifications
+	cfg.NotifyOnSuccess = false // Disable success notifications
+	cfg.NotifyOnAnomaly = false // Disable anomaly notifications
 	srv.schedulerManager.UpdateConfig(cfg)
 
 	outcome := matcher.ReconcileOutcome{
@@ -239,8 +239,8 @@ func TestWebhookDispatchAnomalyNotification(t *testing.T) {
 
 	cfg := srv.schedulerManager.GetConfig()
 	cfg.WebhookURL = server.URL
-	cfg.NotifyOnSuccess = false   // Don't send success notifications
-	cfg.NotifyOnAnomaly = true    // Send anomaly notifications
+	cfg.NotifyOnSuccess = false // Don't send success notifications
+	cfg.NotifyOnAnomaly = true  // Send anomaly notifications
 	srv.schedulerManager.UpdateConfig(cfg)
 
 	// Create an anomalous outcome (low auto-match rate)
@@ -248,7 +248,7 @@ func TestWebhookDispatchAnomalyNotification(t *testing.T) {
 		BatchID:           "test-batch",
 		TotalSources:      100,
 		TotalDestinations: 100,
-		AutoMatched:       40,  // 40% - anomalous
+		AutoMatched:       40, // 40% - anomalous
 		ReviewNeeded:      50,
 		NoMatch:           10,
 		ElapsedMs:         5000,
@@ -386,6 +386,26 @@ func (m *mockRepository) ListBatches() []store.BatchSummary {
 }
 
 func (m *mockRepository) ListJobs(limit, offset int) ([]store.JobSummary, error) {
+	return nil, nil
+}
+
+func (m *mockRepository) CalibrationObservations(batchID string) ([]matcher.LabelledScore, error) {
+	return nil, nil
+}
+
+func (m *mockRepository) CalibrationObservationStats(batchID string) (store.CalibrationObservationStats, error) {
+	return store.CalibrationObservationStats{}, nil
+}
+
+func (m *mockRepository) SaveCalibrationModel(model store.CalibrationModel) (store.CalibrationModel, error) {
+	return model, nil
+}
+
+func (m *mockRepository) GetActiveCalibrationModel() (store.CalibrationModel, bool, error) {
+	return store.CalibrationModel{}, false, nil
+}
+
+func (m *mockRepository) ListCalibrationModels(limit, offset int) ([]store.CalibrationModel, error) {
 	return nil, nil
 }
 

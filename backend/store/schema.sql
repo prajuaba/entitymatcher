@@ -125,3 +125,30 @@ DROP TRIGGER IF EXISTS audit_prevent_delete ON match_audit_logs;
 CREATE TRIGGER audit_prevent_delete
     BEFORE DELETE ON match_audit_logs
     FOR EACH ROW EXECUTE FUNCTION prevent_audit_delete();
+
+-- Calibration models: fitted score-to-probability calibrators (Platt/Isotonic/Identity), with
+-- the metrics they were evaluated at fit time. Append-only for model_json/metrics/observation
+-- counts — a re-fit always inserts a new row. The `active` column is the one field callers are
+-- expected to update (via UPDATE ... SET active = false on the previous holder, then INSERT the
+-- new active row) when promoting a newly-fitted model, so at most one row is active at a time.
+CREATE TABLE IF NOT EXISTS calibration_models (
+    id VARCHAR(255) PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fitted_by VARCHAR(255) NOT NULL DEFAULT '',
+    batch_id VARCHAR(255) NOT NULL DEFAULT '',
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    positive_count INTEGER NOT NULL DEFAULT 0,
+    brier_score NUMERIC NOT NULL DEFAULT 0,
+    ece_score NUMERIC NOT NULL DEFAULT 0,
+    model_json JSONB NOT NULL DEFAULT '{}',
+    active BOOLEAN NOT NULL DEFAULT false
+);
+
+-- Only one model should be active at a time; this partial unique index enforces it at the
+-- database level as a defense-in-depth check alongside the application-level deactivate-then-
+-- insert logic.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calibration_models_one_active
+    ON calibration_models ((active)) WHERE active = true;
+
+CREATE INDEX IF NOT EXISTS idx_calibration_models_created_at_desc
+    ON calibration_models(created_at DESC);

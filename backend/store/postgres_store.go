@@ -1,8 +1,8 @@
 package store
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -711,6 +711,131 @@ func (s *PostgresStore) ListJobs(limit, offset int) ([]JobSummary, error) {
 // Close gracefully closes the connection pool.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
+}
+
+// CalibrationObservations retrieves calibration observations for a batch from audit logs.
+func (s *PostgresStore) CalibrationObservations(batchID string) ([]matcher.LabelledScore, error) {
+	entries := s.GetAuditLogs(batchID, "", "")
+	labels, _ := computeCalibrationObservations(entries)
+	return labels, nil
+}
+
+// CalibrationObservationStats returns statistics about calibration observations for a batch.
+func (s *PostgresStore) CalibrationObservationStats(batchID string) (CalibrationObservationStats, error) {
+	entries := s.GetAuditLogs(batchID, "", "")
+	_, stats := computeCalibrationObservations(entries)
+	return stats, nil
+}
+
+// SaveCalibrationModel persists a calibration model, ensuring only one active model exists.
+func (s *PostgresStore) SaveCalibrationModel(model CalibrationModel) (CalibrationModel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if model.ID == "" {
+		model.ID = fmt.Sprintf("calib-%d", time.Now().UnixNano())
+	}
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = time.Now()
+	}
+
+	var err error
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if model.Active {
+		if _, err = tx.Exec(ctx, "UPDATE calibration_models SET active = false WHERE active = true"); err != nil {
+			return CalibrationModel{}, fmt.Errorf("deactivate previous model: %w", err)
+		}
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO calibration_models (id, created_at, fitted_by, batch_id, observation_count,
+		                                 positive_count, brier_score, ece_score, model_json, active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		model.ID, model.CreatedAt, model.FittedBy, model.BatchID, model.ObservationCount,
+		model.PositiveCount, model.BrierScore, model.ECEScore, model.ModelJSON, model.Active)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("insert model: %w", err)
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return model, nil
+}
+
+// GetActiveCalibrationModel retrieves the currently active calibration model, if any.
+func (s *PostgresStore) GetActiveCalibrationModel() (CalibrationModel, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var model CalibrationModel
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, created_at, fitted_by, batch_id, observation_count, positive_count,
+		        brier_score, ece_score, model_json, active
+		 FROM calibration_models WHERE active = true LIMIT 1`).
+		Scan(&model.ID, &model.CreatedAt, &model.FittedBy, &model.BatchID,
+			&model.ObservationCount, &model.PositiveCount, &model.BrierScore, &model.ECEScore,
+			&model.ModelJSON, &model.Active)
+
+	if err == pgx.ErrNoRows {
+		return CalibrationModel{}, false, nil
+	}
+	if err != nil {
+		return CalibrationModel{}, false, err
+	}
+
+	return model, true, nil
+}
+
+// ListCalibrationModels retrieves calibration models with pagination.
+func (s *PostgresStore) ListCalibrationModels(limit, offset int) ([]CalibrationModel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, created_at, fitted_by, batch_id, observation_count, positive_count,
+		        brier_score, ece_score, model_json, active
+		 FROM calibration_models ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query models: %w", err)
+	}
+	defer rows.Close()
+
+	var models []CalibrationModel
+	for rows.Next() {
+		var model CalibrationModel
+		if err := rows.Scan(&model.ID, &model.CreatedAt, &model.FittedBy, &model.BatchID,
+			&model.ObservationCount, &model.PositiveCount, &model.BrierScore, &model.ECEScore,
+			&model.ModelJSON, &model.Active); err != nil {
+			continue
+		}
+		models = append(models, model)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+
+	return models, nil
 }
 
 // Compile-time assertion that PostgresStore implements Repository
