@@ -47,8 +47,8 @@ pair space, fixed seed). Scale figures are from the opt-in harness
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~5,800 sources/sec at 220k × 220k |
-| Verified scale | 220,000 × 220,000 per side in 39.8s (20 cores), 2.5 GiB peak heap |
+| Throughput | ~8,100 sources/sec at 220k × 220k |
+| Verified scale | 220,000 × 220,000 per side in 28.3s (20 cores), 2.5 GiB peak heap |
 | Scaling | time ~ O(N^1.05) over 22k → 220k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 57.6% |
@@ -214,12 +214,18 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   corpus. Results accumulate in memory during a run and every row embeds full copies of both
   records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
   runtime, since GC CPU fraction falls with scale.
-- **Cross-script retrieval costs ~42% throughput.** Indexing romanized trigrams — the third trigram
-  index — dropped 220k × 220k from 9,901 to 5,777 sources/sec and raised peak heap 2,288 → 2,555 MiB.
-  The scaling *shape* is unaffected (still ~O(N^1.05)); this is a constant factor, visible at every
-  corpus size. It is currently unconditional: unlike the scoring signal, which sits behind
-  `use_romanized_match`, the index is always built. Deployments that never mix scripts are paying for
-  a capability they do not use, and making the index conditional would recover that.
+- **Cross-script retrieval costs ~9% throughput.** Measured by an interleaved A/B in one process
+  (alternating `use_romanized_match` on/off, median of three pairs, 57,620 records per side):
+  9,389 vs 10,326 sources/sec. The feature is behind that flag — both the scoring signal and the
+  index construction — so a deployment that never mixes scripts can turn it off.
+
+  **Methodology note, because this was got wrong once.** An earlier revision of this file claimed a
+  42% cost. That came from comparing scale-sweep runs taken hours apart under different machine
+  load, and the run-to-run spread under load (4,722–8,127 sources/sec for the same configuration)
+  was wider than the effect being measured. The benchmark itself is deterministic — back-to-back
+  runs are byte-identical — so comparing code versions requires an interleaved A/B in one load
+  window, not two timestamps.
+
 - **Scaling is O(N^1.05), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
 - **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
