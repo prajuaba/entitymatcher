@@ -47,9 +47,9 @@ pair space, fixed seed). Scale figures are from the opt-in harness
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~8,000 sources/sec at 4.4k; ~9,900 at 220k × 220k |
-| Verified scale | 220,000 × 220,000 per side in 22.3s (20 cores), 2.1 GiB peak heap |
-| Scaling | time ~ O(N^1.10) over 22k → 220k |
+| Throughput | ~5,800 sources/sec at 220k × 220k |
+| Verified scale | 220,000 × 220,000 per side in 39.8s (20 cores), 2.5 GiB peak heap |
+| Scaling | time ~ O(N^1.05) over 22k → 220k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 57.6% |
 | F1 | 73.1% |
@@ -214,7 +214,13 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   corpus. Results accumulate in memory during a run and every row embeds full copies of both
   records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
   runtime, since GC CPU fraction falls with scale.
-- **Scaling is O(N^1.10), not linear.** The residual comes from the candidate set growing with
+- **Cross-script retrieval costs ~42% throughput.** Indexing romanized trigrams — the third trigram
+  index — dropped 220k × 220k from 9,901 to 5,777 sources/sec and raised peak heap 2,288 → 2,555 MiB.
+  The scaling *shape* is unaffected (still ~O(N^1.05)); this is a constant factor, visible at every
+  corpus size. It is currently unconditional: unlike the scoring signal, which sits behind
+  `use_romanized_match`, the index is always built. Deployments that never mix scripts are paying for
+  a capability they do not use, and making the index conditional would recover that.
+- **Scaling is O(N^1.05), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
 - **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
   records are now matched through RTGS romanization: a Thai syllable segmenter determines consonant
