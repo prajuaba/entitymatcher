@@ -12,13 +12,14 @@ type MatchWeights struct {
 }
 
 type AlgorithmToggles struct {
-	UseJaroWinkler   bool `json:"use_jaro_winkler"`
-	UseLevenshtein   bool `json:"use_levenshtein"`
-	UseTokenSort     bool `json:"use_token_sort"`
-	UsePhonetic      bool `json:"use_phonetic"`
-	UseTrigram       bool `json:"use_trigram"`
-	UseThaiPhonetic  bool `json:"use_thai_phonetic"`
-	UseCorpusIDF     bool `json:"use_corpus_idf"`
+	UseJaroWinkler     bool `json:"use_jaro_winkler"`
+	UseLevenshtein     bool `json:"use_levenshtein"`
+	UseTokenSort       bool `json:"use_token_sort"`
+	UsePhonetic        bool `json:"use_phonetic"`
+	UseTrigram         bool `json:"use_trigram"`
+	UseThaiPhonetic    bool `json:"use_thai_phonetic"`
+	UseCorpusIDF       bool `json:"use_corpus_idf"`
+	UseRomanizedMatch  bool `json:"use_romanized_match"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -27,13 +28,14 @@ var DefaultWeights = MatchWeights{
 }
 
 var DefaultAlgorithms = AlgorithmToggles{
-	UseJaroWinkler:  true,
-	UseLevenshtein:  true,
-	UseTokenSort:    true,
-	UsePhonetic:     true,
-	UseTrigram:      true,
-	UseThaiPhonetic: true,
-	UseCorpusIDF:    true,
+	UseJaroWinkler:    true,
+	UseLevenshtein:    true,
+	UseTokenSort:      true,
+	UsePhonetic:       true,
+	UseTrigram:        true,
+	UseThaiPhonetic:   true,
+	UseCorpusIDF:      true,
+	UseRomanizedMatch: true,
 }
 
 // JaroWinkler computes rune-safe Jaro-Winkler distance between two strings s1 and s2.
@@ -300,14 +302,15 @@ func CheckNumberMismatch(srcName, destName CleanName) bool {
 
 // ScoreResult details metrics generated for candidate pair.
 type ScoreResult struct {
-	TotalScore   float64  `json:"total_score"`
-	NameScore    float64  `json:"name_score"`
-	DateScore    float64  `json:"date_score"`
-	JWScore      float64  `json:"jw_score"`
-	LevScore     float64  `json:"lev_score"`
-	TokenScore   float64  `json:"token_score"`
-	TrigramScore float64  `json:"trigram_score"`
-	MatchReasons []string `json:"match_reasons"`
+	TotalScore     float64  `json:"total_score"`
+	NameScore      float64  `json:"name_score"`
+	DateScore      float64  `json:"date_score"`
+	JWScore        float64  `json:"jw_score"`
+	LevScore       float64  `json:"lev_score"`
+	TokenScore     float64  `json:"token_score"`
+	TrigramScore   float64  `json:"trigram_score"`
+	RomanizedScore float64  `json:"romanized_score"`
+	MatchReasons   []string `json:"match_reasons"`
 }
 
 // CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
@@ -322,7 +325,7 @@ func CalculateCompositeScoreWithCorpus(
 	corpus *CorpusStats,
 ) ScoreResult {
 	var scores []float64
-	var jwScore, levScore, tokenScore, trigramScore float64
+	var jwScore, levScore, tokenScore, trigramScore, romanizedScore float64
 	var reasons []string
 
 	// Distinctive Token Check
@@ -392,6 +395,20 @@ func CalculateCompositeScoreWithCorpus(
 		}
 	}
 
+	// Romanized Cross-Script Match (only for bilingual pairs: one Thai, one Latin)
+	if algos.UseRomanizedMatch && srcName.Romanized != "" && destName.Romanized != "" {
+		srcHasThai := ContainsThai(srcName.Raw)
+		destHasThai := ContainsThai(destName.Raw)
+		// Gate: include ONLY when exactly one side has Thai (cross-script comparison)
+		if srcHasThai != destHasThai {
+			romanizedScore = JaroWinkler(srcName.Romanized, destName.Romanized)
+			scores = append(scores, romanizedScore)
+			if romanizedScore > 0.85 {
+				reasons = append(reasons, "High romanized phonetic skeleton similarity")
+			}
+		}
+	}
+
 	var nameScore float64
 	if len(scores) > 0 {
 		var sum float64
@@ -452,14 +469,15 @@ func CalculateCompositeScoreWithCorpus(
 	totalScore := (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
 
 	return ScoreResult{
-		TotalScore:   math.Round(totalScore*10000) / 10000,
-		NameScore:    math.Round(nameScore*10000) / 10000,
-		DateScore:    math.Round(dateScore*10000) / 10000,
-		JWScore:      math.Round(jwScore*10000) / 10000,
-		LevScore:     math.Round(levScore*10000) / 10000,
-		TokenScore:   math.Round(tokenScore*10000) / 10000,
-		TrigramScore: math.Round(trigramScore*10000) / 10000,
-		MatchReasons: reasons,
+		TotalScore:     math.Round(totalScore*10000) / 10000,
+		NameScore:      math.Round(nameScore*10000) / 10000,
+		DateScore:      math.Round(dateScore*10000) / 10000,
+		JWScore:        math.Round(jwScore*10000) / 10000,
+		LevScore:       math.Round(levScore*10000) / 10000,
+		TokenScore:     math.Round(tokenScore*10000) / 10000,
+		TrigramScore:   math.Round(trigramScore*10000) / 10000,
+		RomanizedScore: math.Round(romanizedScore*10000) / 10000,
+		MatchReasons:   reasons,
 	}
 }
 

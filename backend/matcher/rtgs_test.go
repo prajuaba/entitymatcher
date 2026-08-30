@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"testing"
+	"time"
 )
 
 func TestRomanizeThaiAcceptance(t *testing.T) {
@@ -209,6 +210,91 @@ func TestLatinPassthrough(t *testing.T) {
 			result := RomanizeThai(tt.input)
 			if result != tt.expected {
 				t.Errorf("RomanizeThai(%q) = %q; want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestCrossScriptRomanizedInvariant verifies that pure-Latin name pairs produce identical scores
+// regardless of the UseRomanizedMatch flag setting. This regression test ensures that
+// the romanized cross-script signal does not affect pure-Latin pairs due to the cross-script gate.
+func TestCrossScriptRomanizedInvariant(t *testing.T) {
+	testCases := []struct {
+		name  string
+		name1 string
+		name2 string
+	}{
+		{"Exact match", "John Smith", "John Smith"},
+		{"Minor spelling variation", "Jon Smith", "John Smith"},
+		{"Full name vs abbreviation", "Robert Enterprises", "Rob Enterprises"},
+		{"Name order", "Mary Johnson", "Johnson Mary"},
+		{"Multiple word variation", "Acme Trading Corp", "Acme Trade Corporation"},
+	}
+
+	defaultWeights := DefaultWeights
+	defaultDate := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Algorithm toggles with romanized matching disabled and enabled
+	algosWithoutRomanized := AlgorithmToggles{
+		UseJaroWinkler:    true,
+		UseLevenshtein:    true,
+		UseTokenSort:      true,
+		UsePhonetic:       true,
+		UseTrigram:        true,
+		UseThaiPhonetic:   true,
+		UseCorpusIDF:      false,
+		UseRomanizedMatch: false,
+	}
+
+	algosWithRomanized := AlgorithmToggles{
+		UseJaroWinkler:    true,
+		UseLevenshtein:    true,
+		UseTokenSort:      true,
+		UsePhonetic:       true,
+		UseTrigram:        true,
+		UseThaiPhonetic:   true,
+		UseCorpusIDF:      false,
+		UseRomanizedMatch: true,
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Normalize both names
+			src := Normalize(tc.name1)
+			dest := Normalize(tc.name2)
+
+			// Score with UseRomanizedMatch = false
+			resultFalse := CalculateCompositeScore(src, dest, defaultDate, defaultDate, defaultWeights, algosWithoutRomanized, 30)
+
+			// Score with UseRomanizedMatch = true
+			resultTrue := CalculateCompositeScore(src, dest, defaultDate, defaultDate, defaultWeights, algosWithRomanized, 30)
+
+			// For pure-Latin pairs, romanized metric should not fire, so scores must be identical
+			if resultFalse.TotalScore != resultTrue.TotalScore {
+				t.Errorf("%s: TotalScore differs: false=%f, true=%f (delta=%f)",
+					tc.name, resultFalse.TotalScore, resultTrue.TotalScore, resultTrue.TotalScore-resultFalse.TotalScore)
+			}
+			if resultFalse.NameScore != resultTrue.NameScore {
+				t.Errorf("%s: NameScore differs: false=%f, true=%f", tc.name, resultFalse.NameScore, resultTrue.NameScore)
+			}
+			if resultFalse.JWScore != resultTrue.JWScore {
+				t.Errorf("%s: JWScore differs: false=%f, true=%f", tc.name, resultFalse.JWScore, resultTrue.JWScore)
+			}
+			if resultFalse.LevScore != resultTrue.LevScore {
+				t.Errorf("%s: LevScore differs: false=%f, true=%f", tc.name, resultFalse.LevScore, resultTrue.LevScore)
+			}
+			if resultFalse.TokenScore != resultTrue.TokenScore {
+				t.Errorf("%s: TokenScore differs: false=%f, true=%f", tc.name, resultFalse.TokenScore, resultTrue.TokenScore)
+			}
+			if resultFalse.TrigramScore != resultTrue.TrigramScore {
+				t.Errorf("%s: TrigramScore differs: false=%f, true=%f", tc.name, resultFalse.TrigramScore, resultTrue.TrigramScore)
+			}
+			// RomanizedScore should be 0.0 in both cases since the gate should prevent it from firing
+			if resultFalse.RomanizedScore != 0.0 {
+				t.Errorf("%s: RomanizedScore with UseRomanizedMatch=false should be 0.0, got %f", tc.name, resultFalse.RomanizedScore)
+			}
+			if resultTrue.RomanizedScore != 0.0 {
+				t.Errorf("%s: RomanizedScore with UseRomanizedMatch=true should be 0.0 (gate prevents it), got %f", tc.name, resultTrue.RomanizedScore)
 			}
 		})
 	}
