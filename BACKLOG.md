@@ -179,3 +179,22 @@ of 30, BILINGUAL_IN_DICTIONARY TP=2/FN=7 of 9, against 100/100 for same-script T
 | M4 | Calibration UI | `POST /api/calibration/fit` and `GET /api/calibration/status` have no frontend at all. Include observation progress toward `MinCalibrationObservations` (20), so an operator sees "14/20" rather than a bare 400 |
 | M5 | Verify the containerized stack | `DATABASE_URL` is honoured now, but persistence was verified against a host binary and a throwaway container, not through `docker-compose up`. Confirm the composed stack persists across `down`/`up` |
 | M6 | Re-measure scale on target hardware | Throughput, 220k×220k timing and peak heap were left untouched during the metrics correction — they come from the opt-in `SCALE_TEST` harness and are hardware-specific |
+
+## EPIC N — Connector correctness (H)
+
+EPIC K covers the connectors being *unreachable* for ingestion. These are defects in the
+connectors themselves, found by auditing the SQL Server path and comparing it against the
+other two. They matter the moment K1 lands and real rows start flowing through this code.
+
+Worth stating plainly: the SQL Server connector is the *least* exposed of the three. It
+parameterises its introspection query, pages with named parameters, and guards its single
+interpolation point with `validateIdentifier` (`connector.go:756`). N5 below is about the
+PostgreSQL connector, not this one.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| N1 | Connectors release their connections | `TestConnection` opens a pool and stores it (`c.pool` `connector.go:118`, `c.conn` `:289`, `c.client` `:398`); `DataConnector` (`:54`) has no `Close`, and no handler closes one. Every `/api/connector/test` and `/api/connector/introspect` call leaks a pool for the life of the process. Add `Close() error` to the interface, implement it for all six connectors, and `defer` it at both call sites |
+| N2 | Deterministic paging in connectors | SQL Server pages with `ORDER BY (SELECT NULL)` (`connector.go:352`), which satisfies the `OFFSET/FETCH` syntax but guarantees no order; the PostgreSQL connector has no `ORDER BY` at all (`:227`). Both can therefore duplicate or drop rows across pages. Same defect class as `0fe270d` — order by a stable key (primary key, or the introspected first column) before paging. Blocks K2, which pages to exhaustion |
+| N3 | SQL Server schema-qualified tables | `validateIdentifier` rejects `.`, so `dbo.Customers` and `sales.Orders` are refused and only the login's default schema is reachable — in SQL Server, `dbo.`-qualification is the norm. The PostgreSQL connector already splits and validates both halves (`:205-217`); give SQL Server the same treatment |
+| N4 | SQL Server introspection must filter by schema | The query filters `WHERE TABLE_NAME = @TableName` with no `TABLE_SCHEMA` predicate (`:309`). Two schemas holding a same-named table return both column sets, merged and interleaved by `ORDINAL_POSITION` — wrong, and silent. Filter by schema once N3 supplies one |
+| N5 | Bound the PostgreSQL raw-SQL passthrough | When `TableOrQuery` begins with `SELECT`, the PostgreSQL connector concatenates it verbatim (`:146`, `:222`), so any ADMIN/ENGINEER can execute arbitrary SQL as the configured database user. That may be the intent of a query datasource, but it is currently undocumented and unbounded. Decide deliberately: document and keep it read-only (enforce a read-only session/role), or drop it. SQL Server and MongoDB have no equivalent path |
