@@ -63,18 +63,20 @@ type QueryMetrics struct {
 }
 
 type BlockingIndex struct {
-	mu              sync.RWMutex
-	tokenMap        map[string][]int // Token -> array of destination indices
-	trigramMap      map[string][]int // Trigram -> array of destination indices
-	phoneticMap     map[string][]int // PhoneticKey -> array of destination indices
-	prefixMap       map[string][]int // 3-char lowercased prefix -> array of destination indices
-	destinations    []DestinationRecord
-	maxPostingRatio float64
-	skipTrigrams    map[string]bool
-	skipTokens      map[string]bool
-	skipPhonetic    map[string]bool
-	absoluteCeiling int
-	Metrics         *QueryMetrics // Optional profiling metrics (off by default)
+	mu               sync.RWMutex
+	tokenMap         map[string][]int // Token -> array of destination indices
+	trigramMap       map[string][]int // Trigram -> array of destination indices
+	phoneticMap      map[string][]int // PhoneticKey -> array of destination indices
+	romanizedMap     map[string][]int // Romanized trigram -> array of destination indices
+	prefixMap        map[string][]int // 3-char lowercased prefix -> array of destination indices
+	destinations     []DestinationRecord
+	maxPostingRatio  float64
+	skipTrigrams     map[string]bool
+	skipTokens       map[string]bool
+	skipPhonetic     map[string]bool
+	skipRomanized    map[string]bool
+	absoluteCeiling  int
+	Metrics          *QueryMetrics // Optional profiling metrics (off by default)
 }
 
 func NewBlockingIndex(dests []DestinationRecord) *BlockingIndex {
@@ -86,12 +88,14 @@ func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio floa
 		tokenMap:        make(map[string][]int),
 		trigramMap:      make(map[string][]int),
 		phoneticMap:     make(map[string][]int),
+		romanizedMap:    make(map[string][]int),
 		prefixMap:       make(map[string][]int),
 		destinations:    dests,
 		maxPostingRatio: maxPostingRatio,
 		skipTrigrams:    make(map[string]bool),
 		skipTokens:      make(map[string]bool),
 		skipPhonetic:    make(map[string]bool),
+		skipRomanized:   make(map[string]bool),
 		absoluteCeiling: absoluteCeiling,
 	}
 	idx.build()
@@ -112,6 +116,7 @@ func (idx *BlockingIndex) build() {
 	// Precompute token and trigram frequencies
 	tokenFreq := make(map[string]int)
 	trigramFreq := make(map[string]int)
+	romanizedFreq := make(map[string]int)
 
 	for _, dest := range idx.destinations {
 		// Index by clean tokens
@@ -125,6 +130,14 @@ func (idx *BlockingIndex) build() {
 		trigrams := extractTrigrams(dest.NormalizedName.Cleaned)
 		for _, tr := range trigrams {
 			trigramFreq[tr]++
+		}
+
+		// Index by romanized trigrams
+		if dest.NormalizedName.Romanized != "" {
+			romanizedTrigrams := extractTrigrams(dest.NormalizedName.Romanized)
+			for _, tr := range romanizedTrigrams {
+				romanizedFreq[tr]++
+			}
 		}
 	}
 
@@ -159,6 +172,15 @@ func (idx *BlockingIndex) build() {
 		}
 	}
 
+	// Populate skip map for romanized trigrams (only if cutoff > 0)
+	if cutoff > 0 {
+		for rt, freq := range romanizedFreq {
+			if freq > cutoff {
+				idx.skipRomanized[rt] = true
+			}
+		}
+	}
+
 	for i, dest := range idx.destinations {
 		cleaned := strings.ToLower(dest.NormalizedName.Cleaned)
 		// Build prefix map: use first 3 chars (or whole string if shorter)
@@ -184,6 +206,16 @@ func (idx *BlockingIndex) build() {
 		if dest.NormalizedName.PhoneticKey != "" && !idx.skipPhonetic[dest.NormalizedName.PhoneticKey] {
 			pk := dest.NormalizedName.PhoneticKey
 			idx.phoneticMap[pk] = append(idx.phoneticMap[pk], i)
+		}
+
+		// Index by romanized trigrams
+		if dest.NormalizedName.Romanized != "" {
+			romanizedTrigrams := extractTrigrams(dest.NormalizedName.Romanized)
+			for _, tr := range romanizedTrigrams {
+				if !idx.skipRomanized[tr] {
+					idx.romanizedMap[tr] = append(idx.romanizedMap[tr], i)
+				}
+			}
 		}
 	}
 }
@@ -259,6 +291,21 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 				for _, destIdx := range destIdxs {
 					hitCounts[destIdx]++
 					postingListWalks++
+				}
+			}
+		}
+	}
+
+	// Romanized trigram match hits (for cross-script retrieval)
+	if src.NormalizedName.Romanized != "" {
+		srcRomanizedTrigrams := extractTrigrams(src.NormalizedName.Romanized)
+		for _, tr := range srcRomanizedTrigrams {
+			if !idx.skipRomanized[tr] {
+				if destIdxs, exists := idx.romanizedMap[tr]; exists {
+					for _, destIdx := range destIdxs {
+						hitCounts[destIdx]++
+						postingListWalks++
+					}
 				}
 			}
 		}

@@ -84,7 +84,7 @@ func ThaiPhoneticForm(s string) string {
 func isLeadingVowel(c rune) bool {
 	// เ แ โ ใ ไ
 	switch c {
-	case 0xE40, 0xE41, 0xE45, 0xE43, 0xE44:
+	case 0xE40, 0xE41, 0xE42, 0xE43, 0xE44:
 		return true
 	default:
 		return false

@@ -63,6 +63,7 @@ type CleanName struct {
 	Numbers          []string `json:"numbers"`
 	PhoneticKey      string   `json:"phonetic_key"`
 	PhoneticForm     string   `json:"phonetic_form"`
+	Romanized        string   `json:"romanized"`
 }
 
 func RunePrefix(s string, n int) string {
@@ -145,6 +146,16 @@ func Normalize(input string) CleanName {
 		phoneticForm = ThaiPhoneticForm(text)
 	}
 
+	// Compute romanized form for cross-script retrieval (Stage 2)
+	// For Thai-containing text, romanize and extract skeleton
+	// For pure-Latin text, extract skeleton directly
+	var romanized string
+	if ContainsThai(text) {
+		romanized = PhoneticSkeleton(RomanizeThai(text))
+	} else {
+		romanized = PhoneticSkeleton(text)
+	}
+
 	return CleanName{
 		Raw:               input,
 		Cleaned:           text,
@@ -154,6 +165,7 @@ func Normalize(input string) CleanName {
 		Numbers:          numMatches,
 		PhoneticKey:      GeneratePhoneticKey(phoneticForm, text),
 		PhoneticForm:     phoneticForm,
+		Romanized:        romanized,
 	}
 }
 

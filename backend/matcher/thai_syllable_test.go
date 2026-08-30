@@ -1,8 +1,10 @@
 package matcher
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSegmentThaiSyllables(t *testing.T) {
@@ -235,6 +237,120 @@ func TestSegmentThaiSyllablesEdgeCases(t *testing.T) {
 			// Check length if specified
 			if tt.wantLen > 0 && len(got) != tt.wantLen {
 				t.Errorf("expected %d segments, got %d", tt.wantLen, len(got))
+			}
+		})
+	}
+}
+
+// TestSegmentThaiSyllablesTermination is a NON-NEGOTIABLE test that ensures the segmenter
+// terminates on all inputs, especially the previously-hanging cases where a leading vowel
+// is followed by a consonant with no final.
+func TestSegmentThaiSyllablesTermination(t *testing.T) {
+	// Critical test cases that previously hung: leading vowel + consonant with no final
+	hangCases := []string{
+		"โน",       // leading vowel + single consonant
+		"โลยี",     // leading vowel + consonant + vowel + consonant
+		"โนโลยี",   // multiple leading-vowel cases
+		"เทคโนโลยี", // mixed case with both final and non-final
+		"โซลูชั่น",  // complex case with multiple vowels
+	}
+
+	// All leading vowels paired with single consonants (most likely to hang)
+	leadingVowels := []rune{0xE40, 0xE41, 0xE42, 0xE43, 0xE44} // เ แ โ ใ ไ
+	consonants := []rune{0xE01, 0xE0A, 0xE19, 0xE23, 0xE2A}    // ก ช น ร ส (sample)
+
+	for _, tc := range hangCases {
+		t.Run("Hang:"+tc, func(t *testing.T) {
+			done := make(chan bool, 1)
+			go func() {
+				_ = SegmentThaiSyllables(tc)
+				done <- true
+			}()
+
+			select {
+			case <-done:
+				// Test passed: segmenter terminated
+			case <-time.After(2 * time.Second):
+				t.Fatalf("SegmentThaiSyllables(%q) did not terminate within 2 seconds", tc)
+			}
+		})
+	}
+
+	// Test all combinations of leading vowel + consonant
+	for _, vowel := range leadingVowels {
+		for _, consonant := range consonants {
+			input := string([]rune{vowel, consonant})
+			t.Run("LeadingVowel:"+input, func(t *testing.T) {
+				done := make(chan bool, 1)
+				go func() {
+					_ = SegmentThaiSyllables(input)
+					done <- true
+				}()
+
+				select {
+				case <-done:
+					// Test passed: segmenter terminated
+				case <-time.After(2 * time.Second):
+					t.Fatalf("SegmentThaiSyllables(%q) did not terminate within 2 seconds", input)
+				}
+			})
+		}
+	}
+}
+
+// TestSegmentThaiSyllablesRandomProperty tests segmenter termination and lossless round-trip
+// on randomly-generated Thai strings. This catches classes of bugs that hand-picked examples miss.
+func TestSegmentThaiSyllablesRandomProperty(t *testing.T) {
+	consonants := []rune{0xE01, 0xE04, 0xE08, 0xE0A, 0xE0D, 0xE0E, 0xE0F, 0xE10, 0xE13,
+		0xE14, 0xE15, 0xE17, 0xE19, 0xE1A, 0xE1B, 0xE1C, 0xE1E, 0xE1F, 0xE21, 0xE23, 0xE25, 0xE27, 0xE2A, 0xE2B, 0xE2D}
+
+	vowelMarks := []rune{0xE31, 0xE34, 0xE35, 0xE36, 0xE37, 0xE38, 0xE39, 0xE30, 0xE32, 0xE33}
+
+	leadingVowels := []rune{0xE40, 0xE41, 0xE42, 0xE43, 0xE44}
+
+	// Generate 50 random strings
+	for testNum := 0; testNum < 50; testNum++ {
+		// Build a random Thai string with 2-8 runes
+		var input []rune
+		length := 2 + (testNum % 7)
+		for i := 0; i < length; i++ {
+			choice := testNum*7 + i
+			if choice%3 == 0 && i > 0 {
+				// Add a vowel mark sometimes
+				input = append(input, vowelMarks[choice%len(vowelMarks)])
+			} else if choice%5 == 0 && i == 0 {
+				// Start with a leading vowel sometimes
+				input = append(input, leadingVowels[choice%len(leadingVowels)])
+			} else {
+				// Add a consonant
+				input = append(input, consonants[choice%len(consonants)])
+			}
+		}
+
+		inputStr := string(input)
+
+		t.Run(fmt.Sprintf("Random_%d", testNum), func(t *testing.T) {
+			// Test 1: Must terminate within 2 seconds
+			done := make(chan []Syllable, 1)
+			go func() {
+				done <- SegmentThaiSyllables(inputStr)
+			}()
+
+			var result []Syllable
+			select {
+			case result = <-done:
+				// Test passed: segmenter terminated
+			case <-time.After(2 * time.Second):
+				t.Fatalf("SegmentThaiSyllables(%q) did not terminate within 2 seconds", inputStr)
+			}
+
+			// Test 2: Must round-trip losslessly
+			var reconstructed strings.Builder
+			for _, syl := range result {
+				reconstructed.WriteString(syl.Text)
+			}
+			if reconstructed.String() != inputStr {
+				t.Errorf("Round-trip failed for %q: reconstructed %q", inputStr, reconstructed.String())
 			}
 		})
 	}

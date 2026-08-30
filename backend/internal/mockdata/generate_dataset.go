@@ -392,33 +392,31 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 	// POSITIVE BILINGUAL CATEGORIES: Thai-Latin Cross-Script Matching
 
 	// Category 8: BILINGUAL_IN_DICTIONARY - Uses entities that ARE in the hardcoded map (memorization)
-	// These 9 pairs are the ones hardcoded in matcher/normalizer.go
-	// Make Thai side unique with full surnames to avoid collision, Latin side unindexed
+	// Dictionary-only pairs without context to avoid collision
 	bilingualInDictPairs := []struct {
-		thaiUnique, latin string
+		thai, latin string
 	}{
-		{"ชื่อหนึ่งบัญชาการสยาม", "siam"},
-		{"ท่าขมสูงกรุงเทพมหานคร", "bangkok"},
-		{"คณะบัญชีกสิกรไทย", "kasikornbank"},
-		{"เครือข่ายเอไอเอสนานาชาติ", "ais"},
-		{"โครงการจัดการเจริญโภคภัณฑ์", "charoen pokphand"},
-		{"ตัวแทนอย่างสมชายผู้บริหาร", "somchai"},
-		{"ดีกรีศศาสตร์อารียา", "areeya"},
-		{"องค์กรวีระชัยวิจัยพัฒนา", "weerachai"},
-		{"ระบบจัดการพงษ์สวัสดิ์ต่างประเทศ", "pongsawat"},
+		{"สยาม", "Siam"},
+		{"กรุงเทพ", "Bangkok"},
+		{"กสิกร", "Kasikorn"},
+		{"เอไอเอส", "AIS"},
+		{"เจริญโภคภัณฑ์", "Charoen Pokphand"},
+		{"สมชาย", "Somchai"},
+		{"อารียา", "Areeya"},
+		{"วีระชัย", "Weerachai"},
+		{"พงษ์สวัสดิ์", "Pongsawat"},
 	}
 	for idx, pair := range bilingualInDictPairs {
 		srcID := fmt.Sprintf("src-%05d", pairID)
 		destID := fmt.Sprintf("dest-%05d", pairID)
 
-		// Alternate direction: even indices Thai->Latin, odd indices Latin->Thai
 		var srcRaw, destRaw string
 		if idx%2 == 0 {
-			srcRaw = pair.thaiUnique  // Thai with unique surname
-			destRaw = pair.latin       // Latin unindexed
+			srcRaw = pair.thai
+			destRaw = pair.latin
 		} else {
-			srcRaw = pair.latin        // Latin unindexed
-			destRaw = pair.thaiUnique  // Thai with unique surname
+			srcRaw = pair.latin
+			destRaw = pair.thai
 		}
 
 		srcRec := matcher.SourceRecord{
@@ -455,55 +453,67 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 		pairID++
 	}
 
-	// Category 9: BILINGUAL_OUT_OF_DICT - Real Thai names with RTGS romanizations NOT in the hardcoded map (generalization)
-	// These pairs use completely unique Thai names not in the corpus, with RTGS romanization.
-	// Use place names, less common personal names, and corporate names to ensure uniqueness.
+	// Category 9: BILINGUAL_OUT_OF_DICT - Real Thai given+surname names with RTGS romanizations NOT in the hardcoded map
+	// Use unique full names + surnames from curated real Thai names
 	bilingualOutOfDictPairs := []struct {
-		thaiUnique, latinUnique string
+		thai, latin string
 	}{
-		{"ท่อมระนัง สัตยาพร", "Suchat Pracharoen"},
-		{"ท่าแพร่ศิลป์ ประเทศ", "Suchart Sangpradit"},       // RTGS variant
-		{"บ้านศรีสะพัน มงคลนิเวศ", "Prasert Chantarangsul"},
-		{"บ้านแหลม วิชัยวัฒนา", "Wichai Sirinimit"},
-		{"คลองแสนแสบ เวิ้งวังวิจิตร", "Vichai Namprasit"},      // variant
-		{"แม่ประมาณสุข ธรรมรักษ์", "Thanakorn Phromarak"},
-		{"ไร่เหมืองชัยภูมิ สัตชัย", "Napha Khunchai"},
-		{"หนองวัวซอรจนา กมลาวรรณ", "Kamon Sukhumvit"},
-		{"วังสะพัน ศักดิ์สยามสิทธิ์", "Sakchai Sitthiprom"},
-		{"บ่อวิน เบญจพลอรุณ", "Bunmi Ratchapruk"},
-		{"โครงการตั้งนครดุษฎี", "Boonmee Settakul"},          // variant
-		{"บ้านปงน้ำเย็นชัย", "Chan Namdamrong"},
-		{"โครงการสวนป่าแสนทรัพย์", "Jan Sitsuktham"},               // variant
-		{"ศรีสมุทรเจดีย์ศิลป์", "Saengthong Suthisak"},
-		{"บ้านกว่างไผ่ประสิทธิ์", "Rungroj Phakarom"},
-		{"หนองผึ้งส่วนราชการเรื่อง", "Phimchai Thairat"},
-		{"ไม้โครงสร้างชลธารา", "Chonthicha Nilthai"},
-		{"เขตภูเก็ตบ้านนรา", "Narong Prachachuen"},
-		{"เขตนวมพระนครสิทธิ์", "Narongse Sothawech"},        // variant
-		{"เขตพยุหะอรุณธารา", "Arun Rungsawang"},
-		{"ท่อมสิงห์เมฆาศรี", "Metha Kananek"},
-		{"โครงการน้ำชลสิทธิ์ไทยปูนอินดัสเทรี", "Thai Cement International Holdings"},
-		{"บริษัทชุมชนสมเด็จพระนเรศวรอนุสรณ์", "Eastern Siam Concrete Works"},
-		{"บริษัทการขนส่งเอกชนรัฐการจัดการ", "Asian Airways Logistics"},
-		{"เขตธัญบุรีท่องเที่ยวพัฒนา", "Phetchabun Tourism Services"},
-		{"เขตข่วงท่าแพสินค้า", "Udon Thani International"},
-		{"เขตชั้นเลิศท่าบ่อจังหวัร", "Sakon Nakhon Regional"},
-		{"บริษัทพนันน้ำหลวงเขต", "Maha Sarakham Cooperative"},
-		{"บ้านศรีฟ้าครบถ้วนศิลป์", "Loei Provincial Authority"},
-		{"โครงการชั้นราษฎรสิทธิ์", "Nakhon Phanom Federation"},
+		{"สุชาติ ประเจริญ", "Suchat Prachaerin"},
+		{"สุชาติ ประเจริญ", "Suchart Prachaerin"},
+		{"ประเสริฐ จันทรังษี", "Prasert Chantarangsi"},
+		{"วิชัย สิรินิมิตร", "Wichai Sirinimit"},
+		{"วิชัย สิรินิมิตร", "Vichai Sirinimit"},
+		{"ธนากร เพ็ญจันทร์", "Thanakorn Penjantr"},
+		{"นภา คณะสิงห์", "Napha Kanasingham"},
+		{"กมล พวกศรี", "Kamon Pueksri"},
+		{"ศักดิ์ชัย ศรีหาร", "Sakchai Srihar"},
+		{"บุญมี นรสิงห์", "Bunmi Norsingha"},
+		{"บุญมี นรสิงห์", "Boonmee Norsingha"},
+		{"จันทร์พวก บูชา", "Chanphuak Boucha"},
+		{"จันทร์พวก บูชา", "Janpuek Boucha"},
+		{"แสงทอง วงศ์พูล", "Saengthong Wongpool"},
+		{"รุ่งโรจน์ สวินทร์", "Rungroj Suwintr"},
+		{"พิมพ์ใจ จันท์สิริ", "Phimchai Chansiri"},
+		{"ชลธิชา ปัญญานัน", "Chonthicha Panyanan"},
+		{"ณรงค์ สมโภค", "Narong Somsombat"},
+		{"ณรงค์ สมโภค", "Narongse Somsombat"},
+		{"อรุณ อาศรี", "Arun Atsri"},
+		{"เมธา เรือเส", "Metha Ruese"},
+		{"กานต์ นันตะวั", "Kan Nantawa"},
+		{"ศศิพร สิทธิสม", "Sasipon Sittism"},
+		{"ชนินธร วิมล", "Chanintr Wimol"},
+		{"ประพัฒน์ กาญจนา", "Prawat Kanjanai"},
+		{"วราวุธ ชำนาญ", "Varavuth Chamnan"},
+		{"ไพศาล เงินสี", "Phaisarn Ngernsee"},
+		{"อัศวิน พัฒน์", "Aswin Pattana"},
+		{"เศวต ศรีอำนวย", "Seawat Sriamoy"},
+		{"ทรงศักดิ์ นิมิต", "Songsak Nimit"},
 	}
-	for idx, pair := range bilingualOutOfDictPairs {
+	// Direction is keyed to the THAI NAME, not the entry index. Several entries share one
+	// Thai name with different Latin spelling variants (Suchat / Suchart); alternating per
+	// entry would put that Thai string on the source side of one pair and the destination
+	// side of the next, so each Thai source would match its own exact duplicate at 1.000
+	// instead of its Latin partner. Every entry for a given Thai name uses one direction.
+	thaiFirst := make(map[string]bool)
+	distinctThai := 0
+	for _, pair := range bilingualOutOfDictPairs {
+		if _, seen := thaiFirst[pair.thai]; !seen {
+			thaiFirst[pair.thai] = distinctThai%3 == 0
+			distinctThai++
+		}
+	}
+
+	for _, pair := range bilingualOutOfDictPairs {
 		srcID := fmt.Sprintf("src-%05d", pairID)
 		destID := fmt.Sprintf("dest-%05d", pairID)
 
-		// Vary direction: every 3rd is Thai->Latin, others are Latin->Thai
 		var srcRaw, destRaw string
-		if idx%3 == 0 {
-			srcRaw = pair.thaiUnique    // Thai with unique name
-			destRaw = pair.latinUnique  // Latin with unique name
+		if thaiFirst[pair.thai] {
+			srcRaw = pair.thai
+			destRaw = pair.latin
 		} else {
-			srcRaw = pair.latinUnique   // Latin with unique name
-			destRaw = pair.thaiUnique   // Thai with unique name
+			srcRaw = pair.latin
+			destRaw = pair.thai
 		}
 
 		srcRec := matcher.SourceRecord{
@@ -539,7 +549,6 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 		})
 		pairID++
 	}
-
 	// Category 10: NEG_BILINGUAL_FALSE_FRIEND - Completely unique Thai and English names that should NOT match each other
 	// Using completely new names not in the corpus to ensure they remain TN (true negatives).
 	bilingualFalseFriendPairs := []struct {

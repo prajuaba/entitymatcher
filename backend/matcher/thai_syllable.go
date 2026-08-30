@@ -169,6 +169,12 @@ func SegmentThaiSyllables(s string) []Syllable {
 			i++
 		}
 
+		// Safety guard: if no progress was made (index didn't advance), consume at least one rune
+		// to prevent infinite loops. This ensures termination even on malformed input.
+		if i == start {
+			i++
+		}
+
 		// Build syllable text from original range [start, i)
 		text := string(runes[start:i])
 		result = append(result, Syllable{
