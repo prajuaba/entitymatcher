@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { BookOpen, Plus, Trash2, CheckCircle2 } from 'lucide-react'
+import { apiFetch } from '../lib/api.js'
 
 export function DictionaryManager() {
   const [entries, setEntries] = useState([])
@@ -10,7 +11,7 @@ export function DictionaryManager() {
   const fetchDictionary = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/dictionary')
+      const res = await apiFetch('/api/dictionary')
       const data = await res.json()
       setEntries(data.entries || [])
     } catch (e) {
@@ -29,7 +30,7 @@ export function DictionaryManager() {
     if (!newAlias.trim() || !newCanonical.trim()) return
 
     try {
-      const res = await fetch('/api/dictionary', {
+      const res = await apiFetch('/api/dictionary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias: newAlias.trim(), canonical: newCanonical.trim() }),

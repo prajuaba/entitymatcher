@@ -5,7 +5,7 @@ import { Activity, CheckCircle2, Clock, Zap, ArrowRight, RefreshCw } from 'lucid
 export function ProgressDashboard() {
   const { progress, batchID, runMatching, setActiveTab, loading } = useMatcherStore()
 
-  const { total_sources, processed_sources, total_matches, auto_matched, review_needed, status, elapsed_ms } = progress
+  const { total_sources, processed_sources, total_candidate_pairs, no_match_count, total_decisions, auto_matched, review_needed, status, elapsed_ms } = progress
 
   const percentage = total_sources > 0 ? Math.round((processed_sources / total_sources) * 100) : 0
   const recordsPerSec = elapsed_ms > 0 ? Math.round((processed_sources / (elapsed_ms / 1000))) : 0
@@ -66,9 +66,9 @@ export function ProgressDashboard() {
       {/* Execution Statistics Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
-          <span className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Total Matches</span>
-          <div className="text-2xl font-bold text-slate-100 font-mono">{total_matches}</div>
-          <p className="text-[11px] text-slate-500">Above review threshold</p>
+          <span className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Candidate Pairs</span>
+          <div className="text-2xl font-bold text-slate-100 font-mono">{total_candidate_pairs}</div>
+          <p className="text-[11px] text-slate-500">Total pair candidates</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
@@ -78,15 +78,21 @@ export function ProgressDashboard() {
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
-          <span className="text-xs text-amber-400 uppercase tracking-wider font-semibold font-semibold">Review Queue</span>
+          <span className="text-xs text-amber-400 uppercase tracking-wider font-semibold">Review Queue</span>
           <div className="text-2xl font-bold text-amber-400 font-mono">{review_needed}</div>
           <p className="text-[11px] text-slate-500">Confidence 70% - 89%</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
-          <span className="text-xs text-sky-400 uppercase tracking-wider font-semibold">Throughput</span>
-          <div className="text-2xl font-bold text-sky-400 font-mono">{recordsPerSec} <span className="text-xs font-normal">rec/s</span></div>
-          <p className="text-[11px] text-slate-500">Worker pool parallel speed</p>
+          <span className="text-xs text-rose-400 uppercase tracking-wider font-semibold">Unmatched</span>
+          <div className="text-2xl font-bold text-rose-400 font-mono">{no_match_count || 0}</div>
+          <p className="text-[11px] text-slate-500">No match found</p>
+        </div>
+
+        <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
+          <span className="text-xs text-sky-400 uppercase tracking-wider font-semibold">Total Decisions</span>
+          <div className="text-2xl font-bold text-sky-400 font-mono">{total_decisions || 0}</div>
+          <p className="text-[11px] text-slate-500">Review & human decisions</p>
         </div>
       </div>
     </div>

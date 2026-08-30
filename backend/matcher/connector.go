@@ -2,12 +2,24 @@ package matcher
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/microsoft/go-mssqldb"
+	"github.com/xuri/excelize/v2"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type SourceType string
@@ -22,16 +34,16 @@ const (
 )
 
 type ConnectionConfig struct {
-	Type         SourceType             `json:"type"`
-	Host         string                 `json:"host,omitempty"`
-	Port         int                    `json:"port,omitempty"`
-	Database     string                 `json:"database,omitempty"`
-	Username     string                 `json:"username,omitempty"`
-	Password     string                 `json:"password,omitempty"`
-	TableOrQuery string                 `json:"table_or_query"`
-	FilePath     string                 `json:"file_path,omitempty"`
+	Type         SourceType               `json:"type"`
+	Host         string                   `json:"host,omitempty"`
+	Port         int                      `json:"port,omitempty"`
+	Database     string                   `json:"database,omitempty"`
+	Username     string                   `json:"username,omitempty"`
+	Password     string                   `json:"password,omitempty"`
+	TableOrQuery string                   `json:"table_or_query"`
+	FilePath     string                   `json:"file_path,omitempty"`
 	ManualData   []map[string]interface{} `json:"manual_data,omitempty"`
-	ExtraParams  map[string]interface{} `json:"extra_params,omitempty"`
+	ExtraParams  map[string]interface{}   `json:"extra_params,omitempty"`
 }
 
 type ColumnDef struct {
@@ -45,11 +57,14 @@ type DataConnector interface {
 	FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error)
 }
 
-// Factory to instantiate appropriate connector driver
 func NewDataConnector(cfg ConnectionConfig) (DataConnector, error) {
 	switch cfg.Type {
-	case SourceTypePostgres, SourceTypeSQLServer, SourceTypeMongoDB:
-		return &DBConnector{Config: cfg}, nil
+	case SourceTypePostgres:
+		return &PostgresConnector{Config: cfg}, nil
+	case SourceTypeSQLServer:
+		return &SQLServerConnector{Config: cfg}, nil
+	case SourceTypeMongoDB:
+		return &MongoConnector{Config: cfg}, nil
 	case SourceTypeCSV:
 		return &CSVConnector{Config: cfg}, nil
 	case SourceTypeExcel:
@@ -61,82 +76,406 @@ func NewDataConnector(cfg ConnectionConfig) (DataConnector, error) {
 	}
 }
 
-// DBConnector handles PostgreSQL, SQL Server, and MongoDB connections
-type DBConnector struct {
+type PostgresConnector struct {
 	Config ConnectionConfig
+	pool   *pgxpool.Pool
 }
 
-func (c *DBConnector) TestConnection(ctx context.Context) error {
-	if c.Config.Host == "" && c.Config.Database == "" {
-		return fmt.Errorf("database host and database name are required")
+func (c *PostgresConnector) buildDSN() string {
+	port := c.Config.Port
+	if port == 0 {
+		port = 5432
 	}
-	// Simulated DB ping validation
+	sslmode := "disable"
+	if c.Config.ExtraParams != nil {
+		if ssl, ok := c.Config.ExtraParams["sslmode"].(string); ok {
+			sslmode = ssl
+		}
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		c.Config.Username, c.Config.Password, c.Config.Host, port, c.Config.Database, sslmode)
+}
+
+func (c *PostgresConnector) TestConnection(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	config, err := pgxpool.ParseConfig(c.buildDSN())
+	if err != nil {
+		return fmt.Errorf("postgres config error: %w", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("postgres connection failed: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return fmt.Errorf("postgres ping failed: %w", err)
+	}
+
+	c.pool = pool
 	return nil
 }
 
-func (c *DBConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
-	// Sample introspection return based on DB type
-	switch c.Config.Type {
-	case SourceTypePostgres:
-		return []ColumnDef{
-			{Name: "customer_id", DataType: "UUID"},
-			{Name: "first_name", DataType: "VARCHAR"},
-			{Name: "last_name", DataType: "VARCHAR"},
-			{Name: "company_name", DataType: "TEXT"},
-			{Name: "tax_id", DataType: "VARCHAR"},
-			{Name: "transaction_date", DataType: "DATE"},
-			{Name: "status", DataType: "VARCHAR"},
-		}, nil
-	case SourceTypeSQLServer:
-		return []ColumnDef{
-			{Name: "CustID", DataType: "INT"},
-			{Name: "CustomerName", DataType: "NVARCHAR"},
-			{Name: "TaxRegistrationNo", DataType: "NVARCHAR"},
-			{Name: "TxDate", DataType: "DATETIME"},
-			{Name: "BranchNo", DataType: "INT"},
-		}, nil
-	case SourceTypeMongoDB:
-		return []ColumnDef{
-			{Name: "_id", DataType: "OBJECTID"},
-			{Name: "client_name", DataType: "STRING"},
-			{Name: "contact_person", DataType: "STRING"},
-			{Name: "registration_id", DataType: "STRING"},
-			{Name: "created_at", DataType: "DATE"},
-		}, nil
-	default:
-		return []ColumnDef{
-			{Name: "reference_id", DataType: "STRING"},
-			{Name: "customer_name", DataType: "STRING"},
-			{Name: "transaction_date", DataType: "STRING"},
-		}, nil
+func (c *PostgresConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	if c.pool == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	schema, table := "public", c.Config.TableOrQuery
+	parts := strings.Split(c.Config.TableOrQuery, ".")
+	if len(parts) == 2 {
+		schema = parts[0]
+		table = parts[1]
+	}
+
+	if err := validateIdentifier(schema); err != nil {
+		return nil, err
+	}
+	if err := validateIdentifier(table); err != nil {
+		return nil, err
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(c.Config.TableOrQuery), "SELECT") {
+		query := c.Config.TableOrQuery + " LIMIT 0"
+		rows, err := c.pool.Query(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("query execution failed: %w", err)
+		}
+		defer rows.Close()
+
+		cols := rows.FieldDescriptions()
+		result := make([]ColumnDef, len(cols))
+		for i, col := range cols {
+			result[i] = ColumnDef{Name: string(col.Name), DataType: fmt.Sprintf("OID:%d", col.DataTypeOID)}
+		}
+		return result, nil
+	}
+
+	query := `
+		SELECT column_name, data_type
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		ORDER BY ordinal_position
+	`
+
+	rows, err := c.pool.Query(ctx, query, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("introspect schema failed: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ColumnDef
+	for rows.Next() {
+		var colName, dataType string
+		if err := rows.Scan(&colName, &dataType); err != nil {
+			return nil, err
+		}
+		result = append(result, ColumnDef{Name: colName, DataType: dataType})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
-func (c *DBConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
-	// Returns records for dynamic query
-	var sample []map[string]interface{}
-	cols, _ := c.IntrospectSchema(ctx)
+func (c *PostgresConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	if c.pool == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
+	}
 
-	for i := 1; i <= 20; i++ {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	limit = clamp(limit, 1, 50000)
+	if offset < 0 {
+		offset = 0
+	}
+
+	schema, table := "public", c.Config.TableOrQuery
+	parts := strings.Split(c.Config.TableOrQuery, ".")
+	if len(parts) == 2 {
+		schema = parts[0]
+		table = parts[1]
+	}
+
+	if err := validateIdentifier(schema); err != nil {
+		return nil, err
+	}
+	if err := validateIdentifier(table); err != nil {
+		return nil, err
+	}
+
+	var rows pgx.Rows
+	var err error
+
+	if strings.HasPrefix(strings.TrimSpace(c.Config.TableOrQuery), "SELECT") {
+		query := c.Config.TableOrQuery + " LIMIT $1 OFFSET $2"
+		rows, err = c.pool.Query(ctx, query, limit, offset)
+	} else {
+		query := fmt.Sprintf("SELECT * FROM %s.%s LIMIT $1 OFFSET $2",
+			quoteIdentifier(schema), quoteIdentifier(table))
+		rows, err = c.pool.Query(ctx, query, limit, offset)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("fetch records failed: %w", err)
+	}
+	defer rows.Close()
+
+	cols := rows.FieldDescriptions()
+	result := make([]map[string]interface{}, 0)
+
+	for rows.Next() {
+		values := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(values))
+		for i := range values {
+			var v interface{}
+			ptrs[i] = &v
+		}
+
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+
 		row := make(map[string]interface{})
-		for _, col := range cols {
-			if strings.Contains(col.Name, "id") || strings.Contains(col.Name, "ID") {
-				row[col.Name] = fmt.Sprintf("REF-DB-%04d", i)
-			} else if strings.Contains(col.Name, "date") || strings.Contains(col.Name, "Date") || strings.Contains(col.Name, "at") {
-				row[col.Name] = "2026-08-20"
-			} else if strings.Contains(col.Name, "tax") || strings.Contains(col.Name, "reg") || strings.Contains(col.Name, "Tax") {
-				row[col.Name] = fmt.Sprintf("1100200300%03d", i)
-			} else {
-				row[col.Name] = fmt.Sprintf("บริษัท ตัวอย่าง %s %d จำกัด", col.Name, i)
+		for i, col := range cols {
+			row[string(col.Name)] = *ptrs[i].(*interface{})
+		}
+		result = append(result, row)
+	}
+
+	return result, rows.Err()
+}
+
+type SQLServerConnector struct {
+	Config ConnectionConfig
+	conn   *sql.DB
+}
+
+func (c *SQLServerConnector) buildDSN() string {
+	port := c.Config.Port
+	if port == 0 {
+		port = 1433
+	}
+	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
+		c.Config.Username, c.Config.Password, c.Config.Host, port, c.Config.Database)
+}
+
+func (c *SQLServerConnector) TestConnection(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	conn, err := sql.Open("sqlserver", c.buildDSN())
+	if err != nil {
+		return fmt.Errorf("sqlserver open failed: %w", err)
+	}
+
+	if err := conn.PingContext(ctx); err != nil {
+		conn.Close()
+		return fmt.Errorf("sqlserver connection failed: %w", err)
+	}
+
+	c.conn = conn
+	return nil
+}
+
+func (c *SQLServerConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	if c.conn == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := validateIdentifier(c.Config.TableOrQuery); err != nil {
+		return nil, err
+	}
+
+	query := `
+		SELECT COLUMN_NAME, DATA_TYPE
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_NAME = @TableName
+		ORDER BY ORDINAL_POSITION
+	`
+
+	rows, err := c.conn.QueryContext(ctx, query, sql.Named("TableName", c.Config.TableOrQuery))
+	if err != nil {
+		return nil, fmt.Errorf("introspect schema failed: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []ColumnDef
+	for rows.Next() {
+		var name, dtype string
+		if err := rows.Scan(&name, &dtype); err != nil {
+			return nil, err
+		}
+		cols = append(cols, ColumnDef{Name: name, DataType: dtype})
+	}
+
+	return cols, rows.Err()
+}
+
+func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	if c.conn == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	limit = clamp(limit, 1, 50000)
+	if offset < 0 {
+		offset = 0
+	}
+
+	if err := validateIdentifier(c.Config.TableOrQuery); err != nil {
+		return nil, err
+	}
+
+	table := quoteIdentifier(c.Config.TableOrQuery)
+	query := fmt.Sprintf("SELECT * FROM %s ORDER BY (SELECT NULL) OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY", table)
+
+	rows, err := c.conn.QueryContext(ctx, query, sql.Named("Offset", offset), sql.Named("Limit", limit))
+	if err != nil {
+		return nil, fmt.Errorf("fetch records failed: %w", err)
+	}
+	defer rows.Close()
+
+	return sqlRowsToMaps(rows)
+}
+
+type MongoConnector struct {
+	Config     ConnectionConfig
+	client     *mongo.Client
+	dbName     string
+	collection string
+}
+
+func (c *MongoConnector) buildURI() string {
+	port := c.Config.Port
+	if port == 0 {
+		port = 27017
+	}
+
+	if c.Config.Username == "" {
+		return fmt.Sprintf("mongodb://%s:%d", c.Config.Host, port)
+	}
+
+	return fmt.Sprintf("mongodb://%s:%s@%s:%d", c.Config.Username, c.Config.Password, c.Config.Host, port)
+}
+
+func (c *MongoConnector) TestConnection(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	opts := options.Client().ApplyURI(c.buildURI())
+	client, err := mongo.Connect(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("mongodb connection failed: %w", err)
+	}
+
+	if err := client.Ping(ctx, nil); err != nil {
+		client.Disconnect(ctx)
+		return fmt.Errorf("mongodb ping failed: %w", err)
+	}
+
+	c.client = client
+	c.dbName = c.Config.Database
+	c.collection = c.Config.TableOrQuery
+
+	return nil
+}
+
+func (c *MongoConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	if c.client == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	coll := c.client.Database(c.dbName).Collection(c.collection)
+	cursor, err := coll.Find(ctx, bson.D{}, options.Find().SetLimit(100))
+	if err != nil {
+		return nil, fmt.Errorf("introspect schema failed: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	colSet := make(map[string]string)
+	for cursor.Next(ctx) {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+
+		for k, v := range doc {
+			if _, ok := colSet[k]; !ok {
+				colSet[k] = bsonTypeToString(v)
 			}
 		}
-		sample = append(sample, row)
 	}
 
-	return sample, nil
+	var cols []ColumnDef
+	for k, v := range colSet {
+		cols = append(cols, ColumnDef{Name: k, DataType: v})
+	}
+
+	return cols, cursor.Err()
 }
 
-// CSVConnector handles streaming CSV file uploads
+func (c *MongoConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	if c.client == nil {
+		if err := c.TestConnection(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	limit = clamp(limit, 1, 50000)
+	if offset < 0 {
+		offset = 0
+	}
+
+	coll := c.client.Database(c.dbName).Collection(c.collection)
+	cursor, err := coll.Find(ctx, bson.D{}, options.Find().SetSkip(int64(offset)).SetLimit(int64(limit)))
+	if err != nil {
+		return nil, fmt.Errorf("fetch records failed: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []map[string]interface{}
+	for cursor.Next(ctx) {
+		var doc bson.M
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+		doc = convertObjectIDsToStrings(doc)
+		results = append(results, doc)
+	}
+
+	return results, cursor.Err()
+}
+
 type CSVConnector struct {
 	Config ConnectionConfig
 }
@@ -159,18 +498,14 @@ func (c *CSVConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error
 
 	file, err := os.Open(c.Config.FilePath)
 	if err != nil {
-		return []ColumnDef{
-			{Name: "reference_id", DataType: "STRING"},
-			{Name: "customer_name", DataType: "STRING"},
-			{Name: "transaction_date", DataType: "STRING"},
-		}, nil
+		return nil, fmt.Errorf("cannot open CSV file: %w", err)
 	}
 	defer file.Close()
 
 	reader := csv.NewReader(file)
 	headers, err := reader.Read()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot read CSV headers: %w", err)
 	}
 
 	var cols []ColumnDef
@@ -182,38 +517,84 @@ func (c *CSVConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error
 
 func (c *CSVConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
 	if len(c.Config.ManualData) > 0 {
-		return c.Config.ManualData, nil
+		if limit <= 0 {
+			limit = len(c.Config.ManualData)
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		if offset >= len(c.Config.ManualData) {
+			return []map[string]interface{}{}, nil
+		}
+		end := offset + limit
+		if end > len(c.Config.ManualData) {
+			end = len(c.Config.ManualData)
+		}
+		return c.Config.ManualData[offset:end], nil
 	}
-	return nil, nil
+
+	file, err := os.Open(c.Config.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open CSV file: %w", err)
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	headers, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read CSV headers: %w", err)
+	}
+
+	limit = clamp(limit, 1, 50000)
+	if offset < 0 {
+		offset = 0
+	}
+
+	var rows []map[string]interface{}
+	skipped := 0
+
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if skipped < offset {
+			skipped++
+			continue
+		}
+
+		if len(rows) >= limit {
+			break
+		}
+
+		row := make(map[string]interface{})
+		for i, val := range record {
+			if i < len(headers) {
+				row[strings.TrimSpace(headers[i])] = val
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	return rows, nil
 }
 
-// ExcelConnector handles Excel (.xlsx) files
 type ExcelConnector struct {
 	Config ConnectionConfig
 }
 
-func (c *ExcelConnector) TestConnection(ctx context.Context) error { return nil }
+func (c *ExcelConnector) TestConnection(ctx context.Context) error {
+	if c.Config.FilePath == "" && len(c.Config.ManualData) == 0 {
+		return fmt.Errorf("Excel file path or content required")
+	}
+	return nil
+}
 
 func (c *ExcelConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
-	return []ColumnDef{
-		{Name: "Sheet_Ref_ID", DataType: "STRING"},
-		{Name: "Company_Name", DataType: "STRING"},
-		{Name: "Tx_Date", DataType: "STRING"},
-	}, nil
-}
-
-func (c *ExcelConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
-	return c.Config.ManualData, nil
-}
-
-// ManualConnector handles manual add/edit/delete of columns and records
-type ManualConnector struct {
-	Config ConnectionConfig
-}
-
-func (c *ManualConnector) TestConnection(ctx context.Context) error { return nil }
-
-func (c *ManualConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
 	if len(c.Config.ManualData) > 0 {
 		var cols []ColumnDef
 		for k := range c.Config.ManualData[0] {
@@ -221,19 +602,233 @@ func (c *ManualConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, er
 		}
 		return cols, nil
 	}
-	return []ColumnDef{
-		{Name: "reference_id", DataType: "STRING"},
-		{Name: "customer_name", DataType: "STRING"},
-		{Name: "transaction_date", DataType: "STRING"},
-	}, nil
+
+	f, err := excelize.OpenFile(c.Config.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open Excel file: %w", err)
+	}
+	defer f.Close()
+
+	sheetName := f.GetSheetName(0)
+	if c.Config.ExtraParams != nil {
+		if sheet, ok := c.Config.ExtraParams["sheet"].(string); ok {
+			sheetName = sheet
+		}
+	}
+
+	rows, err := f.GetRows(sheetName)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
+	}
+
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("Excel sheet is empty")
+	}
+
+	var cols []ColumnDef
+	for _, h := range rows[0] {
+		cols = append(cols, ColumnDef{Name: strings.TrimSpace(h), DataType: "STRING"})
+	}
+	return cols, nil
+}
+
+func (c *ExcelConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	if len(c.Config.ManualData) > 0 {
+		if limit <= 0 {
+			limit = len(c.Config.ManualData)
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		if offset >= len(c.Config.ManualData) {
+			return []map[string]interface{}{}, nil
+		}
+		end := offset + limit
+		if end > len(c.Config.ManualData) {
+			end = len(c.Config.ManualData)
+		}
+		return c.Config.ManualData[offset:end], nil
+	}
+
+	f, err := excelize.OpenFile(c.Config.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open Excel file: %w", err)
+	}
+	defer f.Close()
+
+	sheetName := f.GetSheetName(0)
+	if c.Config.ExtraParams != nil {
+		if sheet, ok := c.Config.ExtraParams["sheet"].(string); ok {
+			sheetName = sheet
+		}
+	}
+
+	rows, err := f.GetRows(sheetName)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
+	}
+
+	if len(rows) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+
+	headers := rows[0]
+	limit = clamp(limit, 1, 50000)
+	if offset < 0 {
+		offset = 0
+	}
+
+	var result []map[string]interface{}
+	for i := 1 + offset; i < len(rows) && len(result) < limit; i++ {
+		row := make(map[string]interface{})
+		for j, h := range headers {
+			if j < len(rows[i]) {
+				row[strings.TrimSpace(h)] = rows[i][j]
+			}
+		}
+		result = append(result, row)
+	}
+
+	return result, nil
+}
+
+type ManualConnector struct {
+	Config ConnectionConfig
+}
+
+func (c *ManualConnector) TestConnection(ctx context.Context) error { return nil }
+
+func (c *ManualConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	if len(c.Config.ManualData) == 0 {
+		return nil, fmt.Errorf("manual data must be provided")
+	}
+	var cols []ColumnDef
+	for k := range c.Config.ManualData[0] {
+		cols = append(cols, ColumnDef{Name: k, DataType: "STRING"})
+	}
+	return cols, nil
 }
 
 func (c *ManualConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
-	return c.Config.ManualData, nil
+	if limit <= 0 {
+		limit = len(c.Config.ManualData)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(c.Config.ManualData) {
+		return []map[string]interface{}{}, nil
+	}
+	end := offset + limit
+	if end > len(c.Config.ManualData) {
+		end = len(c.Config.ManualData)
+	}
+	return c.Config.ManualData[offset:end], nil
 }
 
 func ParseJSONPayload(r io.Reader) ([]map[string]interface{}, error) {
 	var records []map[string]interface{}
 	err := json.NewDecoder(r).Decode(&records)
 	return records, err
+}
+
+func validateIdentifier(s string) error {
+	matched, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_]*$`, s)
+	if !matched {
+		return fmt.Errorf("invalid identifier: %s", s)
+	}
+	return nil
+}
+
+func quoteIdentifier(id string) string {
+	id = strings.TrimSpace(id)
+	if matched, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_]*$`, id); matched {
+		return id
+	}
+	return `"` + strings.ReplaceAll(id, `"`, `""`) + `"`
+}
+
+func clamp(v, min, max int) int {
+	if v <= 0 {
+		v = 1000
+	}
+	if v > max {
+		v = max
+	}
+	if v < min {
+		v = min
+	}
+	return v
+}
+
+func sqlRowsToMaps(rows *sql.Rows) ([]map[string]interface{}, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		valPtrs := make([]interface{}, len(cols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+
+		if err := rows.Scan(valPtrs...); err != nil {
+			return nil, err
+		}
+
+		row := make(map[string]interface{})
+		for i, col := range cols {
+			row[col] = vals[i]
+		}
+		results = append(results, row)
+	}
+
+	return results, rows.Err()
+}
+
+func bsonTypeToString(v interface{}) string {
+	switch v.(type) {
+	case primitive.ObjectID:
+		return "OBJECTID"
+	case string:
+		return "STRING"
+	case float64, float32:
+		return "DOUBLE"
+	case int, int32, int64:
+		return "INT"
+	case bool:
+		return "BOOLEAN"
+	case primitive.DateTime:
+		return "DATE"
+	case []byte:
+		return "BINARY"
+	case primitive.A:
+		return "ARRAY"
+	case bson.M:
+		return "OBJECT"
+	default:
+		return "STRING"
+	}
+}
+
+func convertObjectIDsToStrings(doc bson.M) bson.M {
+	for k, v := range doc {
+		switch val := v.(type) {
+		case primitive.ObjectID:
+			doc[k] = val.Hex()
+		case []interface{}:
+			for i, item := range val {
+				if itemDoc, ok := item.(bson.M); ok {
+					val[i] = convertObjectIDsToStrings(itemDoc)
+				}
+			}
+			doc[k] = val
+		case bson.M:
+			doc[k] = convertObjectIDsToStrings(val)
+		}
+	}
+	return doc
 }

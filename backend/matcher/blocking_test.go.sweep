@@ -1,0 +1,115 @@
+// This file would be run to sweep ceiling values and measure accuracy/performance
+// Usage: go test -run TestCeilingSweep
+
+package matcher
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"entitymatcher/internal/mockdata"
+)
+
+// TestCeilingSweepAccuracy measures accuracy metrics for different ceiling values
+// Run with: go test ./matcher -run TestCeilingSweepAccuracy -v
+func TestCeilingSweepAccuracy(t *testing.T) {
+	ceilings := []int{500, 1000, 2000, 5000, 20000}
+	const benchmarkSize = 2000
+
+	fmt.Println("\n====================================")
+	fmt.Println("CEILING SWEEP - ACCURACY METRICS")
+	fmt.Println("====================================")
+	fmt.Printf("Benchmark size: %d records\n", benchmarkSize)
+
+	type result struct {
+		ceiling    int
+		precision  float64
+		recall     float64
+		top1       float64
+		rowsPerSrc float64
+	}
+
+	results := []result{}
+
+	for _, ceiling := range ceilings {
+		oldCeiling := DefaultAbsoluteCeiling
+		DefaultAbsoluteCeiling = ceiling
+		defer func() { DefaultAbsoluteCeiling = oldCeiling }()
+
+		fmt.Printf("\nTesting ceiling=%d...\n", ceiling)
+
+		sources, dests, groundTruthMatches, labeledPairs := mockdata.GenerateBigMockDataset(benchmarkSize)
+
+		cfg := DefaultConfig()
+		cfg.WorkerCount = 8
+		cfg.MaxCandidatesPerSrc = 50
+		engine := NewMatchEngine(cfg)
+
+		results_, _ := engine.ExecuteJob(context.Background(), "benchmark-sweep", sources, dests, nil)
+
+		// Build ground truth map
+		sourceTruePartner := make(map[string]string)
+		for _, pair := range labeledPairs {
+			if pair.IsMatch {
+				key := fmt.Sprintf("%s_%s", pair.Source.ID, pair.Destination.ID)
+				if groundTruthMatches[key] {
+					sourceTruePartner[pair.Source.ID] = pair.Destination.ID
+				}
+			}
+		}
+
+		// Build auto-matched map
+		autoMatches := make(map[string]string)
+		for _, res := range results_ {
+			if res.Rank == 1 && res.MatchStatus == "AUTO_MATCHED" {
+				autoMatches[res.SourceID] = res.DestinationID
+			}
+		}
+
+		// Calculate metrics
+		var tp, fp, fn int
+		for _, src := range sources {
+			truePartnerID := sourceTruePartner[src.ID]
+			autoMatchedID := autoMatches[src.ID]
+
+			if truePartnerID != "" {
+				if autoMatchedID == truePartnerID {
+					tp++
+				} else {
+					fn++
+				}
+			} else {
+				if autoMatchedID != "" {
+					fp++
+				}
+			}
+		}
+
+		precision := 0.0
+		if tp+fp > 0 {
+			precision = float64(tp) / float64(tp+fp)
+		}
+		recall := 0.0
+		if tp+fn > 0 {
+			recall = float64(tp) / float64(tp+fn)
+		}
+		top1 := float64(tp) / float64(len(sources))
+		rowsPerSrc := float64(len(results_)) / float64(len(sources))
+
+		fmt.Printf("  Precision: %.4f, Recall: %.4f, Top-1: %.4f, Rows/Src: %.2f\n",
+			precision, recall, top1, rowsPerSrc)
+
+		results = append(results, result{ceiling, precision, recall, top1, rowsPerSrc})
+	}
+
+	fmt.Println("\n====================================")
+	fmt.Println("SUMMARY TABLE - ACCURACY")
+	fmt.Println("====================================")
+	fmt.Println("Ceiling | Precision | Recall | Top-1 | Rows/Src")
+	fmt.Println("--------|-----------|--------|-------|----------")
+	for _, r := range results {
+		fmt.Printf("%-7d | %.4f    | %.4f | %.4f | %.2f\n",
+			r.ceiling, r.precision, r.recall, r.top1, r.rowsPerSrc)
+	}
+}

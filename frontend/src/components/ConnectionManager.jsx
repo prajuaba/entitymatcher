@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Database, Server, FileSpreadsheet, FileCode, CheckCircle2, AlertCircle, RefreshCcw, Layers, Edit3, Plus, Trash2, Plug } from 'lucide-react'
+import { apiFetch } from '../lib/api.js'
 
 export function ConnectionManager({ onSchemaIntrospected }) {
   const [srcType, setSrcType] = useState('SQLSERVER')
@@ -42,7 +43,7 @@ export function ConnectionManager({ onSchemaIntrospected }) {
     else setLoadingDest(true)
 
     try {
-      const res = await fetch('/api/connector/test', {
+      const res = await apiFetch('/api/connector/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type, ...cfg }),
@@ -72,7 +73,7 @@ export function ConnectionManager({ onSchemaIntrospected }) {
     else setLoadingDest(true)
 
     try {
-      const res = await fetch('/api/connector/introspect', {
+      const res = await apiFetch('/api/connector/introspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type, ...cfg }),

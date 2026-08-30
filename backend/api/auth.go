@@ -2,13 +2,18 @@ package api
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Role string
@@ -28,11 +33,91 @@ type User struct {
 	Role     Role   `json:"role"`
 }
 
-var sampleUsers = map[string]User{
-	"admin":          {ID: "usr-01", Username: "admin", Password: "password123", Name: "Enterprise Admin", Role: RoleAdmin},
-	"engineer_alex": {ID: "usr-02", Username: "engineer_alex", Password: "password123", Name: "Alex (Data Engineer)", Role: RoleEngineer},
-	"reviewer_sarah": {ID: "usr-03", Username: "reviewer_sarah", Password: "password123", Name: "Sarah (Review Operator)", Role: RoleReviewer},
-	"auditor_mike":   {ID: "usr-04", Username: "auditor_mike", Password: "password123", Name: "Mike (Compliance Auditor)", Role: RoleAuditor},
+// sampleUsers is populated at package init with bcrypt hashes of demo passwords.
+// Each user's password is hashed with bcrypt cost 10.
+var sampleUsers = make(map[string]User)
+
+// jwtSecret is read from environment at package init or generated if not set.
+var jwtSecret []byte
+
+// dummyHash is a real bcrypt hash used for timing-safe password comparison
+// when a user is not found. Generated at init time.
+var dummyHash []byte
+
+// initSampleUsers initializes demo users with bcrypt-hashed passwords.
+func initSampleUsers() {
+	// Demo passwords (all "password123" for easy testing)
+	demoPassword := "password123"
+	hash, err := bcrypt.GenerateFromPassword([]byte(demoPassword), 10)
+	if err != nil {
+		log.Fatalf("Failed to hash demo password: %v", err)
+	}
+
+	sampleUsers["admin"] = User{
+		ID:       "usr-01",
+		Username: "admin",
+		Password: string(hash),
+		Name:     "Enterprise Admin",
+		Role:     RoleAdmin,
+	}
+
+	sampleUsers["engineer_alex"] = User{
+		ID:       "usr-02",
+		Username: "engineer_alex",
+		Password: string(hash),
+		Name:     "Alex (Data Engineer)",
+		Role:     RoleEngineer,
+	}
+
+	sampleUsers["reviewer_sarah"] = User{
+		ID:       "usr-03",
+		Username: "reviewer_sarah",
+		Password: string(hash),
+		Name:     "Sarah (Review Operator)",
+		Role:     RoleReviewer,
+	}
+
+	sampleUsers["auditor_mike"] = User{
+		ID:       "usr-04",
+		Username: "auditor_mike",
+		Password: string(hash),
+		Name:     "Mike (Compliance Auditor)",
+		Role:     RoleAuditor,
+	}
+}
+
+// initDummyHash generates a real bcrypt hash for timing-safe user-not-found comparison.
+func initDummyHash() {
+	hash, err := bcrypt.GenerateFromPassword([]byte("dummy"), 10)
+	if err != nil {
+		log.Fatalf("Failed to generate dummy hash: %v", err)
+	}
+	dummyHash = hash
+}
+
+// initJWTSecret reads JWT_SECRET from environment or generates a random key.
+func initJWTSecret() {
+	envSecret := os.Getenv("JWT_SECRET")
+	if envSecret != "" {
+		jwtSecret = []byte(envSecret)
+		return
+	}
+
+	// Generate random 32-byte key
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatalf("Failed to generate random JWT secret: %v", err)
+	}
+	jwtSecret = key
+
+	log.Printf("WARNING: JWT_SECRET not set. Generated random key at startup. Tokens will NOT survive server restart.")
+}
+
+// init runs at package load time to set up users, dummy hash, and JWT secret.
+func init() {
+	initSampleUsers()
+	initDummyHash()
+	initJWTSecret()
 }
 
 type JWTClaims struct {
@@ -43,7 +128,6 @@ type JWTClaims struct {
 	Exp      int64  `json:"exp"`
 }
 
-var jwtSecret = []byte("antigravity-entity-matcher-secret-key-2026")
 
 func generateToken(user User) (string, error) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
@@ -125,7 +209,16 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, exists := sampleUsers[req.Username]
-	if !exists || (req.Password != "password123" && req.Password != u.Password) {
+	if !exists {
+		// Constant-time comparison: always do password check even if user not found
+		// Use real dummy hash to avoid timing attacks and user enumeration
+		bcrypt.CompareHashAndPassword(dummyHash, []byte(req.Password))
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Compare password using bcrypt (constant-time)
+	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(req.Password)); err != nil {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -151,16 +244,14 @@ func (s *Server) HandleAuthMe(w http.ResponseWriter, r *http.Request) {
 
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		// Default to guest admin for demo
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sampleUsers["admin"])
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 	claims, err := parseToken(tokenStr)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 

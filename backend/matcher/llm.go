@@ -189,7 +189,7 @@ func (r *LLMResolver) fallbackEvaluate(req LLMRequestPayload) *LLMResponse {
 		candNorm := Normalize(cand.CustomerName)
 		candDate, _ := time.Parse("2006-01-02", cand.TransactionDate)
 
-		scoreRes := CalculateCompositeScore(
+		scoreRes := CalculateCompositeScoreWithCorpus(
 			srcNorm,
 			candNorm,
 			srcDate,
@@ -197,6 +197,7 @@ func (r *LLMResolver) fallbackEvaluate(req LLMRequestPayload) *LLMResponse {
 			DefaultWeights,
 			DefaultAlgorithms,
 			30,
+			nil, // corpus: no IDF weighting in ad-hoc LLM evaluation mode
 		)
 
 		dateStatus := "MISMATCH"

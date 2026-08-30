@@ -12,11 +12,14 @@ type MatchWeights struct {
 }
 
 type AlgorithmToggles struct {
-	UseJaroWinkler bool `json:"use_jaro_winkler"`
-	UseLevenshtein bool `json:"use_levenshtein"`
-	UseTokenSort   bool `json:"use_token_sort"`
-	UsePhonetic    bool `json:"use_phonetic"`
-	UseTrigram     bool `json:"use_trigram"`
+	UseJaroWinkler     bool `json:"use_jaro_winkler"`
+	UseLevenshtein     bool `json:"use_levenshtein"`
+	UseTokenSort       bool `json:"use_token_sort"`
+	UsePhonetic        bool `json:"use_phonetic"`
+	UseTrigram         bool `json:"use_trigram"`
+	UseThaiPhonetic    bool `json:"use_thai_phonetic"`
+	UseCorpusIDF       bool `json:"use_corpus_idf"`
+	UseRomanizedMatch  bool `json:"use_romanized_match"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -25,11 +28,14 @@ var DefaultWeights = MatchWeights{
 }
 
 var DefaultAlgorithms = AlgorithmToggles{
-	UseJaroWinkler: true,
-	UseLevenshtein: true,
-	UseTokenSort:   true,
-	UsePhonetic:    true,
-	UseTrigram:     true,
+	UseJaroWinkler:    true,
+	UseLevenshtein:    true,
+	UseTokenSort:      true,
+	UsePhonetic:       true,
+	UseTrigram:        true,
+	UseThaiPhonetic:   true,
+	UseCorpusIDF:      true,
+	UseRomanizedMatch: true,
 }
 
 // JaroWinkler computes rune-safe Jaro-Winkler distance between two strings s1 and s2.
@@ -202,15 +208,55 @@ func CalculateDateScore(srcDate, destDate time.Time, maxToleranceDays int) float
 }
 
 // DistinctiveTokenScore computes similarity prioritizing non-generic distinctive words.
-func DistinctiveTokenScore(srcName, destName CleanName) (float64, bool) {
+// If corpus and useCorpusIDF are both provided, weights matches by inverse document frequency.
+// Nil corpus falls back to binary matching behavior (backward compatible).
+func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, useCorpusIDF bool) (float64, bool) {
 	if len(srcName.DistinctiveTokens) == 0 || len(destName.DistinctiveTokens) == 0 {
 		return 0.0, false
 	}
 
+	bilingualMatch := false
+
+	// Use IDF-weighted matching if corpus available and enabled
+	if corpus != nil && useCorpusIDF {
+		var matchedWeight float64
+		var totalWeight float64
+
+		// Build destination token set for efficient lookup
+		destSet := make(map[string]bool)
+		for _, t := range destName.DistinctiveTokens {
+			destSet[t] = true
+		}
+
+		// For each source token, compute its weight and check if matched
+		for _, srcToken := range srcName.DistinctiveTokens {
+			srcWeight := corpus.Weight(srcToken)
+			totalWeight += srcWeight
+
+			// Check if srcToken matches any dest token
+			for _, destToken := range destName.DistinctiveTokens {
+				if srcToken == destToken || JaroWinkler(srcToken, destToken) >= 0.85 {
+					matchedWeight += srcWeight
+					break
+				} else if CheckBilingualMatch(srcToken, destToken) {
+					matchedWeight += srcWeight * 0.95
+					bilingualMatch = true
+					break
+				}
+			}
+		}
+
+		if totalWeight == 0 {
+			return 0.0, false
+		}
+
+		score := matchedWeight / totalWeight
+		return math.Round(score*10000) / 10000, bilingualMatch
+	}
+
+	// Binary matching fallback (backward compatible with nil corpus or useCorpusIDF=false)
 	var matched float64
 	total := float64(int(math.Max(float64(len(srcName.DistinctiveTokens)), float64(len(destName.DistinctiveTokens)))))
-
-	bilingualMatch := false
 
 	for _, t1 := range srcName.DistinctiveTokens {
 		for _, t2 := range destName.DistinctiveTokens {
@@ -256,30 +302,34 @@ func CheckNumberMismatch(srcName, destName CleanName) bool {
 
 // ScoreResult details metrics generated for candidate pair.
 type ScoreResult struct {
-	TotalScore   float64  `json:"total_score"`
-	NameScore    float64  `json:"name_score"`
-	DateScore    float64  `json:"date_score"`
-	JWScore      float64  `json:"jw_score"`
-	LevScore     float64  `json:"lev_score"`
-	TokenScore   float64  `json:"token_score"`
-	TrigramScore float64  `json:"trigram_score"`
-	MatchReasons []string `json:"match_reasons"`
+	TotalScore     float64  `json:"total_score"`
+	NameScore      float64  `json:"name_score"`
+	DateScore      float64  `json:"date_score"`
+	JWScore        float64  `json:"jw_score"`
+	LevScore       float64  `json:"lev_score"`
+	TokenScore     float64  `json:"token_score"`
+	TrigramScore   float64  `json:"trigram_score"`
+	RomanizedScore float64  `json:"romanized_score"`
+	MatchReasons   []string `json:"match_reasons"`
 }
 
-// CalculateCompositeScore calculates name and date metrics according to weights, algorithms, and rules.
-func CalculateCompositeScore(
+// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
+// If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
+func CalculateCompositeScoreWithCorpus(
 	srcName, destName CleanName,
 	srcDate, destDate time.Time,
 	weights MatchWeights,
 	algos AlgorithmToggles,
 	dateTolerance int,
+	corpus *CorpusStats,
 ) ScoreResult {
 	var scores []float64
-	var jwScore, levScore, tokenScore, trigramScore float64
+	var jwScore, levScore, tokenScore, trigramScore, romanizedScore float64
 	var reasons []string
 
 	// Distinctive Token Check
-	distinctScore, isBilingual := DistinctiveTokenScore(srcName, destName)
+	distinctScore, isBilingual := DistinctiveTokenScore(srcName, destName, corpus, algos.UseCorpusIDF)
 	if isBilingual {
 		reasons = append(reasons, "Bilingual Thai-English transliteration dictionary match")
 	}
@@ -325,6 +375,40 @@ func CalculateCompositeScore(
 		reasons = append(reasons, "Exact phonetic consonant key match")
 	}
 
+	// Thai Phonetic Form Match (only when at least one name contains Thai script)
+	var thaiPhoneticScore float64
+	if algos.UseThaiPhonetic && (srcName.PhoneticForm != "" || destName.PhoneticForm != "") {
+		// For mixed pairs (one Thai, one Latin), use the non-empty form or the cleaned original
+		srcPhonetic := srcName.PhoneticForm
+		if srcPhonetic == "" {
+			srcPhonetic = srcName.Cleaned
+		}
+		destPhonetic := destName.PhoneticForm
+		if destPhonetic == "" {
+			destPhonetic = destName.Cleaned
+		}
+
+		thaiPhoneticScore = JaroWinkler(srcPhonetic, destPhonetic)
+		scores = append(scores, thaiPhoneticScore)
+		if thaiPhoneticScore > 0.85 {
+			reasons = append(reasons, "High Thai phonetic form similarity")
+		}
+	}
+
+	// Romanized Cross-Script Match (only for bilingual pairs: one Thai, one Latin)
+	if algos.UseRomanizedMatch && srcName.Romanized != "" && destName.Romanized != "" {
+		srcHasThai := ContainsThai(srcName.Raw)
+		destHasThai := ContainsThai(destName.Raw)
+		// Gate: include ONLY when exactly one side has Thai (cross-script comparison)
+		if srcHasThai != destHasThai {
+			romanizedScore = JaroWinkler(srcName.Romanized, destName.Romanized)
+			scores = append(scores, romanizedScore)
+			if romanizedScore > 0.85 {
+				reasons = append(reasons, "High romanized phonetic skeleton similarity")
+			}
+		}
+	}
+
 	var nameScore float64
 	if len(scores) > 0 {
 		var sum float64
@@ -335,8 +419,24 @@ func CalculateCompositeScore(
 				max = s
 			}
 		}
-		avg := sum / float64(len(scores))
-		nameScore = (max * 0.6) + (avg * 0.4)
+		mean := sum / float64(len(scores))
+		// The enabled metrics are complementary DETECTORS, not independent estimates of
+		// one quantity: token-sort is the only one that fires on a transposed name, and
+		// raw Jaro-Winkler/Levenshtein are expected to be low there. Averaging them
+		// therefore destroys the signal that handles the "First Last" vs "Last First"
+		// case this engine exists for. A max-dominant blend keeps that signal while the
+		// mean still discounts a lone permissive outlier.
+		//
+		// Measured on internal/mockdata (400 pairs/category), sweeping the max weight:
+		//   weight  top-1    recall   precision
+		//   0.15    94.9%    20.3%    100%
+		//   0.30    98.5%    29.7%    100%
+		//   0.60    99.3%    41.7%    100%   <- chosen
+		//   0.90   100.0%    47.5%    100%
+		// 0.90 scores higher still, but this dataset has weak negatives and rewarding the
+		// single most permissive metric is exactly the fragility we do not want in
+		// production, so we stop at 0.60 rather than fit the benchmark.
+		nameScore = max*0.6 + mean*0.4
 
 		// Integrate distinctive token score if available
 		if distinctScore > 0 {
@@ -369,13 +469,27 @@ func CalculateCompositeScore(
 	totalScore := (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
 
 	return ScoreResult{
-		TotalScore:   math.Round(totalScore*10000) / 10000,
-		NameScore:    math.Round(nameScore*10000) / 10000,
-		DateScore:    math.Round(dateScore*10000) / 10000,
-		JWScore:      math.Round(jwScore*10000) / 10000,
-		LevScore:     math.Round(levScore*10000) / 10000,
-		TokenScore:   math.Round(tokenScore*10000) / 10000,
-		TrigramScore: math.Round(trigramScore*10000) / 10000,
-		MatchReasons: reasons,
+		TotalScore:     math.Round(totalScore*10000) / 10000,
+		NameScore:      math.Round(nameScore*10000) / 10000,
+		DateScore:      math.Round(dateScore*10000) / 10000,
+		JWScore:        math.Round(jwScore*10000) / 10000,
+		LevScore:       math.Round(levScore*10000) / 10000,
+		TokenScore:     math.Round(tokenScore*10000) / 10000,
+		TrigramScore:   math.Round(trigramScore*10000) / 10000,
+		RomanizedScore: math.Round(romanizedScore*10000) / 10000,
+		MatchReasons:   reasons,
 	}
+}
+
+// CalculateCompositeScore is the backward-compatible version that maintains the original signature.
+// It calls CalculateCompositeScoreWithCorpus with nil corpus for existing callers like store/.
+// For new code that has corpus statistics available, use CalculateCompositeScoreWithCorpus.
+func CalculateCompositeScore(
+	srcName, destName CleanName,
+	srcDate, destDate time.Time,
+	weights MatchWeights,
+	algos AlgorithmToggles,
+	dateTolerance int,
+) ScoreResult {
+	return CalculateCompositeScoreWithCorpus(srcName, destName, srcDate, destDate, weights, algos, dateTolerance, nil)
 }
