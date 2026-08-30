@@ -116,3 +116,66 @@ opened, and `go.mod` contains no drivers.
 | J2 | nginx `/api` proxy | SPA served by nginx reaches the backend |
 | J3 | Port alignment | Compose and README agree |
 | J4 | README truth pass | Every claim maps to working code; measured numbers replace aspirational ones |
+
+---
+
+# Round 2 — remaining after `f1a65a0..8198e03`
+
+Derived from working the calibration, file-ingestion and PostgreSQL branch, not from a
+fresh review. Every claim below was verified against the code or a running system on
+2026-08-30; where a number appears, it was measured rather than estimated.
+
+## Closed by that branch
+
+| Item | Evidence |
+| :-- | :-- |
+| **H2** — repository selected by `DATABASE_URL` | `selectStore` in `main.go`; verified end to end — upload, match, restart, data still present |
+| **G5** (CSV/Excel half) — honest failure | `CSVConnector`/`ExcelConnector.TestConnection` now open and parse the file instead of checking the path is non-empty |
+| **J4** (partial) — README truth pass | Endpoint list completed; decision metrics re-measured (recall 57.6% → 59.0%, F1 73.1% → 74.2%, top-1 99.19% → 98.84%, rows/source 3.15 → 2.76) |
+
+`GetResults`, `GetResultsPage`, `ListJobs`, `ListBatches`, `GetAuditLogs` and
+`ListCalibrationModels` all sorted on a non-unique column with no tiebreaker; the three
+paginated ones could duplicate or drop rows across pages. Fixed in `0fe270d`.
+
+---
+
+## EPIC K — Ingestion reaches only uploaded files (C)
+
+`NewDataConnector` is called from exactly two places: the multipart upload handler, and
+`TestConnection`/`IntrospectSchema`. So the PostgreSQL, SQL Server and MongoDB drivers —
+and the server-side `file_path` option in the UI — can be *tested* and *introspected*, but
+cannot put a single row into a batch. Only an uploaded `.csv`/`.xlsx` can. This is the same
+shape of defect as the one just fixed: a real implementation with no caller.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| K1 | Ingest from a configured connector | An endpoint accepts a saved `ConnectionConfig` and a `batch_id`, pages `FetchRecords` to exhaustion, and writes the batch; a match run then succeeds against it |
+| K2 | Paged ingestion, bounded | Ingestion pages rather than issuing one unbounded fetch; the row cap is explicit and a truncated ingest is reported, never silent (mirror the `truncated` flag on `/api/upload/file`) |
+| K3 | Connector ingestion in the UI | ConnectionManager's Connect path loads data and starts a batch, instead of only previewing headers |
+| K4 | `GET /api/jobs` | `ListJobs` is implemented in both stores and routed nowhere — no endpoint exists. Route it, with pagination bounds. Closes **H3** |
+
+## EPIC L — Cross-script matching stops at RTGS spellings (H)
+
+Characterized and pinned by `matcher/crossscript_regression_test.go`; not fixed. RTGS
+romanizes จ as `ch`, while the conventional English spelling of such names uses `j`
+(ใจดี → RTGS *chaidi*, written *Jaidee*). `PhoneticSkeleton` has no `j`↔`ch` equivalence, so
+the skeletons diverge — `smchjd` vs `smchchd` — leaving that pair at 0.6906, just under the
+0.70 review threshold. Measured effect on the benchmark: BILINGUAL_OUT_OF_DICT TP=2/FN=28
+of 30, BILINGUAL_IN_DICTIONARY TP=2/FN=7 of 9, against 100/100 for same-script Thai.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| L1 | Phonetic equivalence classes | `j`↔`ch` (and any sibling pairs found: `v`/`w`, `k`/`g`, `p`/`ph`, `t`/`th`) treated as equivalent **in comparison only** — romanization output stays RTGS-correct. The regression probe's RTGS guard must still pass |
+| L2 | Re-measure, do not assume | Re-run `TestFullLoopBigDatasetBenchmark`; precision must stay at 1.0000. The probe's `[0.60, 0.70)` band is expected to fail — that is the signal to update it, with the new numbers recorded |
+| L3 | Threshold option for cross-script pairs | 17 of 30 correct out-of-dict pairs already score in [0.70, 0.90). Evaluate a cross-script-specific auto threshold as a cheaper lever than L1, and measure both |
+
+## EPIC M — Hardening and unfinished surface (M)
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| M1 | Restrict `IntrospectSchema` file paths | It opens any server-side path the caller supplies and returns the first row — an arbitrary file-read primitive, currently reachable by ADMIN/ENGINEER. Confine reads to a configured directory |
+| M2 | Stream Excel | `ExcelConnector` uses `GetRows`, loading the whole sheet into memory. **G4**'s "real file streaming" holds for CSV only; use the streaming reader |
+| M3 | Let `SaveDataset` report failure | The `Repository` signature has no error return, so a write failure can only be logged. Give it an `error` and have callers surface it |
+| M4 | Calibration UI | `POST /api/calibration/fit` and `GET /api/calibration/status` have no frontend at all. Include observation progress toward `MinCalibrationObservations` (20), so an operator sees "14/20" rather than a bare 400 |
+| M5 | Verify the containerized stack | `DATABASE_URL` is honoured now, but persistence was verified against a host binary and a throwaway container, not through `docker-compose up`. Confirm the composed stack persists across `down`/`up` |
+| M6 | Re-measure scale on target hardware | Throughput, 220k×220k timing and peak heap were left untouched during the metrics correction — they come from the opt-in `SCALE_TEST` harness and are hardware-specific |
