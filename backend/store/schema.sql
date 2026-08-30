@@ -126,6 +126,42 @@ CREATE TRIGGER audit_prevent_delete
     BEFORE DELETE ON match_audit_logs
     FOR EACH ROW EXECUTE FUNCTION prevent_audit_delete();
 
+-- Match sources: uploaded source records for a batch, persisted so a match run can be
+-- re-executed (or retried after a crash) without re-uploading the file.
+-- PK is composite (batch_id, id) to prevent cross-batch ID collisions, mirroring match_results.
+-- NOTE: no column for the normalized name (matcher.CleanName). It is derived from
+-- customer_name_raw via matcher.Normalize, which is deterministic, so storing it would let it
+-- go stale against a future normalizer change; recomputing on read means existing rows benefit
+-- from normalizer fixes automatically instead of requiring a backfill migration.
+CREATE TABLE IF NOT EXISTS match_sources (
+    batch_id VARCHAR(255) NOT NULL REFERENCES match_jobs(batch_id) ON DELETE CASCADE,
+    id VARCHAR(255) NOT NULL,
+    reference_id VARCHAR(255) NOT NULL,
+    customer_name_raw VARCHAR(255) NOT NULL,
+    transaction_date TIMESTAMPTZ NOT NULL,
+    transaction_type VARCHAR(50) NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (batch_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_sources_batch_id
+    ON match_sources(batch_id);
+
+-- Match destinations: uploaded destination records for a batch. See match_sources above for
+-- why there is no stored normalized-name column.
+CREATE TABLE IF NOT EXISTS match_destinations (
+    batch_id VARCHAR(255) NOT NULL REFERENCES match_jobs(batch_id) ON DELETE CASCADE,
+    id VARCHAR(255) NOT NULL,
+    customer_id VARCHAR(255) NOT NULL,
+    customer_name_raw VARCHAR(255) NOT NULL,
+    transaction_date TIMESTAMPTZ NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (batch_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_destinations_batch_id
+    ON match_destinations(batch_id);
+
 -- Calibration models: fitted score-to-probability calibrators (Platt/Isotonic/Identity), with
 -- the metrics they were evaluated at fit time. Append-only for model_json/metrics/observation
 -- counts — a re-fit always inserts a new row. The `active` column is the one field callers are

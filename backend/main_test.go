@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"entitymatcher/api"
 	"entitymatcher/store"
@@ -155,4 +159,81 @@ func TestRoutingPolicies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSelectStoreDefaultsToMemory(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	ctx := context.Background()
+	repo, closer, err := selectStore(ctx)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if repo == nil {
+		t.Fatal("Expected non-nil store")
+	}
+	if _, ok := repo.(*store.Store); !ok {
+		t.Fatalf("Expected *store.Store, got %T", repo)
+	}
+	if closer == nil {
+		t.Fatal("Expected non-nil closer")
+	}
+	closer()
+}
+
+func TestSelectStoreInvalidDSNReturnsError(t *testing.T) {
+	t.Setenv("DATABASE_URL", "not://a valid dsn")
+	ctx := context.Background()
+	repo, closer, err := selectStore(ctx)
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+	if repo != nil {
+		t.Fatal("Expected nil store")
+	}
+	if closer != nil {
+		t.Fatal("Expected nil closer")
+	}
+	errStr := strings.ToLower(err.Error())
+	if !strings.Contains(errStr, "database_url") && !strings.Contains(errStr, "postgres") && !strings.Contains(errStr, "postgre") {
+		t.Fatalf("Expected error to contain 'DATABASE_URL' or 'Postgres', got: %v", err)
+	}
+}
+
+func TestSelectStoreUnreachableDatabaseReturnsError(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://postgres:x@127.0.0.1:1/nope?sslmode=disable")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	repo, closer, err := selectStore(ctx)
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+	if repo != nil {
+		t.Fatal("Expected nil store")
+	}
+	if closer != nil {
+		t.Fatal("Expected nil closer")
+	}
+}
+
+func TestSelectStoreWithRealPostgres(t *testing.T) {
+	testDBURL := os.Getenv("TEST_DATABASE_URL")
+	if testDBURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	t.Setenv("DATABASE_URL", testDBURL)
+	ctx := context.Background()
+	repo, closer, err := selectStore(ctx)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if repo == nil {
+		t.Fatal("Expected non-nil store")
+	}
+	if _, ok := repo.(*store.PostgresStore); !ok {
+		t.Fatalf("Expected *store.PostgresStore, got %T", repo)
+	}
+	if closer == nil {
+		t.Fatal("Expected non-nil closer")
+	}
+	closer()
 }

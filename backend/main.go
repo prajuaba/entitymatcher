@@ -21,13 +21,18 @@ func main() {
 		port = "8085"
 	}
 
-	memStore := store.NewStore()
-	server := api.NewServer(memStore)
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	repo, closeStore, err := selectStore(startupCtx)
+	startupCancel()
+	if err != nil {
+		log.Fatalf("Startup failed: %v", err)
+	}
+	server := api.NewServer(repo)
 
 	// Load a previously-fitted, active calibration model (if any) so it's ready the moment
 	// CalibrationEnabled is turned on -- fitting/persisting a model and enabling calibration for
 	// matching runs are separate, independent operator decisions.
-	if activeModel, ok, err := memStore.GetActiveCalibrationModel(); err != nil {
+	if activeModel, ok, err := repo.GetActiveCalibrationModel(); err != nil {
 		log.Printf("Failed to check for an active calibration model: %v", err)
 	} else if ok {
 		cal, err := store.UnmarshalCalibrator([]byte(activeModel.ModelJSON))
@@ -253,7 +258,36 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
+	closeStore()
 	log.Println("Server shutdown complete")
+}
+
+// selectStore chooses the repository backing this process.
+//
+// When DATABASE_URL is empty the process runs on the in-memory store and says so,
+// because that data does not survive a restart.
+//
+// When DATABASE_URL is set, Postgres is REQUIRED: an unreachable database is a fatal
+// startup error, never a silent fall back to memory. Degrading quietly would leave an
+// operator who asked for persistence running an audit trail that evaporates on restart,
+// which is worse than failing to boot.
+//
+// The returned closer releases the pool; it is a no-op for the in-memory store.
+func selectStore(ctx context.Context) (store.Repository, func(), error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		s := store.NewStore()
+		log.Println("Using in-memory store; data will be lost on restart.")
+		return s, func() {}, nil
+	}
+
+	pg, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("DATABASE_URL is set, PostgreSQL is required, but connecting failed: %w", err)
+	}
+
+	log.Println("Using PostgreSQL persistence.")
+	return pg, pg.Close, nil
 }
 
 // newCORSMiddleware creates a CORS middleware that reads allowed origins from env.

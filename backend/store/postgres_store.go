@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -103,14 +104,244 @@ func (s *PostgresStore) UpdateConfig(cfg matcher.Config) {
 		configJSON)
 }
 
-// SaveDataset stores source and destination records for a batch.
+// SaveDataset stores source and destination records for a batch, replacing any previously
+// saved dataset for the same batch. Follows the same transactional shape as SaveResultsCtx:
+// ensure the match_jobs row exists for the FK, delete existing rows for the batch, then
+// bulk-insert with CopyFrom.
+//
+// NOTE: the Repository interface declares SaveDataset with no error return, so failures here
+// cannot be propagated to the caller. They are logged loudly instead of being swallowed --
+// silently discarding the dataset on a save failure is exactly the bug this method fixes
+// (uploads used to succeed while the data vanished, only to fail later at match time).
 func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
-	// For now, we don't persist source/destination records to keep schema minimal.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		log.Printf("SaveDataset: batch %q: begin transaction: %v", batchID, err)
+		return
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	// Ensure batch exists in match_jobs (create minimal entry if needed for FK constraint).
+	_, err = tx.Exec(ctx,
+		`INSERT INTO match_jobs (batch_id, status, started_at)
+		 VALUES ($1, 'IDLE', CURRENT_TIMESTAMP)
+		 ON CONFLICT (batch_id) DO NOTHING`,
+		batchID)
+	if err != nil {
+		log.Printf("SaveDataset: batch %q: create match_jobs row: %v", batchID, err)
+		return
+	}
+
+	// Delete existing rows for this batch so re-uploading replaces rather than accumulates.
+	_, err = tx.Exec(ctx, "DELETE FROM match_sources WHERE batch_id = $1", batchID)
+	if err != nil {
+		log.Printf("SaveDataset: batch %q: delete existing match_sources: %v", batchID, err)
+		return
+	}
+	_, err = tx.Exec(ctx, "DELETE FROM match_destinations WHERE batch_id = $1", batchID)
+	if err != nil {
+		log.Printf("SaveDataset: batch %q: delete existing match_destinations: %v", batchID, err)
+		return
+	}
+
+	if len(sources) > 0 {
+		srcRows := make([][]interface{}, len(sources))
+		for i, src := range sources {
+			attrsJSON, marshalErr := marshalAttributes(src.Attributes)
+			if marshalErr != nil {
+				log.Printf("SaveDataset: batch %q: marshal source %q attributes: %v", batchID, src.ID, marshalErr)
+				err = marshalErr
+				return
+			}
+			srcRows[i] = []interface{}{
+				batchID,
+				src.ID,
+				src.ReferenceID,
+				src.CustomerNameRaw,
+				src.TransactionDate,
+				src.TransactionType,
+				attrsJSON,
+			}
+		}
+
+		var rowCount int64
+		rowCount, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"match_sources"},
+			[]string{
+				"batch_id", "id", "reference_id", "customer_name_raw",
+				"transaction_date", "transaction_type", "attributes",
+			},
+			pgx.CopyFromRows(srcRows),
+		)
+		if err != nil {
+			log.Printf("SaveDataset: batch %q: copy match_sources failed: %v", batchID, err)
+			return
+		}
+		if rowCount != int64(len(sources)) {
+			err = fmt.Errorf("copy match_sources inserted %d rows, expected %d", rowCount, len(sources))
+			log.Printf("SaveDataset: batch %q: %v", batchID, err)
+			return
+		}
+	}
+
+	if len(dests) > 0 {
+		dstRows := make([][]interface{}, len(dests))
+		for i, dst := range dests {
+			attrsJSON, marshalErr := marshalAttributes(dst.Attributes)
+			if marshalErr != nil {
+				log.Printf("SaveDataset: batch %q: marshal destination %q attributes: %v", batchID, dst.ID, marshalErr)
+				err = marshalErr
+				return
+			}
+			dstRows[i] = []interface{}{
+				batchID,
+				dst.ID,
+				dst.CustomerID,
+				dst.CustomerNameRaw,
+				dst.TransactionDate,
+				attrsJSON,
+			}
+		}
+
+		var rowCount int64
+		rowCount, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"match_destinations"},
+			[]string{
+				"batch_id", "id", "customer_id", "customer_name_raw",
+				"transaction_date", "attributes",
+			},
+			pgx.CopyFromRows(dstRows),
+		)
+		if err != nil {
+			log.Printf("SaveDataset: batch %q: copy match_destinations failed: %v", batchID, err)
+			return
+		}
+		if rowCount != int64(len(dests)) {
+			err = fmt.Errorf("copy match_destinations inserted %d rows, expected %d", rowCount, len(dests))
+			log.Printf("SaveDataset: batch %q: %v", batchID, err)
+			return
+		}
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		log.Printf("SaveDataset: batch %q: commit transaction: %v", batchID, err)
+		return
+	}
+}
+
+// marshalAttributes marshals an attributes map to JSON, storing a nil/empty map as the
+// JSON object "{}" rather than SQL NULL (matching the attributes column's NOT NULL DEFAULT).
+func marshalAttributes(attrs map[string]interface{}) (string, error) {
+	if len(attrs) == 0 {
+		return "{}", nil
+	}
+	b, err := json.Marshal(attrs)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // GetDataset retrieves source and destination records for a batch.
+//
+// Return semantics mirror the in-memory store: the bool is true only when the batch has an
+// entry. An empty dataset (0 sources, 0 destinations) is legal -- e.g. right after
+// SaveDataset is called with empty slices -- so presence can't be inferred from row counts
+// alone. Instead we check match_jobs directly for the batch_id, since SaveDataset always
+// creates/ensures that row before touching match_sources/match_destinations.
+//
+// On query error, log and return nil, nil, false rather than partial/empty-but-valid data,
+// so a read failure never masquerades as a genuinely empty dataset.
 func (s *PostgresStore) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {
-	return nil, nil, false
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var exists int
+	err := s.pool.QueryRow(ctx, "SELECT 1 FROM match_jobs WHERE batch_id = $1", batchID).Scan(&exists)
+	if err == pgx.ErrNoRows {
+		return nil, nil, false
+	}
+	if err != nil {
+		log.Printf("GetDataset: batch %q: check match_jobs existence: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	srcRows, err := s.pool.Query(ctx,
+		`SELECT id, reference_id, customer_name_raw, transaction_date, transaction_type, attributes
+		 FROM match_sources WHERE batch_id = $1 ORDER BY id`,
+		batchID)
+	if err != nil {
+		log.Printf("GetDataset: batch %q: query match_sources: %v", batchID, err)
+		return nil, nil, false
+	}
+	defer srcRows.Close()
+
+	var sources []matcher.SourceRecord
+	for srcRows.Next() {
+		var rec matcher.SourceRecord
+		var attrsJSON []byte
+		if err := srcRows.Scan(&rec.ID, &rec.ReferenceID, &rec.CustomerNameRaw,
+			&rec.TransactionDate, &rec.TransactionType, &attrsJSON); err != nil {
+			log.Printf("GetDataset: batch %q: scan match_sources row: %v", batchID, err)
+			return nil, nil, false
+		}
+		rec.BatchID = batchID
+		rec.NormalizedName = matcher.Normalize(rec.CustomerNameRaw)
+		if len(attrsJSON) > 0 {
+			if err := json.Unmarshal(attrsJSON, &rec.Attributes); err != nil {
+				log.Printf("GetDataset: batch %q: unmarshal source %q attributes: %v", batchID, rec.ID, err)
+				return nil, nil, false
+			}
+		}
+		sources = append(sources, rec)
+	}
+	if err := srcRows.Err(); err != nil {
+		log.Printf("GetDataset: batch %q: iterate match_sources: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	dstRows, err := s.pool.Query(ctx,
+		`SELECT id, customer_id, customer_name_raw, transaction_date, attributes
+		 FROM match_destinations WHERE batch_id = $1 ORDER BY id`,
+		batchID)
+	if err != nil {
+		log.Printf("GetDataset: batch %q: query match_destinations: %v", batchID, err)
+		return nil, nil, false
+	}
+	defer dstRows.Close()
+
+	var dests []matcher.DestinationRecord
+	for dstRows.Next() {
+		var rec matcher.DestinationRecord
+		var attrsJSON []byte
+		if err := dstRows.Scan(&rec.ID, &rec.CustomerID, &rec.CustomerNameRaw,
+			&rec.TransactionDate, &attrsJSON); err != nil {
+			log.Printf("GetDataset: batch %q: scan match_destinations row: %v", batchID, err)
+			return nil, nil, false
+		}
+		rec.BatchID = batchID
+		rec.NormalizedName = matcher.Normalize(rec.CustomerNameRaw)
+		if len(attrsJSON) > 0 {
+			if err := json.Unmarshal(attrsJSON, &rec.Attributes); err != nil {
+				log.Printf("GetDataset: batch %q: unmarshal destination %q attributes: %v", batchID, rec.ID, err)
+				return nil, nil, false
+			}
+		}
+		dests = append(dests, rec)
+	}
+	if err := dstRows.Err(); err != nil {
+		log.Printf("GetDataset: batch %q: iterate match_destinations: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	return sources, dests, true
 }
 
 // SaveResultsCtx stores match results for a batch with proper transaction handling.
@@ -371,12 +602,12 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 		offset = 0
 	}
 
+	args = append(args, limit, offset)
 	// ORDER BY created_at ASC, id ASC: id is required as a tiebreaker because bulk-inserted
 	// rows frequently share a created_at microsecond; without it, Postgres does not guarantee
 	// a consistent row order between the queries fetching different LIMIT/OFFSET pages, which
 	// can cause a row to appear on two pages or on none. ASC matches the in-memory store's
 	// insertion-order semantics so both backends agree on order for the same data.
-	args = append(args, limit, offset)
 	query := fmt.Sprintf(`
 		SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		       match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
@@ -629,6 +860,9 @@ func (s *PostgresStore) GetAuditLogs(batchID, userID, actionFilter string) []Aud
 }
 
 // DeleteBatch deletes a batch and cascades to related records.
+// The match_results, match_sources, and match_destinations tables all have
+// batch_id REFERENCES match_jobs(batch_id) ON DELETE CASCADE, so deleting the match_jobs
+// row here is sufficient to clean up all three -- no separate DELETE needed.
 func (s *PostgresStore) DeleteBatch(batchID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
