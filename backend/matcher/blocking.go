@@ -191,7 +191,6 @@ func (idx *BlockingIndex) build() {
 type candidateScore struct {
 	index int
 	hits  int
-	order int // Preserve insertion order for deterministic tie-breaking
 }
 
 // candidateHeap is a min-heap for bounded top-K selection.
@@ -203,8 +202,8 @@ func (h candidateHeap) Less(i, j int) bool {
 	if h[i].hits != h[j].hits {
 		return h[i].hits < h[j].hits // min-heap: smaller hits have higher priority to be evicted
 	}
-	// For ties, use insertion order (preserve relative order)
-	return h[i].order > h[j].order // larger order is "less" (more likely to be evicted first)
+	// For ties, use destination index (smaller index preferred)
+	return h[i].index > h[j].index // larger index is "less" (more likely to be evicted first)
 }
 func (h candidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *candidateHeap) Push(x interface{}) { *h = append(*h, x.(candidateScore)) }
@@ -303,23 +302,28 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 		return nil
 	}
 
+	// Fix non-determinism: sort keys to ensure deterministic order
+	hitCountKeys := make([]int, 0, len(hitCounts))
+	for k := range hitCounts {
+		hitCountKeys = append(hitCountKeys, k)
+	}
+	sort.Ints(hitCountKeys)
+
 	// Bounded top-K selection using min-heap (O(M log K) instead of O(M log M))
-	// Preserve insertion order for deterministic tie-breaking
 	h := &candidateHeap{}
 	heap.Init(h)
-	order := 0
-	for destIdx, hits := range hitCounts {
+	for _, destIdx := range hitCountKeys {
+		hits := hitCounts[destIdx]
 		if h.Len() < maxCandidates {
-			heap.Push(h, candidateScore{index: destIdx, hits: hits, order: order})
+			heap.Push(h, candidateScore{index: destIdx, hits: hits})
 		} else if hits > (*h)[0].hits || (hits == (*h)[0].hits) {
 			// Replace worst candidate if new one is better or tied
 			heap.Pop(h)
-			heap.Push(h, candidateScore{index: destIdx, hits: hits, order: order})
+			heap.Push(h, candidateScore{index: destIdx, hits: hits})
 		}
-		order++
 	}
 
-	// Convert heap to slice and sort by hits desc, preserving insertion order for ties
+	// Convert heap to slice and sort by hits desc, preserving index order for ties
 	candidates := make([]candidateScore, h.Len())
 	for i := range candidates {
 		candidates[i] = heap.Pop(h).(candidateScore)
@@ -328,8 +332,8 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 		if candidates[i].hits != candidates[j].hits {
 			return candidates[i].hits > candidates[j].hits
 		}
-		// Preserve insertion order for ties
-		return candidates[i].order < candidates[j].order
+		// Prefer smaller index for ties
+		return candidates[i].index < candidates[j].index
 	})
 
 	limit := maxCandidates

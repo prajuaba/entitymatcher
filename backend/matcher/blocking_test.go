@@ -619,3 +619,60 @@ func TestDeterministicCandidateOrdering(t *testing.T) {
 
 	t.Logf("Deterministic ordering verified: %d candidates returned in identical order across two calls", len(candidates1))
 }
+
+// TestDeterministicQueryCandidates20Runs verifies that QueryCandidates returns candidates
+// in deterministic order across multiple runs. With the index-based tie-breaking,
+// identical input must produce identical output every time.
+func TestDeterministicQueryCandidates20Runs(t *testing.T) {
+	// Create a corpus of ~500 destinations where groups of 10 share identical tokens and phonetic keys
+	// This ensures many tied hit counts when querying
+	numDests := 500
+	dests := make([]DestinationRecord, numDests)
+
+	for i := 0; i < numDests; i++ {
+		group := i / 10 // Groups of 10 destinations
+		dests[i] = DestinationRecord{
+			ID: string(rune(48 + i/100)) + string(rune(97 + (i/10)%26)) + string(rune(48 + i%10)), // ID based on position
+			NormalizedName: CleanName{
+				Cleaned:     "store" + string(rune(97+group%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + group%26)), "001"},
+				PhoneticKey: "STR" + string(rune(97+group%26)) + "001",
+			},
+		}
+	}
+
+	idx := NewBlockingIndex(dests)
+
+	// Create a source that matches many destinations at the same score
+	// This ensures tied hit counts in the bounded heap
+	src := SourceRecord{
+		NormalizedName: CleanName{
+			Cleaned:     "storea001",
+			Tokens:      []string{"store", "a", "001"},
+			PhoneticKey: "STR" + "A" + "001",
+		},
+	}
+
+	// Run QueryCandidates 20 times with maxCandidates=50
+	var allResults [][]string
+	for i := 0; i < 20; i++ {
+		candidates := idx.QueryCandidates(src, 50)
+		assert.NotNil(t, candidates)
+
+		// Extract destination IDs for comparison
+		var ids []string
+		for _, cand := range candidates {
+			ids = append(ids, cand.ID)
+		}
+		allResults = append(allResults, ids)
+	}
+
+	// Assert that all 20 runs return the exact same sequence of destination IDs
+	for i := 1; i < len(allResults); i++ {
+		assert.Equal(t, allResults[0], allResults[i], "Run %d should match run 0 in both count and order", i)
+	}
+
+	// Verify we got results
+	assert.NotEmpty(t, allResults[0], "Should return some candidates")
+	t.Logf("Deterministic query verified: %d candidates returned identically across 20 runs", len(allResults[0]))
+}
