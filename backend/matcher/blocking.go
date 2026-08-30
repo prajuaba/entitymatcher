@@ -18,12 +18,12 @@ import (
 // objective; every value below held precision at 100.00% and top-1 at 99.19%,
 // so the choice came down to throughput at 220k destinations per side:
 //
-//   ceiling      100k match time   throughput
-//   500                  74.90s     2,937/s   <- much WORSE, see note
-//   1000                 34.70s     6,341/s
-//   2000                 34.56s     6,365/s   <- chosen
-//   5000                 35.10s     6,268/s
-//   unbounded            38.20s     5,762/s
+//	ceiling      100k match time   throughput
+//	500                  74.90s     2,937/s   <- much WORSE, see note
+//	1000                 34.70s     6,341/s
+//	2000                 34.56s     6,365/s   <- chosen
+//	5000                 35.10s     6,268/s
+//	unbounded            38.20s     5,762/s
 //
 // Note on 500: a tighter ceiling is not monotonically faster. Skipping more keys
 // pushes more sources into the zero-hit fallback below, which linearly scans
@@ -54,36 +54,37 @@ var DefaultAbsoluteCeiling = 2000
 // hot loop, which is not literally zero but is unmeasurable against the map
 // operations it counts.
 type QueryMetrics struct {
-	Enabled               bool
-	DistinctDestsTouched  []int // len(hitCounts) per call
-	PostingListWalks      []int // total increments to hitCounts per call
-	SliceSize             []int // len(candidates) after sort per call
-	FallbackCount         int   // number of zero-hit fallbacks
-	mu                    sync.Mutex
+	Enabled              bool
+	DistinctDestsTouched []int // len(hitCounts) per call
+	PostingListWalks     []int // total increments to hitCounts per call
+	SliceSize            []int // len(candidates) after sort per call
+	FallbackCount        int   // number of zero-hit fallbacks
+	mu                   sync.Mutex
 }
 
 type BlockingIndex struct {
-	mu               sync.RWMutex
-	tokenMap         map[string][]int // Token -> array of destination indices
-	trigramMap       map[string][]int // Trigram -> array of destination indices
-	phoneticMap      map[string][]int // PhoneticKey -> array of destination indices
-	romanizedMap     map[string][]int // Romanized trigram -> array of destination indices
-	prefixMap        map[string][]int // 3-char lowercased prefix -> array of destination indices
-	destinations     []DestinationRecord
-	maxPostingRatio  float64
-	skipTrigrams     map[string]bool
-	skipTokens       map[string]bool
-	skipPhonetic     map[string]bool
-	skipRomanized    map[string]bool
-	absoluteCeiling  int
-	Metrics          *QueryMetrics // Optional profiling metrics (off by default)
+	mu              sync.RWMutex
+	tokenMap        map[string][]int // Token -> array of destination indices
+	trigramMap      map[string][]int // Trigram -> array of destination indices
+	phoneticMap     map[string][]int // PhoneticKey -> array of destination indices
+	romanizedMap    map[string][]int // Romanized trigram -> array of destination indices
+	prefixMap       map[string][]int // 3-char lowercased prefix -> array of destination indices
+	destinations    []DestinationRecord
+	maxPostingRatio float64
+	skipTrigrams    map[string]bool
+	skipTokens      map[string]bool
+	skipPhonetic    map[string]bool
+	skipRomanized   map[string]bool
+	absoluteCeiling int
+	useRomanized    bool
+	Metrics         *QueryMetrics // Optional profiling metrics (off by default)
 }
 
 func NewBlockingIndex(dests []DestinationRecord) *BlockingIndex {
-	return NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling)
+	return NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, true)
 }
 
-func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio float64, absoluteCeiling int) *BlockingIndex {
+func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio float64, absoluteCeiling int, useRomanized bool) *BlockingIndex {
 	idx := &BlockingIndex{
 		tokenMap:        make(map[string][]int),
 		trigramMap:      make(map[string][]int),
@@ -97,6 +98,7 @@ func NewBlockingIndexWithOptions(dests []DestinationRecord, maxPostingRatio floa
 		skipPhonetic:    make(map[string]bool),
 		skipRomanized:   make(map[string]bool),
 		absoluteCeiling: absoluteCeiling,
+		useRomanized:    useRomanized,
 	}
 	idx.build()
 	return idx
@@ -116,7 +118,11 @@ func (idx *BlockingIndex) build() {
 	// Precompute token and trigram frequencies
 	tokenFreq := make(map[string]int)
 	trigramFreq := make(map[string]int)
-	romanizedFreq := make(map[string]int)
+	var romanizedFreq map[string]int
+
+	if idx.useRomanized {
+		romanizedFreq = make(map[string]int)
+	}
 
 	for _, dest := range idx.destinations {
 		// Index by clean tokens
@@ -133,7 +139,7 @@ func (idx *BlockingIndex) build() {
 		}
 
 		// Index by romanized trigrams
-		if dest.NormalizedName.Romanized != "" {
+		if idx.useRomanized && dest.NormalizedName.Romanized != "" {
 			romanizedTrigrams := extractTrigrams(dest.NormalizedName.Romanized)
 			for _, tr := range romanizedTrigrams {
 				romanizedFreq[tr]++
@@ -172,8 +178,8 @@ func (idx *BlockingIndex) build() {
 		}
 	}
 
-	// Populate skip map for romanized trigrams (only if cutoff > 0)
-	if cutoff > 0 {
+	// Populate skip map for romanized trigrams (only if cutoff > 0 and useRomanized)
+	if idx.useRomanized && cutoff > 0 {
 		for rt, freq := range romanizedFreq {
 			if freq > cutoff {
 				idx.skipRomanized[rt] = true
@@ -209,7 +215,7 @@ func (idx *BlockingIndex) build() {
 		}
 
 		// Index by romanized trigrams
-		if dest.NormalizedName.Romanized != "" {
+		if idx.useRomanized && dest.NormalizedName.Romanized != "" {
 			romanizedTrigrams := extractTrigrams(dest.NormalizedName.Romanized)
 			for _, tr := range romanizedTrigrams {
 				if !idx.skipRomanized[tr] {
@@ -237,7 +243,7 @@ func (h candidateHeap) Less(i, j int) bool {
 	// For ties, use destination index (smaller index preferred)
 	return h[i].index > h[j].index // larger index is "less" (more likely to be evicted first)
 }
-func (h candidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h candidateHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
 func (h *candidateHeap) Push(x interface{}) { *h = append(*h, x.(candidateScore)) }
 func (h *candidateHeap) Pop() interface{} {
 	old := *h
@@ -297,7 +303,7 @@ func (idx *BlockingIndex) QueryCandidates(src SourceRecord, maxCandidates int) [
 	}
 
 	// Romanized trigram match hits (for cross-script retrieval)
-	if src.NormalizedName.Romanized != "" {
+	if idx.useRomanized && src.NormalizedName.Romanized != "" {
 		srcRomanizedTrigrams := extractTrigrams(src.NormalizedName.Romanized)
 		for _, tr := range srcRomanizedTrigrams {
 			if !idx.skipRomanized[tr] {

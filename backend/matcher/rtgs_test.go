@@ -300,6 +300,231 @@ func TestCrossScriptRomanizedInvariant(t *testing.T) {
 	}
 }
 
+// TestCrossScriptRomanizedInvariantPureThai mirrors TestCrossScriptRomanizedInvariant above but
+// for two-Thai-script pairs. The cross-script gate (and the cross-script nameScore override that
+// sits on top of it) must never fire when BOTH sides are Thai — otherwise a same-script Thai
+// comparison would silently pick up a different scoring path than before this change.
+func TestCrossScriptRomanizedInvariantPureThai(t *testing.T) {
+	testCases := []struct {
+		name  string
+		name1 string
+		name2 string
+	}{
+		{"Exact match", "สมชาย ใจดี", "สมชาย ใจดี"},
+		{"Minor spelling variation", "สมชาย", "สมชัย"},
+		{"Name order", "สมชาย ใจดี", "ใจดี สมชาย"},
+		{"Different person (false friend, same script)", "สมชาย", "สมศักดิ์"},
+	}
+
+	defaultWeights := DefaultWeights
+	defaultDate := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	algosWithoutRomanized := DefaultAlgorithms
+	algosWithoutRomanized.UseRomanizedMatch = false
+	algosWithRomanized := DefaultAlgorithms
+	algosWithRomanized.UseRomanizedMatch = true
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := Normalize(tc.name1)
+			dest := Normalize(tc.name2)
+
+			resultFalse := CalculateCompositeScore(src, dest, defaultDate, defaultDate, defaultWeights, algosWithoutRomanized, 30)
+			resultTrue := CalculateCompositeScore(src, dest, defaultDate, defaultDate, defaultWeights, algosWithRomanized, 30)
+
+			if resultFalse.TotalScore != resultTrue.TotalScore {
+				t.Errorf("%s: TotalScore differs: false=%f, true=%f", tc.name, resultFalse.TotalScore, resultTrue.TotalScore)
+			}
+			if resultFalse.NameScore != resultTrue.NameScore {
+				t.Errorf("%s: NameScore differs: false=%f, true=%f", tc.name, resultFalse.NameScore, resultTrue.NameScore)
+			}
+			if resultTrue.RomanizedScore != 0.0 {
+				t.Errorf("%s: RomanizedScore should be 0.0 for a pure-Thai pair (gate must prevent it), got %f", tc.name, resultTrue.RomanizedScore)
+			}
+		})
+	}
+}
+
+// TestCrossScriptPartsScore unit-tests CrossScriptPartsScore directly: aligned given/surname
+// parts take the WEAKEST per-part match, and mismatched token counts fall back to whole-string
+// comparison rather than panicking or silently returning a meaningless value.
+func TestCrossScriptPartsScore(t *testing.T) {
+	t.Run("aligned parts use the weaker part, not the average or the stronger part", func(t *testing.T) {
+		// "สุชาติ ประเจริญ" (Suchat Prachaerin) vs a false-pairing that shares a close given name
+		// but a completely unrelated surname: the surname must drag the score down to its own
+		// (low) level, not be rescued by the given name matching well.
+		srcTokens := []string{"สุชาติ", "ประเจริญ"}
+		strongSurnameTokens := []string{"suchat", "prachaerin"}
+		weakSurnameTokens := []string{"suchat", "johnson"}
+
+		strongScore := CrossScriptPartsScore(srcTokens, strongSurnameTokens)
+		weakScore := CrossScriptPartsScore(srcTokens, weakSurnameTokens)
+
+		if weakScore >= strongScore {
+			t.Errorf("expected unrelated-surname score (%f) to be well below matching-surname score (%f)", weakScore, strongScore)
+		}
+		// The given-name part alone (suchat vs suchat) would score ~1.0; the MIN aggregation
+		// must not let that leak through when the other part is unrelated.
+		if weakScore > 0.7 {
+			t.Errorf("weak-surname pair scored %f; MIN-of-parts should have been dragged down by the unrelated surname", weakScore)
+		}
+	})
+
+	t.Run("mismatched token counts fall back to whole-string comparison", func(t *testing.T) {
+		// One Thai token vs two Latin tokens (e.g. เจริญโภคภัณฑ์ vs "Charoen Pokphand"): cannot
+		// align position-by-position, so this must not panic and must return something derived
+		// from the full strings rather than 0 or 1 by construction.
+		score := CrossScriptPartsScore([]string{"เจริญโภคภัณฑ์"}, []string{"charoen", "pokphand"})
+		if score <= 0.0 || score > 1.0 {
+			t.Errorf("expected a valid fallback score in (0,1], got %f", score)
+		}
+	})
+
+	t.Run("empty input returns 0", func(t *testing.T) {
+		if s := CrossScriptPartsScore(nil, []string{"somchai"}); s != 0.0 {
+			t.Errorf("expected 0.0 for empty srcTokens, got %f", s)
+		}
+		if s := CrossScriptPartsScore([]string{"somchai"}, nil); s != 0.0 {
+			t.Errorf("expected 0.0 for empty destTokens, got %f", s)
+		}
+	})
+}
+
+// TestBilingualOutOfDictVsFalseFriendSeparation is the regression guard for the core result of
+// this change: PhoneticSkeleton alone cannot separate genuine out-of-dictionary bilingual pairs
+// from false-friend pairs (both landed in the same ~0.70-0.83 score band; see task diagnosis).
+// Adding the full vowel-bearing, per-part romanized comparison (CrossScriptPartsScore combined
+// with the skeleton, plus the cross-script nameScore override) must produce a NameScore for every
+// genuine pair strictly greater than the NameScore of every false-friend pair — i.e. an actual
+// threshold must exist between the two distributions. If this test ever starts failing, the
+// technique's separation has regressed and BILINGUAL_OUT_OF_DICT auto-matching should not be
+// trusted until it's restored.
+//
+// Data below is intentionally identical to internal/mockdata/generate_dataset.go's
+// bilingualOutOfDictPairs and bilingualFalseFriendPairs (that package is owned by another agent
+// and only ever RUN, never edited, by this change) so the unit-level guarantee here matches what
+// the full-pipeline benchmark measures end to end.
+func TestBilingualOutOfDictVsFalseFriendSeparation(t *testing.T) {
+	genuinePairs := []struct{ thai, latin string }{
+		{"สุชาติ ประเจริญ", "Suchat Prachaerin"},
+		{"สุชาติ ประเจริญ", "Suchart Prachaerin"},
+		{"ประเสริฐ จันทรังษี", "Prasert Chantarangsi"},
+		{"วิชัย สิรินิมิตร", "Wichai Sirinimit"},
+		{"วิชัย สิรินิมิตร", "Vichai Sirinimit"},
+		{"ธนากร เพ็ญจันทร์", "Thanakorn Penjantr"},
+		{"นภา คณะสิงห์", "Napha Kanasingham"},
+		{"กมล พวกศรี", "Kamon Pueksri"},
+		{"ศักดิ์ชัย ศรีหาร", "Sakchai Srihar"},
+		{"บุญมี นรสิงห์", "Bunmi Norsingha"},
+		{"บุญมี นรสิงห์", "Boonmee Norsingha"},
+		{"จันทร์พวก บูชา", "Chanphuak Boucha"},
+		{"จันทร์พวก บูชา", "Janpuek Boucha"},
+		{"แสงทอง วงศ์พูล", "Saengthong Wongpool"},
+		{"รุ่งโรจน์ สวินทร์", "Rungroj Suwintr"},
+		{"พิมพ์ใจ จันท์สิริ", "Phimchai Chansiri"},
+		{"ชลธิชา ปัญญานัน", "Chonthicha Panyanan"},
+		{"ณรงค์ สมโภค", "Narong Somsombat"},
+		{"ณรงค์ สมโภค", "Narongse Somsombat"},
+		{"อรุณ อาศรี", "Arun Atsri"},
+		{"เมธา เรือเส", "Metha Ruese"},
+		{"กานต์ นันตะวั", "Kan Nantawa"},
+		{"ศศิพร สิทธิสม", "Sasipon Sittism"},
+		{"ชนินธร วิมล", "Chanintr Wimol"},
+		{"ประพัฒน์ กาญจนา", "Prawat Kanjanai"},
+		{"วราวุธ ชำนาญ", "Varavuth Chamnan"},
+		{"ไพศาล เงินสี", "Phaisarn Ngernsee"},
+		{"อัศวิน พัฒน์", "Aswin Pattana"},
+		{"เศวต ศรีอำนวย", "Seawat Sriamoy"},
+		{"ทรงศักดิ์ นิมิต", "Songsak Nimit"},
+	}
+
+	falseFriendPairs := []struct{ thai, latin string }{
+		{"เชิดชัย ตันไทย", "Somchit Johnson"},
+		{"วรสิทธิ์ สุขวิสัย", "Somsak Lee"},
+		{"วิพัฒน์ คงสมพงษ์", "Wichian Brown"},
+		{"วิเศษ ศิลภา", "Wichit Davis"},
+		{"สิรินธร นิลนอก", "Siri Smith"},
+		{"สิริสาร ลิ่มค้อ", "Siril Williams"},
+		{"ชัยพร ชิณะวรรณ", "Chai Miller"},
+		{"ชาญชัย นวลสวรรค์", "Chay Wilson"},
+		{"ธรรมชาตินรงค์ สหระ", "Tam Anderson"},
+		{"ธรรมวิทย์ ศรีหา", "Thum Taylor"},
+		{"นรเศร ภูมิศรี", "Nara Thomas"},
+		{"นรพิพัฒน์ กลิ่นมะลิ", "Naran Jackson"},
+		{"ปรีชา อินทร์ศิลป์", "Priya White"},
+		{"ปรีชากร โครงสร้าง", "Preeya Harris"},
+		{"สิชน ธรรมชั้น", "Sichon Martin"},
+		{"สิชล ทองมนต์", "Sichol Garcia"},
+		{"วรรณวัฒน์ คำหา", "Wanna Rodriguez"},
+		{"วรรณพร ศรีบูชา", "Wanit Martinez"},
+		{"กฤษณพล ลี้แล", "Krish Robinson"},
+		{"กฤษณสิลป์ จันทศรี", "Krishna Clark"},
+		{"นิรามล ทรัพย์เศรษฐ", "Neera Lewis"},
+		{"นิรทา พุ่มพวง", "Neran Lee"},
+		{"สมรสาตรี ธรรมรักษ์", "Somrasa Walker"},
+		{"สมรสา เจริญสิน", "Samrasa Hall"},
+		{"ศิลปกร แก้วกำแพง", "Sil Young"},
+		{"ศิลปสิน อังคาร", "Silp Hernandez"},
+		{"นันทศรี โกศล", "Nan King"},
+		{"นันทีย์ มูนเนือง", "Nant Wright"},
+		{"โยธินวร นิ่มนวล", "Yothin Lopez"},
+		{"โยธิน สระดี", "Yodin Hill"},
+		{"ธรรมชาติสิลป์ ลิ้มปิยะ", "Thamachai Scott"},
+		{"ธรรมชาตินอก ผลิเสรี", "Thammachai Green"},
+		{"กมลา วัฒนาพร", "Kamala Adams"},
+		{"กมลาพร ชื่นสวัสดิ์", "Kamela Nelson"},
+		{"ขจรศักดิ์ กิจสวัสดิ์", "Khachon Carter"},
+		{"ขจรศักดี้ อินทร์สิทธิ์", "Khachorn Mitchell"},
+		{"บัญชา คุณรัตน์", "Bancha Perez"},
+		{"บัญชาพร ไทรทอง", "Buncha Roberts"},
+		{"นิพัฒน์สิน ศรีบัณฑิต", "Niphat Phillips"},
+		{"นิพัฒนา นิยมนีย์", "Niphon Campbell"},
+		{"ศรัณยา ชุมชอบ", "Saran Parker"},
+		{"ศรัณย์ นะภักดี", "Sarin Evans"},
+		{"ธวัชชัยกร ศิริวงษ์", "Thawachai Edwards"},
+		{"ธวัชชัย สารศิลป์", "Thavachai Collins"},
+		{"วารีนันท์ พลธีร", "Wari Reyes"},
+		{"วารี เหลี่ยมกา", "Waree Morris"},
+		{"เอกรัฐสิทธิ์ ทีระวัฒน์", "Ekarat Murphy"},
+		{"เอกรัฐ คำศิริ", "Ekarath Rogers"},
+		{"อัจฉริยะวัฒน์ เกื้อกูล", "Achariya Morgan"},
+		{"อัจฉริยะพร นิลประสาท", "Achariyah Peterson"},
+		{"บรรจงชัย ลิ่มรักษ์", "Banjong Gray"},
+		{"บรรจง สุรศิลป์", "Banjon Ramirez"},
+	}
+
+	defaultDate := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	scoreOf := func(thai, latin string) float64 {
+		src := Normalize(thai)
+		dest := Normalize(latin)
+		res := CalculateCompositeScore(src, dest, defaultDate, defaultDate, DefaultWeights, DefaultAlgorithms, 30)
+		return res.NameScore
+	}
+
+	minGenuine := 1.0
+	for _, p := range genuinePairs {
+		if s := scoreOf(p.thai, p.latin); s < minGenuine {
+			minGenuine = s
+		}
+	}
+
+	maxFalseFriend := 0.0
+	for _, p := range falseFriendPairs {
+		if s := scoreOf(p.thai, p.latin); s > maxFalseFriend {
+			maxFalseFriend = s
+		}
+	}
+
+	t.Logf("genuine pairs   n=%d min NameScore = %.4f", len(genuinePairs), minGenuine)
+	t.Logf("false friends   n=%d max NameScore = %.4f", len(falseFriendPairs), maxFalseFriend)
+
+	if maxFalseFriend >= minGenuine {
+		t.Errorf("no separating threshold exists: worst false-friend NameScore (%.4f) >= worst genuine NameScore (%.4f)",
+			maxFalseFriend, minGenuine)
+	}
+}
+
 func TestRomanizedField(t *testing.T) {
 	tests := []struct {
 		name    string
