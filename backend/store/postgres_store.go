@@ -216,11 +216,16 @@ func (s *PostgresStore) GetResults(batchID string) ([]matcher.MatchResultItem, b
 		return nil, false
 	}
 
+	// ORDER BY created_at ASC, id ASC: id is required as a tiebreaker because bulk-inserted
+	// rows frequently share a created_at microsecond, which otherwise makes the order
+	// non-deterministic. ASC (not DESC) is required so this matches the in-memory store,
+	// which returns results in raw insertion order -- both backends must agree on order
+	// for the same underlying data.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		        match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
 		        destination_snapshot, created_at
-		 FROM match_results WHERE batch_id = $1 ORDER BY created_at DESC`,
+		 FROM match_results WHERE batch_id = $1 ORDER BY created_at ASC, id ASC`,
 		batchID)
 	if err != nil {
 		return nil, false
@@ -366,13 +371,18 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 		offset = 0
 	}
 
+	// ORDER BY created_at ASC, id ASC: id is required as a tiebreaker because bulk-inserted
+	// rows frequently share a created_at microsecond; without it, Postgres does not guarantee
+	// a consistent row order between the queries fetching different LIMIT/OFFSET pages, which
+	// can cause a row to appear on two pages or on none. ASC matches the in-memory store's
+	// insertion-order semantics so both backends agree on order for the same data.
 	args = append(args, limit, offset)
 	query := fmt.Sprintf(`
 		SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		       match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
 		       destination_snapshot, created_at
 		FROM match_results WHERE %s
-		ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
+		ORDER BY created_at ASC, id ASC LIMIT $%d OFFSET $%d`,
 		whereClause, argCount, argCount+1)
 
 	rows, err := s.pool.Query(ctx, query, args...)
@@ -591,10 +601,14 @@ func (s *PostgresStore) GetAuditLogs(batchID, userID, actionFilter string) []Aud
 		whereClause = "WHERE " + strings.Join(whereConditions, " AND ")
 	}
 
+	// ORDER BY timestamp DESC, id DESC: id (the match_audit_logs primary key) is required as
+	// a tiebreaker because multiple audit entries can share a timestamp, which otherwise
+	// makes the returned order non-deterministic. DESC is kept for both columns to preserve
+	// the existing most-recent-first intent.
 	query := fmt.Sprintf(
 		`SELECT id, batch_id, source_id, destination_id, user_id, action, previous_status,
 		        new_status, confidence_score, review_comments, timestamp
-		 FROM match_audit_logs %s ORDER BY timestamp DESC`, whereClause)
+		 FROM match_audit_logs %s ORDER BY timestamp DESC, id DESC`, whereClause)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -637,9 +651,13 @@ func (s *PostgresStore) ListBatches() []BatchSummary {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// ORDER BY created_at DESC, batch_id DESC: batch_id (the match_jobs primary key) is
+	// required as a tiebreaker because multiple batches can share a created_at timestamp,
+	// which otherwise makes the returned order non-deterministic. DESC is kept for both
+	// columns to preserve the existing most-recent-first intent.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, status, total_sources, total_destinations, created_at
-		 FROM match_jobs ORDER BY created_at DESC`)
+		 FROM match_jobs ORDER BY created_at DESC, batch_id DESC`)
 	if err != nil {
 		return nil
 	}
@@ -674,10 +692,15 @@ func (s *PostgresStore) ListJobs(limit, offset int) ([]JobSummary, error) {
 		offset = 0
 	}
 
+	// ORDER BY started_at DESC, batch_id DESC: batch_id (the match_jobs primary key) is
+	// required as a tiebreaker because jobs started in the same batch/second otherwise sort
+	// non-deterministically, which corrupts LIMIT/OFFSET pagination (a job can appear on two
+	// pages or on none). DESC is kept for both columns to preserve the existing
+	// most-recent-first intent.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, status, total_sources, total_destinations, auto_matched, review_needed,
 		        no_match_count, total_candidate_pairs, elapsed_ms, started_at, completed_at
-		 FROM match_jobs ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
+		 FROM match_jobs ORDER BY started_at DESC, batch_id DESC LIMIT $1 OFFSET $2`,
 		limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("query jobs: %w", err)
@@ -810,10 +833,15 @@ func (s *PostgresStore) ListCalibrationModels(limit, offset int) ([]CalibrationM
 		offset = 0
 	}
 
+	// ORDER BY created_at DESC, id DESC: id (the calibration_models primary key) is required
+	// as a tiebreaker because multiple models can share a created_at timestamp, which
+	// otherwise corrupts LIMIT/OFFSET pagination the same way it did in GetResultsPage (a
+	// model can appear on two pages or on none). DESC is kept for both columns to preserve
+	// the existing most-recent-first intent.
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, created_at, fitted_by, batch_id, observation_count, positive_count,
 		        brier_score, ece_score, model_json, active
-		 FROM calibration_models ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+		 FROM calibration_models ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`,
 		limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("query models: %w", err)

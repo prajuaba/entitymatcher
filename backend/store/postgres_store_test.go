@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"entitymatcher/matcher"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // testPostgresStore creates a test Postgres store, skipping if TEST_DATABASE_URL not set
@@ -127,6 +127,19 @@ func TestPostgresSaveAndReadRoundTrip(t *testing.T) {
 	assert.Equal(t, results[0].ID, retrieved[0].ID)
 	assert.Equal(t, results[0].ConfidenceScore, retrieved[0].ConfidenceScore)
 	assert.Equal(t, results[0].MatchStatus, retrieved[0].MatchStatus)
+
+	// Under the corrected ASC ordering (created_at ASC, id ASC), GetResults returns rows in
+	// insertion order, matching the in-memory store. Pin the FULL sequence, not just index 0,
+	// so the ordering guarantee is actually verified rather than incidentally true.
+	expectedIDs := make([]string, len(results))
+	for i, r := range results {
+		expectedIDs[i] = r.ID
+	}
+	gotIDs := make([]string, len(retrieved))
+	for i, r := range retrieved {
+		gotIDs[i] = r.ID
+	}
+	assert.Equal(t, expectedIDs, gotIDs)
 
 	t.Logf("Round-trip test passed with %d results", len(retrieved))
 }
@@ -252,6 +265,100 @@ func TestPostgresAuditLogImmutability(t *testing.T) {
 	assert.Contains(t, errDelete.Error(), "append-only", "Error should mention append-only")
 
 	t.Log("Audit immutability tests passed")
+}
+
+// TestPostgresGetResultsDeterministicOrder tests that GetResults returns results in a deterministic order.
+// This reproduces the tie condition directly (identical CreatedAt) rather than relying on timing luck,
+// and without the id tiebreaker in the ORDER BY this test can fail/flake.
+func TestPostgresGetResultsDeterministicOrder(t *testing.T) {
+	store := testPostgresStore(t)
+
+	batchID := fmt.Sprintf("batch-detorder-%d", time.Now().UnixNano())
+	fixedTime := time.Now()
+
+	results := make([]matcher.MatchResultItem, 10)
+	for i := 0; i < 10; i++ {
+		results[i] = matcher.MatchResultItem{
+			ID:            fmt.Sprintf("result-%d", i),
+			BatchID:       batchID,
+			MatchStatus:   "AUTO_MATCHED",
+			CreatedAt:     fixedTime,
+			SourceID:      "src",
+			DestinationID: "dst",
+		}
+	}
+
+	err := store.SaveResultsCtx(context.Background(), batchID, results)
+	require.NoError(t, err)
+
+	expectedIDs := make([]string, 10)
+	for i := 0; i < 10; i++ {
+		expectedIDs[i] = fmt.Sprintf("result-%d", i)
+	}
+
+	for i := 0; i < 5; i++ {
+		retrieved, ok := store.GetResults(batchID)
+		require.True(t, ok)
+
+		gotIDs := make([]string, len(retrieved))
+		for j, item := range retrieved {
+			gotIDs[j] = item.ID
+		}
+
+		assert.Equal(t, expectedIDs, gotIDs)
+	}
+}
+
+// TestPostgresGetResultsPagePaginationStable tests that pagination returns stable, complete results.
+// This is the pagination-correctness guarantee -- an unstable ORDER BY combined with LIMIT/OFFSET
+// can otherwise return a row on two different pages or on neither, which is silent data corruption
+// from the caller's point of view.
+func TestPostgresGetResultsPagePaginationStable(t *testing.T) {
+	store := testPostgresStore(t)
+
+	batchID := fmt.Sprintf("batch-pagestable-%d", time.Now().UnixNano())
+	fixedTime := time.Now()
+
+	results := make([]matcher.MatchResultItem, 10)
+	for i := 0; i < 10; i++ {
+		results[i] = matcher.MatchResultItem{
+			ID:            fmt.Sprintf("page-result-%d", i),
+			BatchID:       batchID,
+			MatchStatus:   "AUTO_MATCHED",
+			CreatedAt:     fixedTime,
+			SourceID:      "src",
+			DestinationID: "dst",
+		}
+	}
+
+	err := store.SaveResultsCtx(context.Background(), batchID, results)
+	require.NoError(t, err)
+
+	allIDs := []string{}
+	for offset := 0; offset < 10; offset += 3 {
+		page, _, err := store.GetResultsPage(batchID, "", "", 3, offset)
+		require.NoError(t, err)
+
+		for _, item := range page {
+			allIDs = append(allIDs, item.ID)
+		}
+	}
+
+	assert.Equal(t, 10, len(allIDs))
+
+	expectedIDs := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		expectedIDs[fmt.Sprintf("page-result-%d", i)] = true
+	}
+
+	counts := make(map[string]int)
+	for _, id := range allIDs {
+		counts[id]++
+	}
+
+	for id := range expectedIDs {
+		assert.Equal(t, 1, counts[id], "ID %s should appear exactly once", id)
+	}
 }
 
 // TestMemoryStoreConformance runs conformance tests against memory store
