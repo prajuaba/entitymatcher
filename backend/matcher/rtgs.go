@@ -321,6 +321,22 @@ func PhoneticSkeleton(s string) string {
 	return strings.Join(result, "")
 }
 
+// RomanizeThaiTokens romanizes each token independently, preserving vowels (unlike
+// PhoneticSkeleton, which discards them). Non-Thai tokens pass through unchanged except for
+// lowercasing, since RomanizeThai already does that per rune for non-Thai runs.
+//
+// This exists for cross-script comparison of names PART BY PART (e.g. given name vs surname)
+// rather than as one joined string: aligning by token position lets a scorer require agreement
+// on every part, not just the string as a whole. See CrossScriptPartsScore in scorer.go, which
+// is the reason this function exists.
+func RomanizeThaiTokens(tokens []string) []string {
+	out := make([]string, len(tokens))
+	for i, t := range tokens {
+		out[i] = RomanizeThai(t)
+	}
+	return out
+}
+
 // isLatinVowel checks if a rune is a Latin vowel
 func isLatinVowel(r rune) bool {
 	switch unicode.ToLower(r) {

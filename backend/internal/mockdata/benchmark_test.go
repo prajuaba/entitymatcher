@@ -3,6 +3,7 @@ package mockdata
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -75,13 +76,20 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	// Evaluate: TP, FP, FN, TN
 	var tp, fp, fn, tn int
 
-	// Per-category stats
+	// Per-category stats (FINAL decision, i.e. after the margin rule in IsAutoMatchable
+	// AND after the 1:1 assignment pass in ResolveAssignments have both run — this is
+	// the same MatchStatus that a downstream consumer of `results` would see).
 	categoryStats := make(map[string]map[string]int)
-	// Score tracking for Thai variant categories (for distribution reporting)
-	// categoryScores maps category -> list of (score, isCorrect) for rank-1 matches
+	// Score tracking for Thai variant / bilingual categories (for distribution reporting).
+	// categoryScores maps category -> list of per-source rank-1 observations.
+	// IMPORTANT: `score` here is the RAW rank-1 ConfidenceScore, captured independently of
+	// MatchStatus. `finalAutoMatched` is captured separately so the report can show both
+	// the pre-decision (score-only) view and the post-decision (final MatchStatus) view
+	// side by side, instead of conflating them.
 	categoryScores := make(map[string][]struct {
-		score     float64
-		isCorrect bool
+		score            float64
+		isCorrect        bool
+		finalAutoMatched bool
 	})
 
 	for _, src := range sources {
@@ -99,10 +107,12 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 					for _, res := range results {
 						if res.SourceID == src.ID && res.Rank == 1 {
 							isCorrect := (res.DestinationID == truePartnerID)
+							finalAutoMatched := (res.MatchStatus == "AUTO_MATCHED")
 							categoryScores[pair.Category] = append(categoryScores[pair.Category], struct {
-								score     float64
-								isCorrect bool
-							}{res.ConfidenceScore, isCorrect})
+								score            float64
+								isCorrect        bool
+								finalAutoMatched bool
+							}{res.ConfidenceScore, isCorrect, finalAutoMatched})
 							break
 						}
 					}
@@ -256,15 +266,37 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		"BILINGUAL_OUT_OF_DICT",
 	}
 
+	// AutoThresh/ReviewThresh below are read from the ACTUAL engine config used for this
+	// run (cfg.AutoMatchThreshold / cfg.ReviewThreshold) rather than hard-coded, so the
+	// column headings and the buckets they describe can never silently drift apart from
+	// the engine's real decision thresholds.
+	autoThresh := cfg.AutoMatchThreshold
+	reviewThresh := cfg.ReviewThreshold
+
 	type scoreDistribution struct {
-		Category        string
-		MeanScore       float64
-		TotalPairs      int // Total pairs in this category
-		CountAutoCorrect int // Rank-1 with CORRECT partner and score >= 0.90
-		CountAutoWrong  int // Rank-1 with WRONG partner and score >= 0.90
-		CountReview     int // Rank-1 with CORRECT partner, score >= 0.75 and < 0.90
-		CountBelowThresh int // Rank-1 with CORRECT partner, score < 0.75
-		NotRetrieved    int // Pairs where true partner never ranked #1 (includes wrong matches)
+		Category   string
+		TotalPairs int // n: total ground-truth positive pairs in this category
+
+		// --- PRE-DECISION bucket set (rank-1 RAW score only) ---
+		// These buckets classify each pair using ONLY the rank-1 candidate's raw
+		// ConfidenceScore against autoThresh/reviewThresh. They do NOT know about the
+		// margin rule (IsAutoMatchable) or the 1:1 assignment pass (ResolveAssignments)
+		// that run afterwards and can demote a rank-1 row that scored >= autoThresh down
+		// to REVIEW_NEEDED. These six buckets are a complete partition of TotalPairs.
+		MeanScoreCorrect       float64 // mean raw score, correct rank-1 matches only
+		PreScoredCorrectAuto   int     // rank-1 CORRECT, raw score >= autoThresh
+		PreScoredWrongAuto     int     // rank-1 WRONG,   raw score >= autoThresh
+		PreScoredCorrectReview int     // rank-1 CORRECT, reviewThresh <= raw score < autoThresh
+		PreScoredCorrectBelow  int     // rank-1 CORRECT, raw score < reviewThresh
+		PreScoredWrongBelow    int     // rank-1 WRONG,   raw score < autoThresh
+		PreNoRank1             int     // source never had ANY candidate score >= reviewThresh (no rank-1 row exists at all)
+
+		// --- POST-DECISION bucket set (FINAL MatchStatus, same field categoryStats/TP-FP use) ---
+		// Computed from the SAME rank-1 rows above, after IsAutoMatchable's margin rule
+		// and ResolveAssignments' 1:1 constraint have both been applied.
+		PostAutoMatchedCorrect int // final MatchStatus == AUTO_MATCHED and correct  (== this category's contribution to TP)
+		PostAutoMatchedWrong   int // final MatchStatus == AUTO_MATCHED but wrong    (== this category's contribution to FP)
+		PostDemoted            int // scored >= autoThresh pre-decision (PreScoredCorrectAuto+PreScoredWrongAuto) but final status != AUTO_MATCHED — demoted by the margin rule and/or the 1:1 assignment pass
 	}
 	var distributions []scoreDistribution
 
@@ -302,43 +334,85 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 			meanScore = sumScore / float64(correctCount)
 		}
 
-		// Count distribution (using 0.90 and 0.75 as thresholds)
-		// Only CORRECT rank-1 matches contribute to the breakdown
-		countAutoCorrect := 0
-		countAutoWrong := 0
-		countReview := 0
-		countBelow := 0
+		// PRE-DECISION buckets: classify every rank-1 row using ONLY its raw score.
+		// This partition is exhaustive over scoreList (every item lands in exactly one
+		// of the four buckets below) — unlike the previous version, a WRONG rank-1 match
+		// scoring below autoThresh is now counted (PreScoredWrongBelow) instead of being
+		// silently dropped.
+		preScoredCorrectAuto := 0
+		preScoredWrongAuto := 0
+		preScoredCorrectReview := 0
+		preScoredCorrectBelow := 0
+		preScoredWrongBelow := 0
+
+		// POST-DECISION buckets: classify the SAME rows by their final MatchStatus.
+		postAutoMatchedCorrect := 0
+		postAutoMatchedWrong := 0
 
 		for _, item := range scoreList {
 			if item.isCorrect {
-				if item.score >= 0.90 {
-					countAutoCorrect++
-				} else if item.score >= 0.75 {
-					countReview++
+				if item.score >= autoThresh {
+					preScoredCorrectAuto++
+				} else if item.score >= reviewThresh {
+					preScoredCorrectReview++
 				} else {
-					countBelow++
+					preScoredCorrectBelow++
 				}
 			} else {
-				// Wrong partner but scored >= 0.90
-				if item.score >= 0.90 {
-					countAutoWrong++
+				if item.score >= autoThresh {
+					preScoredWrongAuto++
+				} else {
+					preScoredWrongBelow++
+				}
+			}
+
+			if item.finalAutoMatched {
+				if item.isCorrect {
+					postAutoMatchedCorrect++
+				} else {
+					postAutoMatchedWrong++
 				}
 			}
 		}
 
-		// "Not retrieved" = pairs where true partner never ranked #1
-		// This includes cases where rank-1 exists but is wrong
-		notRetrieved := totalPairs - len(scoreList)
+		// "PreNoRank1" = pairs where the source never produced ANY rank-1 row at all,
+		// i.e. no candidate for that source ever scored >= reviewThresh. This is
+		// DIFFERENT from "true partner not retrieved" in the diagnosis section below,
+		// which checks whether the TRUE partner specifically appears anywhere in
+		// results — a source can have a rank-1 row (counted here) while its true
+		// partner was never a candidate at all (counted there instead).
+		preNoRank1 := totalPairs - len(scoreList)
+
+		// Rows that scored >= autoThresh pre-decision but did not end up AUTO_MATCHED
+		// after the margin rule (IsAutoMatchable) and the 1:1 assignment pass
+		// (ResolveAssignments) ran. This is exactly the gap between the pre-decision
+		// "AutoOK/AutoWrong" style counts and the post-decision TP/FP counts.
+		postDemoted := (preScoredCorrectAuto + preScoredWrongAuto) - (postAutoMatchedCorrect + postAutoMatchedWrong)
+
+		// Invariant: the six pre-decision buckets must exactly partition TotalPairs.
+		// If this ever fails, the report itself has become dishonest again — treat it
+		// as a test failure rather than publishing a table that doesn't add up.
+		preSum := preScoredCorrectAuto + preScoredWrongAuto + preScoredCorrectReview + preScoredCorrectBelow + preScoredWrongBelow + preNoRank1
+		if preSum != totalPairs {
+			t.Errorf("REPORT INVARIANT VIOLATED for category %s: pre-decision buckets sum to %d but n=%d "+
+				"(CorrectAuto=%d WrongAuto=%d CorrectReview=%d CorrectBelow=%d WrongBelow=%d NoRank1=%d)",
+				cat, preSum, totalPairs, preScoredCorrectAuto, preScoredWrongAuto, preScoredCorrectReview,
+				preScoredCorrectBelow, preScoredWrongBelow, preNoRank1)
+		}
 
 		distributions = append(distributions, scoreDistribution{
-			Category:         cat,
-			MeanScore:        meanScore,
-			TotalPairs:       totalPairs,
-			CountAutoCorrect: countAutoCorrect,
-			CountAutoWrong:   countAutoWrong,
-			CountReview:      countReview,
-			CountBelowThresh: countBelow,
-			NotRetrieved:     notRetrieved,
+			Category:               cat,
+			TotalPairs:             totalPairs,
+			MeanScoreCorrect:       meanScore,
+			PreScoredCorrectAuto:   preScoredCorrectAuto,
+			PreScoredWrongAuto:     preScoredWrongAuto,
+			PreScoredCorrectReview: preScoredCorrectReview,
+			PreScoredCorrectBelow:  preScoredCorrectBelow,
+			PreScoredWrongBelow:    preScoredWrongBelow,
+			PreNoRank1:             preNoRank1,
+			PostAutoMatchedCorrect: postAutoMatchedCorrect,
+			PostAutoMatchedWrong:   postAutoMatchedWrong,
+			PostDemoted:            postDemoted,
 		})
 	}
 
@@ -346,12 +420,23 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	t.Log("==========================================================")
 	t.Log("         DECISION-LEVEL BENCHMARK REPORT (v2)             ")
 	t.Log("==========================================================")
+	t.Log(" (All counts below are FINAL/POST-DECISION: they reflect each row's MatchStatus")
+	t.Log("  AFTER both the margin rule (IsAutoMatchable) and the 1:1 assignment pass")
+	t.Log("  (ResolveAssignments) have run — see the PRE-DECISION table further down for")
+	t.Log("  raw rank-1 score buckets computed BEFORE those two passes.)")
 	t.Logf(" True Positives  (TP) : %d", tp)
 	t.Logf(" False Positives (FP) : %d", fp)
 	t.Logf(" True Negatives  (TN) : %d", tn)
 	t.Logf(" False Negatives (FN) : %d", fn)
 	t.Logf("----------------------------------------------------------")
-	for cat, stats := range categoryStats {
+	t.Log(" Per-category FINAL decision counts (post margin-rule, post 1:1 assignment):")
+	categoryNames := make([]string, 0, len(categoryStats))
+	for cat := range categoryStats {
+		categoryNames = append(categoryNames, cat)
+	}
+	sort.Strings(categoryNames)
+	for _, cat := range categoryNames {
+		stats := categoryStats[cat]
 		t.Logf(" Category [%s]: TP=%d, FP=%d, FN=%d, TN=%d",
 			cat, stats["TP"], stats["FP"], stats["FN"], stats["TN"])
 	}
@@ -394,7 +479,17 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		}
 	}
 
-	for srcID, src := range bilingualInDictSources {
+	// Iterate in a deterministic (sorted) order — map range order is randomized per-run
+	// in Go, which previously made this section's line order (though not its content)
+	// differ between otherwise-identical runs.
+	bilingualInDictSrcIDs := make([]string, 0, len(bilingualInDictSources))
+	for srcID := range bilingualInDictSources {
+		bilingualInDictSrcIDs = append(bilingualInDictSrcIDs, srcID)
+	}
+	sort.Strings(bilingualInDictSrcIDs)
+
+	for _, srcID := range bilingualInDictSrcIDs {
+		src := bilingualInDictSources[srcID]
 		// Find the true destination for this source
 		var trueDestID string
 		for _, pair := range labeledPairs {
@@ -433,8 +528,14 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 		}
 
 		if !foundInResults {
+			// NOTE: this checks whether the TRUE partner specifically appears ANYWHERE in
+			// `results` (any rank). It is unrelated to the PreNoRank1 bucket in the score
+			// distribution table below, which instead asks whether the SOURCE had a rank-1
+			// row at all (for any destination). A source can fail this check (true partner
+			// absent from candidates entirely) while still having a rank-1 row for some
+			// other, wrong destination — as several rows in this diagnosis show.
 			t.Logf("SOURCE %s (%q)", srcID, src.CustomerNameRaw)
-			t.Logf("  TRUE PARTNER: %s (not retrieved as candidate)", trueDestID)
+			t.Logf("  TRUE PARTNER: %s (absent from ALL scored candidates — never exceeded review threshold)", trueDestID)
 			t.Logf("  RANK-1 MATCH: %s (score=%.4f) — true partner never considered", rank1Dest, rank1Score)
 		} else {
 			t.Logf("SOURCE %s (%q)", srcID, src.CustomerNameRaw)
@@ -444,22 +545,56 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	}
 	t.Log("==========================================================")
 
-	// Thai Spelling Variant Score Distributions
+	// Thai Spelling Variant / Bilingual Score Distributions.
+	//
+	// Printed as TWO tables that are explicitly labeled by pipeline stage, because a
+	// single table conflating them previously caused two kinds of confusion:
+	//   1. "AutoOK"/"AutoWrong" were computed from the rank-1 row's RAW score, ignoring
+	//      the margin rule (IsAutoMatchable) and the 1:1 assignment pass
+	//      (ResolveAssignments) that run afterwards and can demote a row that scored
+	//      above the auto-match threshold down to REVIEW_NEEDED. Meanwhile the
+	//      per-category TP/FP/FN/TN block above reflects the FINAL MatchStatus, i.e.
+	//      AFTER those two passes. The two tables were measuring different pipeline
+	//      stages while using similar-sounding column names, which made them look
+	//      contradictory (e.g. BILINGUAL_IN_DICTIONARY: "AutoOK=3" vs "TP=1").
+	//   2. A WRONG rank-1 match scoring below the auto-match threshold was not counted
+	//      in any bucket, so n was not guaranteed to equal the sum of the buckets.
+	//
+	// The PRE-DECISION table's six buckets are asserted (t.Errorf above) to sum to n.
+	// The POST-DECISION table lets you see exactly how many pre-decision "scored high
+	// enough" rows were demoted, and ties directly back to the TP/FP counts above.
 	if len(distributions) > 0 {
 		t.Log("")
 		t.Log("==========================================================")
-		t.Log("    SCORE DISTRIBUTIONS (Rank-1 Matches Only)              ")
+		t.Logf("    PRE-DECISION SCORE DISTRIBUTION (rank-1 RAW score only, BEFORE the margin")
+		t.Logf("    rule and the 1:1 assignment pass; autoThresh=%.2f reviewThresh=%.2f)", autoThresh, reviewThresh)
 		t.Log("==========================================================")
-		t.Log("Category                    |  n  | Mean | AutoOK | AutoWrong | Review | Below | NotRetr")
-		t.Log("----------------------------|-----|------|--------|-----------|--------|-------|--------")
+		t.Log("Category                    |  n  | MeanCorrect | CorrectScored>=Auto | WrongScored>=Auto | CorrectScored[Review,Auto) | CorrectScored<Review | WrongScored<Auto | NoRank1Row")
+		t.Log("----------------------------|-----|-------------|----------------------|--------------------|-----------------------------|------------------------|-------------------|-----------")
 		for _, d := range distributions {
-			correctAtRank1 := d.CountAutoCorrect + d.CountReview + d.CountBelowThresh
+			correctAtRank1 := d.PreScoredCorrectAuto + d.PreScoredCorrectReview + d.PreScoredCorrectBelow
 			autoPercent := 0.0
 			if correctAtRank1 > 0 {
-				autoPercent = float64(d.CountAutoCorrect) / float64(correctAtRank1) * 100.0
+				autoPercent = float64(d.PreScoredCorrectAuto) / float64(correctAtRank1) * 100.0
 			}
-			t.Logf("%-28s | %3d | %.3f | %d(%5.1f%%) | %d        | %d      | %d     | %d",
-				d.Category, d.TotalPairs, d.MeanScore, d.CountAutoCorrect, autoPercent, d.CountAutoWrong, d.CountReview, d.CountBelowThresh, d.NotRetrieved)
+			preSum := d.PreScoredCorrectAuto + d.PreScoredWrongAuto + d.PreScoredCorrectReview + d.PreScoredCorrectBelow + d.PreScoredWrongBelow + d.PreNoRank1
+			t.Logf("%-28s | %3d | %.3f (of %2d correct, %5.1f%%) | %d | %d | %d | %d | %d | %d   [sum=%d]",
+				d.Category, d.TotalPairs, d.MeanScoreCorrect, correctAtRank1, autoPercent,
+				d.PreScoredCorrectAuto, d.PreScoredWrongAuto, d.PreScoredCorrectReview, d.PreScoredCorrectBelow,
+				d.PreScoredWrongBelow, d.PreNoRank1, preSum)
+		}
+		t.Log("==========================================================")
+
+		t.Log("")
+		t.Log("==========================================================")
+		t.Log("    POST-DECISION RECONCILIATION (FINAL MatchStatus, AFTER the margin rule")
+		t.Log("    and the 1:1 assignment pass — matches the TP/FP counts above)")
+		t.Log("==========================================================")
+		t.Log("Category                    | FinalAutoMatchedCorrect(=TP) | FinalAutoMatchedWrong(=FP) | DemotedFromAutoScore(margin/1:1)")
+		t.Log("----------------------------|-------------------------------|------------------------------|-----------------------------------")
+		for _, d := range distributions {
+			t.Logf("%-28s | %d | %d | %d",
+				d.Category, d.PostAutoMatchedCorrect, d.PostAutoMatchedWrong, d.PostDemoted)
 		}
 		t.Log("==========================================================")
 	}

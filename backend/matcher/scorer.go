@@ -274,6 +274,50 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 	return matched / total, bilingualMatch
 }
 
+// CrossScriptPartsScore compares two token sequences ACROSS SCRIPTS by aligning tokens
+// position-by-position (e.g. given-name-to-given-name, surname-to-surname) and taking the
+// WEAKEST per-part Jaro-Winkler similarity of the FULL vowel-bearing RTGS romanization
+// (RomanizeThaiTokens in rtgs.go), rather than PhoneticSkeleton's consonant-only reduction or a
+// single whole-string comparison.
+//
+// Rationale (measured on internal/mockdata BILINGUAL_OUT_OF_DICT vs NEG_BILINGUAL_FALSE_FRIEND):
+// PhoneticSkeleton drops vowels, and Thai draws on a small consonant inventory, so unrelated
+// names such as สมชาย ("somchai") and สมศักดิ์ ("somsak") reduce to skeletons about as close as
+// any true cross-script pair's skeletons — the two categories become indistinguishable by
+// threshold. The vowels the skeleton discards are exactly the information that separates them;
+// comparing the full romanization restores it.
+//
+// Taking the MIN across aligned parts (not mean/max) is deliberate: false-friend pairs in the
+// benchmark frequently resemble each other in ONE part by chance (e.g. a given name that happens
+// to romanize similarly) while the other part (surname) is completely unrelated. A true bilingual
+// pair must resemble on BOTH parts; the worst-matching part bounds how much the pair as a whole
+// can be trusted, so MIN (not an average that a single strong part could inflate) is the honest
+// aggregation here.
+//
+// Falls back to comparing the joined whole strings if token counts don't align (can't pair parts
+// 1:1), which happens e.g. when a Thai single-token corporate name matches a two-word Latin name.
+func CrossScriptPartsScore(srcTokens, destTokens []string) float64 {
+	if len(srcTokens) == 0 || len(destTokens) == 0 {
+		return 0.0
+	}
+
+	romSrc := RomanizeThaiTokens(srcTokens)
+	romDest := RomanizeThaiTokens(destTokens)
+
+	if len(romSrc) != len(romDest) {
+		return JaroWinkler(strings.Join(romSrc, " "), strings.Join(romDest, " "))
+	}
+
+	minScore := 1.0
+	for i := range romSrc {
+		s := JaroWinkler(romSrc[i], romDest[i])
+		if s < minScore {
+			minScore = s
+		}
+	}
+	return minScore
+}
+
 // CheckNumberMismatch checks if branch/store numerical IDs conflict.
 func CheckNumberMismatch(srcName, destName CleanName) bool {
 	if len(srcName.Numbers) == 0 || len(destName.Numbers) == 0 {
@@ -326,6 +370,7 @@ func CalculateCompositeScoreWithCorpus(
 ) ScoreResult {
 	var scores []float64
 	var jwScore, levScore, tokenScore, trigramScore, romanizedScore float64
+	var crossScriptGate bool
 	var reasons []string
 
 	// Distinctive Token Check
@@ -400,8 +445,23 @@ func CalculateCompositeScoreWithCorpus(
 		srcHasThai := ContainsThai(srcName.Raw)
 		destHasThai := ContainsThai(destName.Raw)
 		// Gate: include ONLY when exactly one side has Thai (cross-script comparison)
-		if srcHasThai != destHasThai {
-			romanizedScore = JaroWinkler(srcName.Romanized, destName.Romanized)
+		crossScriptGate = srcHasThai != destHasThai
+		if crossScriptGate {
+			// Recall signal: consonant skeleton (vowels dropped). This is the SAME reduction
+			// blocking.go indexes on (dest.NormalizedName.Romanized), so it stays cheap to
+			// compute here and keeps scoring consistent with what got retrieved as a candidate
+			// in the first place.
+			skeletonScore := JaroWinkler(srcName.Romanized, destName.Romanized)
+			// Precision signal: full vowel-bearing RTGS romanization, compared per aligned
+			// name part (given/surname) rather than skeleton-reduced or whole-string. See
+			// CrossScriptPartsScore doc for why vowels and per-part alignment matter here —
+			// this is the discriminator the skeleton alone cannot provide.
+			fullPartsScore := CrossScriptPartsScore(srcName.Tokens, destName.Tokens)
+			// A trustworthy cross-script match must agree on BOTH the coarse skeleton AND the
+			// fine vowel-bearing spelling. Taking the MIN means a false friend that merely
+			// happens to share consonants (high skeleton, low full-form) cannot masquerade as
+			// a strong match, and vice versa.
+			romanizedScore = math.Min(skeletonScore, fullPartsScore)
 			scores = append(scores, romanizedScore)
 			if romanizedScore > 0.85 {
 				reasons = append(reasons, "High romanized phonetic skeleton similarity")
@@ -447,6 +507,26 @@ func CalculateCompositeScoreWithCorpus(
 				reasons = append(reasons, "High distinctive non-generic token match")
 			}
 		}
+	}
+
+	// Cross-script override.
+	//
+	// For a genuine Thai-vs-Latin pair, JWScore/LevScore/TrigramScore/TokenScore above are all
+	// computed on srcName.Cleaned / destName.Cleaned — i.e. two disjoint alphabets — and are
+	// therefore near-zero BY CONSTRUCTION, not because the names differ. Because nameScore is a
+	// max/mean blend across every enabled metric (see the comment above), these structurally
+	// meaningless zeros dilute the mean and cap a cross-script pair's nameScore well below what
+	// the dedicated bilingual signal (romanizedScore, computed above from vowel-bearing
+	// romanization + skeleton, gated to cross-script pairs only) actually supports. Measured on
+	// internal/mockdata BILINGUAL_OUT_OF_DICT: without this override, romanizedScore is diluted
+	// to ~0.65 nameScore even for a near-exact transliteration, never reaching the 0.90
+	// auto-match threshold for ANY true pair. This mirrors the distinctScore override immediately
+	// above: pull nameScore toward the stronger dedicated signal, but only upward (a weak
+	// romanizedScore never overrides a stronger same-script finding — there isn't one here, since
+	// this only fires when crossScriptGate is true, i.e. no same-script metric was ever
+	// meaningful for this pair in the first place).
+	if crossScriptGate && algos.UseRomanizedMatch && romanizedScore > nameScore {
+		nameScore = (nameScore * 0.3) + (romanizedScore * 0.7)
 	}
 
 	// Check Branch / Number mismatch penalty

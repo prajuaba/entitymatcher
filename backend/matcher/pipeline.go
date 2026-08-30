@@ -48,43 +48,43 @@ type MatchResultItem struct {
 	TrigramScore    float64            `json:"trigram_score"`
 	MatchStatus     string             `json:"match_status"` // AUTO_MATCHED, REVIEW_NEEDED, CONFIRMED, REJECTED, NO_MATCH
 	MatchReasons    []string           `json:"match_reasons"`
-	Rank            int                `json:"rank"`           // 1 = best candidate for this source
-	ScoreMargin     float64            `json:"score_margin"`   // best - runner_up, 0 when no runner-up
-	DecisionNote    string             `json:"decision_note"`  // why this row got its status
+	Rank            int                `json:"rank"`          // 1 = best candidate for this source
+	ScoreMargin     float64            `json:"score_margin"`  // best - runner_up, 0 when no runner-up
+	DecisionNote    string             `json:"decision_note"` // why this row got its status
 	CreatedAt       time.Time          `json:"created_at"`
 }
 
 type Config struct {
-	AutoMatchThreshold      float64          `json:"auto_match_threshold"`       // Default: 0.90
-	ReviewThreshold         float64          `json:"review_threshold"`           // Default: 0.70
-	DateToleranceDays       int              `json:"date_tolerance_days"`        // Default: 30
-	Weights                 MatchWeights     `json:"weights"`
-	Algorithms              AlgorithmToggles `json:"algorithms"`
-	ColumnMapping           ColumnMapping    `json:"column_mapping"`
-	WorkerCount             int              `json:"worker_count"`
-	MaxCandidatesPerSrc     int              `json:"max_candidates_per_src"`
-	MarginThreshold         float64          `json:"margin_threshold"`           // Default: 0.05
-	ExactMatchFloor         float64          `json:"exact_match_floor"`          // Default: 0.99
-	AssignmentStrategy      string           `json:"assignment_strategy"`        // Default: "GREEDY_1_1"
-	EmitUnmatched           bool             `json:"emit_unmatched"`             // Default: true
+	AutoMatchThreshold       float64          `json:"auto_match_threshold"` // Default: 0.90
+	ReviewThreshold          float64          `json:"review_threshold"`     // Default: 0.70
+	DateToleranceDays        int              `json:"date_tolerance_days"`  // Default: 30
+	Weights                  MatchWeights     `json:"weights"`
+	Algorithms               AlgorithmToggles `json:"algorithms"`
+	ColumnMapping            ColumnMapping    `json:"column_mapping"`
+	WorkerCount              int              `json:"worker_count"`
+	MaxCandidatesPerSrc      int              `json:"max_candidates_per_src"`
+	MarginThreshold          float64          `json:"margin_threshold"`            // Default: 0.05
+	ExactMatchFloor          float64          `json:"exact_match_floor"`           // Default: 0.99
+	AssignmentStrategy       string           `json:"assignment_strategy"`         // Default: "GREEDY_1_1"
+	EmitUnmatched            bool             `json:"emit_unmatched"`              // Default: true
 	MaxAlternativesPerSource int              `json:"max_alternatives_per_source"` // Default: 5. Use negative to keep all alternatives.
 	CalibrationEnabled       bool             `json:"calibration_enabled"`         // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
 }
 
 func DefaultConfig() Config {
 	return Config{
-		AutoMatchThreshold:      0.90,
-		ReviewThreshold:         0.70,
-		DateToleranceDays:       30,
-		Weights:                 DefaultWeights,
-		Algorithms:              DefaultAlgorithms,
-		ColumnMapping:           DefaultColumnMapping(),
-		WorkerCount:             runtime.NumCPU() * 2,
-		MaxCandidatesPerSrc:     50,
-		MarginThreshold:         0.05,
-		ExactMatchFloor:         0.99,
-		AssignmentStrategy:      "GREEDY_1_1",
-		EmitUnmatched:           true,
+		AutoMatchThreshold:       0.90,
+		ReviewThreshold:          0.70,
+		DateToleranceDays:        30,
+		Weights:                  DefaultWeights,
+		Algorithms:               DefaultAlgorithms,
+		ColumnMapping:            DefaultColumnMapping(),
+		WorkerCount:              runtime.NumCPU() * 2,
+		MaxCandidatesPerSrc:      50,
+		MarginThreshold:          0.05,
+		ExactMatchFloor:          0.99,
+		AssignmentStrategy:       "GREEDY_1_1",
+		EmitUnmatched:            true,
 		MaxAlternativesPerSource: 5,
 		CalibrationEnabled:       false,
 	}
@@ -106,8 +106,8 @@ type BatchProgress struct {
 }
 
 type MatchEngine struct {
-	Config      Config
-	calibrator  Calibrator // Optional calibrator for converting raw scores to probabilities
+	Config     Config
+	calibrator Calibrator // Optional calibrator for converting raw scores to probabilities
 }
 
 func NewMatchEngine(cfg Config) *MatchEngine {
@@ -207,7 +207,7 @@ func (e *MatchEngine) ExecuteJob(
 	corpusStats := BuildCorpusStats(sources, dests)
 
 	// Build High-Scale Blocking Index
-	blockingIdx := NewBlockingIndex(dests)
+	blockingIdx := NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, e.Config.Algorithms.UseRomanizedMatch)
 
 	tasks := make(chan matchTask, totalSources)
 	resultsChan := make(chan []MatchResultItem, totalSources)

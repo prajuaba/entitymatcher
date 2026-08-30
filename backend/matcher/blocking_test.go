@@ -15,8 +15,8 @@ func TestCommonTrigramSkipped(t *testing.T) {
 	for i := 0; i < 1500; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)) + "ing",
-				Tokens:  []string{"test", string(rune(97 + i%26)), "ing"},
+				Cleaned:     "test" + string(rune(97+i%26)) + "ing",
+				Tokens:      []string{"test", string(rune(97 + i%26)), "ing"},
 				PhoneticKey: "TST" + string(rune(97+i%26)) + "NK",
 			},
 		})
@@ -38,8 +38,8 @@ func TestRareTrigramKept(t *testing.T) {
 		uniquePart := string(rune(65 + i%25))
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "store" + uniquePart + "001",
-				Tokens:  []string{"store", string(rune(65 + i%25)), "001"},
+				Cleaned:     "store" + uniquePart + "001",
+				Tokens:      []string{"store", string(rune(65 + i%25)), "001"},
 				PhoneticKey: "STR" + string(rune(65+i%25)) + "001",
 			},
 		})
@@ -60,8 +60,8 @@ func TestTinyCorpusNoSkipping(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)) + "ing",
-				Tokens:  []string{"test", string(rune(97 + i%26)), "ing"},
+				Cleaned:     "test" + string(rune(97+i%26)) + "ing",
+				Tokens:      []string{"test", string(rune(97 + i%26)), "ing"},
 				PhoneticKey: "TST" + string(rune(97+i%26)) + "NK",
 			},
 		})
@@ -100,8 +100,8 @@ func TestNoHitsReturnsNil(t *testing.T) {
 	dests := []DestinationRecord{
 		{
 			NormalizedName: CleanName{
-				Cleaned: "apple store",
-				Tokens:  []string{"apple", "store"},
+				Cleaned:     "apple store",
+				Tokens:      []string{"apple", "store"},
 				PhoneticKey: "APPL" + "STR",
 			},
 		},
@@ -111,8 +111,8 @@ func TestNoHitsReturnsNil(t *testing.T) {
 	// Source with completely different prefix and no token matches
 	src := SourceRecord{
 		NormalizedName: CleanName{
-			Cleaned: "zebra market",
-			Tokens:  []string{"zebra", "market"},
+			Cleaned:     "zebra market",
+			Tokens:      []string{"zebra", "market"},
 			PhoneticKey: "ZBR" + "MKT",
 		},
 	}
@@ -130,8 +130,8 @@ func BenchmarkBlockingIndexBuild(b *testing.B) {
 	for i := 0; i < numDests; i++ {
 		dests[i] = DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "store" + string(rune(97+i%26)) + "001",
-				Tokens:  []string{"store", string(rune(97+i%26)), "001"},
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
 				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
 			},
 		}
@@ -150,8 +150,8 @@ func BenchmarkBlockingQuery(b *testing.B) {
 	for i := 0; i < numDests; i++ {
 		dests[i] = DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "store" + string(rune(97+i%26)) + "001",
-				Tokens:  []string{"store", string(rune(97+i%26)), "001"},
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
 				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
 			},
 		}
@@ -160,8 +160,8 @@ func BenchmarkBlockingQuery(b *testing.B) {
 	idx := NewBlockingIndex(dests)
 	src := SourceRecord{
 		NormalizedName: CleanName{
-			Cleaned: "storea001",
-			Tokens:  []string{"store", "a", "001"},
+			Cleaned:     "storea001",
+			Tokens:      []string{"store", "a", "001"},
 			PhoneticKey: "STR" + "A" + "001",
 		},
 	}
@@ -179,8 +179,8 @@ func BenchmarkBlockingScaleLargeIndex(b *testing.B) {
 	for i := 0; i < numDests; i++ {
 		dests[i] = DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "store" + string(rune(97+i%26)) + "001",
-				Tokens:  []string{"store", string(rune(97+i%26)), "001"},
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
 				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
 			},
 		}
@@ -191,8 +191,8 @@ func BenchmarkBlockingScaleLargeIndex(b *testing.B) {
 	// Create source record with known matches
 	src := SourceRecord{
 		NormalizedName: CleanName{
-			Cleaned: "storea001",
-			Tokens:  []string{"store", "a", "001"},
+			Cleaned:     "storea001",
+			Tokens:      []string{"store", "a", "001"},
 			PhoneticKey: "STR" + "A" + "001",
 		},
 	}
@@ -212,8 +212,8 @@ func TestBlockingIndexConcurrency(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		dests[i] = DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "store" + string(rune(97+i%26)) + "001",
-				Tokens:  []string{"store", string(rune(97+i%26)), "001"},
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
 				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
 			},
 		}
@@ -222,8 +222,8 @@ func TestBlockingIndexConcurrency(t *testing.T) {
 	idx := NewBlockingIndex(dests)
 	src := SourceRecord{
 		NormalizedName: CleanName{
-			Cleaned: "storea001",
-			Tokens:  []string{"store", "a", "001"},
+			Cleaned:     "storea001",
+			Tokens:      []string{"store", "a", "001"},
 			PhoneticKey: "STR" + "A" + "001",
 		},
 	}
@@ -264,14 +264,14 @@ func TestAbsoluteCeilingEffective(t *testing.T) {
 		}
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)),
-				Tokens:  tokens,
+				Cleaned:     "test" + string(rune(97+i%26)),
+				Tokens:      tokens,
 				PhoneticKey: "TST" + string(rune(97+i%26)),
 			},
 		})
 	}
 
-	idx := NewBlockingIndexWithOptions(dests, 0.05, 100)
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 100, true)
 
 	// Verify the token "xcommon" is skipped because 118 > min(100, 100) = 100
 	assert.True(t, idx.skipTokens["xcommon"])
@@ -287,8 +287,8 @@ func TestAbsoluteCeilingEnforced(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "common" + string(rune(97+i%26)),
-				Tokens:  []string{"common", "raretoken"},
+				Cleaned:     "common" + string(rune(97+i%26)),
+				Tokens:      []string{"common", "raretoken"},
 				PhoneticKey: "CMN" + string(rune(97+i%26)),
 			},
 		})
@@ -297,14 +297,14 @@ func TestAbsoluteCeilingEnforced(t *testing.T) {
 	for i := 300; i < 5000; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "unique" + string(rune(97+(i-300)%26)),
-				Tokens:  []string{"unique", string(rune(97 + (i-300)%26))},
+				Cleaned:     "unique" + string(rune(97+(i-300)%26)),
+				Tokens:      []string{"unique", string(rune(97 + (i-300)%26))},
 				PhoneticKey: "UNK" + string(rune(97+(i-300)%26)),
 			},
 		})
 	}
 
-	idx := NewBlockingIndexWithOptions(dests, 0.05, 150)
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 150, true)
 
 	// "raretoken" appears in 300 records, which > min(0.05*5000=250, 150)=150 => should be skipped
 	assert.True(t, idx.skipTokens["raretoken"])
@@ -316,15 +316,15 @@ func TestSmallCorpusUnaffected(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)),
-				Tokens:  []string{"test", string(rune(97 + i%26))},
+				Cleaned:     "test" + string(rune(97+i%26)),
+				Tokens:      []string{"test", string(rune(97 + i%26))},
 				PhoneticKey: "TST" + string(rune(97+i%26)),
 			},
 		})
 	}
 
 	// Set very low ceiling (e.g., 10) and ratio (e.g., 0.01) — should be ignored for corpus <1000
-	idx := NewBlockingIndexWithOptions(dests, 0.01, 10)
+	idx := NewBlockingIndexWithOptions(dests, 0.01, 10, true)
 
 	// No tokens/trigrams should be skipped because corpus size < 1000
 	assert.Len(t, idx.skipTrigrams, 0)
@@ -337,8 +337,8 @@ func TestNewBlockingIndexBackwardCompat(t *testing.T) {
 	for i := 0; i < 2000; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)),
-				Tokens:  []string{"test", string(rune(97 + i%26))},
+				Cleaned:     "test" + string(rune(97+i%26)),
+				Tokens:      []string{"test", string(rune(97 + i%26))},
 				PhoneticKey: "TST" + string(rune(97+i%26)),
 			},
 		})
@@ -362,14 +362,14 @@ func TestPhoneticKeyCeiling(t *testing.T) {
 	for i := 0; i < 3000; i++ {
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "test" + string(rune(97+i%26)),
-				Tokens:  []string{"test", string(rune(97 + i%26))},
+				Cleaned:     "test" + string(rune(97+i%26)),
+				Tokens:      []string{"test", string(rune(97 + i%26))},
 				PhoneticKey: commonPhoneticKey,
 			},
 		})
 	}
 
-	idx := NewBlockingIndexWithOptions(dests, 0.05, 500)
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 500, true)
 
 	// The phonetic key appears in 3000 records, but effective cutoff is min(3000*0.05=150, 500)=150
 	// Since 3000 > 150, it should be skipped (stored in skipPhonetic)
@@ -403,15 +403,15 @@ func TestPhoneticPostingList220k(t *testing.T) {
 
 		dests = append(dests, DestinationRecord{
 			NormalizedName: CleanName{
-				Cleaned: "name" + string(rune(97+i%26)),
-				Tokens:  []string{"name", string(rune(97 + i%26))},
+				Cleaned:     "name" + string(rune(97+i%26)),
+				Tokens:      []string{"name", string(rune(97 + i%26))},
 				PhoneticKey: pk,
 			},
 		})
 	}
 
 	// Test with unbounded ceiling (use a very large value)
-	idx := NewBlockingIndexWithOptions(dests, 0.05, 1000000)
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 1000000, true)
 
 	// Find largest phonetic posting list
 	maxPhoneticCount := 0
@@ -429,7 +429,7 @@ func TestPhoneticPostingList220k(t *testing.T) {
 	t.Logf("  Expected max for VERYCOMMON: ~2200 (1%% of 220k)")
 
 	// Test with ceiling=2000
-	idx2000 := NewBlockingIndexWithOptions(dests, 0.05, 2000)
+	idx2000 := NewBlockingIndexWithOptions(dests, 0.05, 2000, true)
 	maxPhoneticCount2000 := 0
 	for _, destIdxs := range idx2000.phoneticMap {
 		if len(destIdxs) > maxPhoneticCount2000 {
@@ -480,7 +480,7 @@ func TestFallbackSemanticsPreserved(t *testing.T) {
 		NormalizedName: CleanName{
 			Cleaned:     "apple123",
 			Tokens:      []string{"xyz"}, // Token doesn't match any destination
-			PhoneticKey: "XYZ",            // Phonetic key doesn't match any destination
+			PhoneticKey: "XYZ",           // Phonetic key doesn't match any destination
 		},
 	}
 
@@ -514,8 +514,8 @@ func TestPhoneticTokenCollisionRegression(t *testing.T) {
 			// One destination with the rare token
 			dests[i] = DestinationRecord{
 				NormalizedName: CleanName{
-					Cleaned: "unique store",
-					Tokens:  []string{"unique", "COLLISION"},
+					Cleaned:     "unique store",
+					Tokens:      []string{"unique", "COLLISION"},
 					PhoneticKey: "COLLISION",
 				},
 			}
@@ -523,15 +523,15 @@ func TestPhoneticTokenCollisionRegression(t *testing.T) {
 			// Rest with frequent phonetic key
 			dests[i] = DestinationRecord{
 				NormalizedName: CleanName{
-					Cleaned: "store" + string(rune(97+i%26)),
-					Tokens:  []string{"store", string(rune(97 + i%26))},
+					Cleaned:     "store" + string(rune(97+i%26)),
+					Tokens:      []string{"store", string(rune(97 + i%26))},
 					PhoneticKey: "COLLISION",
 				},
 			}
 		}
 	}
 
-	idx := NewBlockingIndexWithOptions(dests, 0.05, 1000)
+	idx := NewBlockingIndexWithOptions(dests, 0.05, 1000, true)
 
 	// Verify the token "COLLISION" is NOT skipped (since it only appears once)
 	assert.False(t, idx.skipTokens["COLLISION"], "Token 'COLLISION' should not be skipped")
@@ -548,8 +548,8 @@ func TestPhoneticTokenCollisionRegression(t *testing.T) {
 	// Query with source that matches the rare token
 	src := SourceRecord{
 		NormalizedName: CleanName{
-			Cleaned: "search COLLISION",
-			Tokens:  []string{"COLLISION"},
+			Cleaned:     "search COLLISION",
+			Tokens:      []string{"COLLISION"},
 			PhoneticKey: "XYZ", // Doesn't match any phonetic key
 		},
 	}
@@ -598,7 +598,7 @@ func TestDeterministicCandidateOrdering(t *testing.T) {
 		NormalizedName: CleanName{
 			Cleaned:     "search query",
 			Tokens:      []string{"token0", "token1", "common"}, // Will match many dests
-			PhoneticKey: "PH0",                                   // Will match many dests
+			PhoneticKey: "PH0",                                  // Will match many dests
 		},
 	}
 
@@ -632,7 +632,7 @@ func TestDeterministicQueryCandidates20Runs(t *testing.T) {
 	for i := 0; i < numDests; i++ {
 		group := i / 10 // Groups of 10 destinations
 		dests[i] = DestinationRecord{
-			ID: string(rune(48 + i/100)) + string(rune(97 + (i/10)%26)) + string(rune(48 + i%10)), // ID based on position
+			ID: string(rune(48+i/100)) + string(rune(97+(i/10)%26)) + string(rune(48+i%10)), // ID based on position
 			NormalizedName: CleanName{
 				Cleaned:     "store" + string(rune(97+group%26)) + "001",
 				Tokens:      []string{"store", string(rune(97 + group%26)), "001"},
@@ -675,4 +675,69 @@ func TestDeterministicQueryCandidates20Runs(t *testing.T) {
 	// Verify we got results
 	assert.NotEmpty(t, allResults[0], "Should return some candidates")
 	t.Logf("Deterministic query verified: %d candidates returned identically across 20 runs", len(allResults[0]))
+}
+
+func TestUseRomanizedMatchFalseDisablesIndex(t *testing.T) {
+	// Create destinations with some having non-empty Romanized fields
+	dests := make([]DestinationRecord, 0, 100)
+	for i := 0; i < 100; i++ {
+		romanized := ""
+		if i%10 == 0 {
+			romanized = "rom" + string(rune(97+i%26))
+		}
+		dests = append(dests, DestinationRecord{
+			NormalizedName: CleanName{
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
+				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
+				Romanized:   romanized,
+			},
+		})
+	}
+
+	idx := NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, false)
+
+	// Verify romanized map is empty when flag is false
+	assert.Len(t, idx.romanizedMap, 0)
+	assert.Len(t, idx.skipRomanized, 0)
+
+	// Build second index with useRomanized=true to verify data was real
+	idxOn := NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, true)
+	assert.Greater(t, len(idxOn.romanizedMap), 0)
+}
+
+func TestUseRomanizedMatchFalseNonBilingualUnaffected(t *testing.T) {
+	// Create destinations with no Romanized fields (empty string)
+	dests := make([]DestinationRecord, 0, 100)
+	for i := 0; i < 100; i++ {
+		dests = append(dests, DestinationRecord{
+			NormalizedName: CleanName{
+				Cleaned:     "store" + string(rune(97+i%26)) + "001",
+				Tokens:      []string{"store", string(rune(97 + i%26)), "001"},
+				PhoneticKey: "STR" + string(rune(97+i%26)) + "001",
+			},
+		})
+	}
+
+	idxOff := NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, false)
+	idxOn := NewBlockingIndexWithOptions(dests, 0.05, DefaultAbsoluteCeiling, true)
+
+	src := SourceRecord{
+		NormalizedName: CleanName{
+			Cleaned:     "storea001",
+			Tokens:      []string{"store", "a", "001"},
+			PhoneticKey: "STR" + "A" + "001",
+		},
+	}
+
+	candsOff := idxOff.QueryCandidates(src, 50)
+	candsOn := idxOn.QueryCandidates(src, 50)
+
+	assert.NotNil(t, candsOff)
+	assert.NotNil(t, candsOn)
+	assert.Equal(t, len(candsOff), len(candsOn))
+
+	for i := 0; i < len(candsOff); i++ {
+		assert.Equal(t, candsOff[i].ID, candsOn[i].ID)
+	}
 }
