@@ -1,7 +1,11 @@
 # High-Scale Thai–English Entity Resolution & Data Matching Engine
 
-Bilingual (Thai/English) entity resolution for individuals and legal entities, with a
-human-in-the-loop review queue, a compliance audit trail, and pluggable data connectors.
+Entity resolution for Thai and English individuals and legal entities, with a human-in-the-loop
+review queue, a compliance audit trail, and pluggable data connectors.
+
+**Scope note:** the engine handles Thai-vs-Thai and English-vs-English matching well, including Thai
+homophone spelling variants. It does **not** currently match the same entity written in Thai script
+against Latin script — see *Cross-script matching* under Known limitations.
 
 Every number and capability below is measured or exercised by a test in this repo. Where something
 is partial, it says so.
@@ -89,7 +93,7 @@ printing metrics.
 | **Data connectors** | Real drivers: PostgreSQL (`pgx/v5`), SQL Server (`go-mssqldb`), MongoDB (`mongo-driver`), Excel (`excelize`), CSV, manual entry |
 | **Dynamic schema mapping** | Multi-field name composition, reference/date column mapping, secondary pairing rules (exact / fuzzy / numeric delta / mandatory) |
 | **Date handling** | Multi-layout parsing including **Buddhist-era years** (2569 → 2026) and Thai digits (๒๕๖๙); unparseable dates are unknown, never silently "today" |
-| **Synonym dictionary** | Brand aliases (`KBank` / `กสิกรไทย` → `kasikornbank`) applied inside the normalizer, so they affect scoring |
+| **Synonym dictionary** | Brand aliases applied inside the normalizer, so they affect scoring. Same-script aliases (`KBank` → `kasikornbank`) work; the Thai↔Latin entries do not, because such pairs are never retrieved — see Known limitations |
 | **Compliance audit trail** | Reviewer identity taken from the verified JWT (never the request body), CSV export, append-only enforcement in Postgres |
 | **AuthN / RBAC** | HMAC-SHA256 JWT, bcrypt credentials, four roles enforced by middleware on every route |
 | **Scheduler & webhooks** | Real cron engine (`robfig/cron/v3`) running reconciliation; Slack / Teams / generic webhooks with retry |
@@ -211,8 +215,23 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   runtime, since GC CPU fraction falls with scale.
 - **Scaling is O(N^1.10), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
-- **Transliteration is dictionary-based**, not a phonetic model — coverage is limited to the mapped
-  pairs plus the synonym dictionary.
+- **Cross-script matching does not work.** Measured, not estimated: the benchmark's bilingual
+  categories score **TP=0** — for entities in the hardcoded transliteration map as well as outside
+  it. The map is not merely narrow, it is unreachable: a Thai string and a Latin string share no
+  tokens and no trigrams, so the blocking index never surfaces the pair and `CheckBilingualMatch`
+  never runs. Any fix must reach the blocking layer, not just the scorer.
+
+  A partial fix was attempted and reverted. Mapping Thai to RTGS romanization and reducing both
+  scripts to a shared phonetic skeleton does work for some names (สุชาติ/Suchat and นภา/Napha
+  converge exactly), but reliable romanization needs Thai **syllable segmentation** — without it,
+  consonant position must be guessed, and the guess fails on most CV syllables (สมชาย reduces to
+  `tmchn` rather than `smch`, because the initial ส is followed by a consonant and is misread as
+  final). The attempt cost 100% precision, 63 English true positives, and delivered no bilingual
+  gain, so it was not kept.
+
+  There is also an inherent tension worth knowing before attempting it: collapsing phonetics
+  aggressively enough to unify scripts made the deliberate false-friend pair วิชัย/Wichian produce
+  identical forms. The `NEG_BILINGUAL_FALSE_FRIEND` category (n=52) exists to hold that line.
 - **Demo users are compiled in.** There is no user management, registration, or password rotation.
 
 See `BACKLOG.md` for the remediation backlog this codebase was built against.
