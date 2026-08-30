@@ -18,6 +18,7 @@ type AlgorithmToggles struct {
 	UsePhonetic      bool `json:"use_phonetic"`
 	UseTrigram       bool `json:"use_trigram"`
 	UseThaiPhonetic  bool `json:"use_thai_phonetic"`
+	UseCorpusIDF     bool `json:"use_corpus_idf"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -32,6 +33,7 @@ var DefaultAlgorithms = AlgorithmToggles{
 	UsePhonetic:     true,
 	UseTrigram:      true,
 	UseThaiPhonetic: true,
+	UseCorpusIDF:    true,
 }
 
 // JaroWinkler computes rune-safe Jaro-Winkler distance between two strings s1 and s2.
@@ -204,15 +206,55 @@ func CalculateDateScore(srcDate, destDate time.Time, maxToleranceDays int) float
 }
 
 // DistinctiveTokenScore computes similarity prioritizing non-generic distinctive words.
-func DistinctiveTokenScore(srcName, destName CleanName) (float64, bool) {
+// If corpus and useCorpusIDF are both provided, weights matches by inverse document frequency.
+// Nil corpus falls back to binary matching behavior (backward compatible).
+func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, useCorpusIDF bool) (float64, bool) {
 	if len(srcName.DistinctiveTokens) == 0 || len(destName.DistinctiveTokens) == 0 {
 		return 0.0, false
 	}
 
+	bilingualMatch := false
+
+	// Use IDF-weighted matching if corpus available and enabled
+	if corpus != nil && useCorpusIDF {
+		var matchedWeight float64
+		var totalWeight float64
+
+		// Build destination token set for efficient lookup
+		destSet := make(map[string]bool)
+		for _, t := range destName.DistinctiveTokens {
+			destSet[t] = true
+		}
+
+		// For each source token, compute its weight and check if matched
+		for _, srcToken := range srcName.DistinctiveTokens {
+			srcWeight := corpus.Weight(srcToken)
+			totalWeight += srcWeight
+
+			// Check if srcToken matches any dest token
+			for _, destToken := range destName.DistinctiveTokens {
+				if srcToken == destToken || JaroWinkler(srcToken, destToken) >= 0.85 {
+					matchedWeight += srcWeight
+					break
+				} else if CheckBilingualMatch(srcToken, destToken) {
+					matchedWeight += srcWeight * 0.95
+					bilingualMatch = true
+					break
+				}
+			}
+		}
+
+		if totalWeight == 0 {
+			return 0.0, false
+		}
+
+		score := matchedWeight / totalWeight
+		return math.Round(score*10000) / 10000, bilingualMatch
+	}
+
+	// Binary matching fallback (backward compatible with nil corpus or useCorpusIDF=false)
 	var matched float64
 	total := float64(int(math.Max(float64(len(srcName.DistinctiveTokens)), float64(len(destName.DistinctiveTokens)))))
-
-	bilingualMatch := false
 
 	for _, t1 := range srcName.DistinctiveTokens {
 		for _, t2 := range destName.DistinctiveTokens {
@@ -268,20 +310,23 @@ type ScoreResult struct {
 	MatchReasons []string `json:"match_reasons"`
 }
 
-// CalculateCompositeScore calculates name and date metrics according to weights, algorithms, and rules.
-func CalculateCompositeScore(
+// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
+// If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
+func CalculateCompositeScoreWithCorpus(
 	srcName, destName CleanName,
 	srcDate, destDate time.Time,
 	weights MatchWeights,
 	algos AlgorithmToggles,
 	dateTolerance int,
+	corpus *CorpusStats,
 ) ScoreResult {
 	var scores []float64
 	var jwScore, levScore, tokenScore, trigramScore float64
 	var reasons []string
 
 	// Distinctive Token Check
-	distinctScore, isBilingual := DistinctiveTokenScore(srcName, destName)
+	distinctScore, isBilingual := DistinctiveTokenScore(srcName, destName, corpus, algos.UseCorpusIDF)
 	if isBilingual {
 		reasons = append(reasons, "Bilingual Thai-English transliteration dictionary match")
 	}
@@ -416,4 +461,17 @@ func CalculateCompositeScore(
 		TrigramScore: math.Round(trigramScore*10000) / 10000,
 		MatchReasons: reasons,
 	}
+}
+
+// CalculateCompositeScore is the backward-compatible version that maintains the original signature.
+// It calls CalculateCompositeScoreWithCorpus with nil corpus for existing callers like store/.
+// For new code that has corpus statistics available, use CalculateCompositeScoreWithCorpus.
+func CalculateCompositeScore(
+	srcName, destName CleanName,
+	srcDate, destDate time.Time,
+	weights MatchWeights,
+	algos AlgorithmToggles,
+	dateTolerance int,
+) ScoreResult {
+	return CalculateCompositeScoreWithCorpus(srcName, destName, srcDate, destDate, weights, algos, dateTolerance, nil)
 }

@@ -192,6 +192,9 @@ func (e *MatchEngine) ExecuteJob(
 		return nil, progress
 	}
 
+	// Build corpus statistics for IDF weighting (once before worker pool)
+	corpusStats := BuildCorpusStats(sources, dests)
+
 	// Build High-Scale Blocking Index
 	blockingIdx := NewBlockingIndex(dests)
 
@@ -228,7 +231,7 @@ func (e *MatchEngine) ExecuteJob(
 					var ScoredCandidates []ScoredCandidate
 
 					for _, cand := range candidates {
-						scoreRes := CalculateCompositeScore(
+						scoreRes := CalculateCompositeScoreWithCorpus(
 							task.source.NormalizedName,
 							cand.NormalizedName,
 							task.source.TransactionDate,
@@ -236,6 +239,7 @@ func (e *MatchEngine) ExecuteJob(
 							e.Config.Weights,
 							e.Config.Algorithms,
 							e.Config.DateToleranceDays,
+							corpusStats,
 						)
 
 						// Evaluate dynamic secondary field mappings if configured
