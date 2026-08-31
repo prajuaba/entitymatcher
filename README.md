@@ -160,6 +160,7 @@ deployment.
 | `JWT_SECRET` | random per start | Token signing key. **Set this** — otherwise tokens do not survive a restart, and the server logs a warning |
 | `DATABASE_URL` | unset | Enables PostgreSQL persistence; in-memory when unset |
 | `CORS_ORIGINS` | unset | Comma-separated allowlist; same-origin only when unset |
+| `CONNECTOR_FILE_ROOT` | unset | Directory the connector endpoints may read server-side `file_path` values from. **Unset denies all of them**, which is the safe default — the alternative is the whole filesystem. Uploads via `/api/upload/file` are unaffected: that path is server-generated, not caller-supplied |
 | `GEMINI_API_KEY` | unset | Enables the LLM resolver; falls back to the local rule-based analyzer when unset |
 
 Engine tuning (`PUT /api/config`, merge-on-write and validated): `auto_match_threshold`,

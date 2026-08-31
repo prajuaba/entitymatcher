@@ -671,6 +671,72 @@ func fetchAllRecords(ctx context.Context, conn matcher.DataConnector, maxRecords
 	return rows, truncated, nil
 }
 
+// ConnectorFileRootEnv names the environment variable that confines
+// caller-supplied connector file paths to one directory.
+const ConnectorFileRootEnv = "CONNECTOR_FILE_ROOT"
+
+// resolveConnectorFilePath confines a caller-supplied file path to the directory
+// named by CONNECTOR_FILE_ROOT and returns the resolved absolute path.
+//
+// Without this the connector endpoints are an arbitrary file-read primitive: the
+// caller names any path the server process can open and IntrospectSchema returns
+// its header row.
+//
+// Unset means DENY. Refusing by default is the safe failure: an operator who has
+// not chosen a directory has not agreed to expose one, and the alternative
+// default -- the whole filesystem -- is the vulnerability itself.
+//
+// Symlinks are resolved BEFORE the containment check, so a symlink planted inside
+// the root cannot point out of it. Both sides are resolved because the root
+// itself may be reached through a symlink (/tmp on macOS, for one).
+func resolveConnectorFilePath(path string) (string, error) {
+	root := strings.TrimSpace(os.Getenv(ConnectorFileRootEnv))
+	if root == "" {
+		return "", fmt.Errorf("server-side file paths are disabled; set %s to a directory to enable them", ConnectorFileRootEnv)
+	}
+
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("file_path is required")
+	}
+
+	realRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("%s is not a usable directory: %w", ConnectorFileRootEnv, err)
+	}
+	realRoot, err = filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		return "", fmt.Errorf("%s is not a usable directory: %w", ConnectorFileRootEnv, err)
+	}
+
+	var candidate string
+	if filepath.IsAbs(path) {
+		candidate = path
+	} else {
+		candidate = filepath.Join(realRoot, path)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("file not found or not readable: %s", path)
+	}
+	candidate, err = filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("file not found or not readable: %s", path)
+	}
+
+	if candidate == realRoot || strings.HasPrefix(candidate, realRoot+string(os.PathSeparator)) {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			return "", fmt.Errorf("file not found or not readable: %s", path)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("file_path is a directory, not a file")
+		}
+		return candidate, nil
+	}
+
+	return "", fmt.Errorf("file_path is outside the permitted directory")
+}
+
 // saveUploadedFileToTemp validates the extension of an uploaded multipart file, copies its
 // content to a new temp file on disk, and returns the temp file's path. The caller owns the
 // returned path and is responsible for os.Remove'ing it once done.
@@ -1517,6 +1583,16 @@ func (s *Server) HandleTestConnector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if (cfg.Type == matcher.SourceTypeCSV || cfg.Type == matcher.SourceTypeExcel) &&
+		!(cfg.FilePath == "" && len(cfg.ManualData) > 0) {
+		resolved, err := resolveConnectorFilePath(cfg.FilePath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg.FilePath = resolved
+	}
+
 	conn, err := matcher.NewDataConnector(cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1551,6 +1627,19 @@ func (s *Server) HandleIntrospectSchema(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		http.Error(w, "Invalid connection JSON", http.StatusBadRequest)
 		return
+	}
+
+	// This confinement applies to caller-supplied paths at the API boundary; the upload
+	// handler's server-generated temp path (from saveUploadedFileToTemp) never reaches
+	// here as a caller-supplied path, so it is unaffected and does not need this guard.
+	if (cfg.Type == matcher.SourceTypeCSV || cfg.Type == matcher.SourceTypeExcel) &&
+		!(cfg.FilePath == "" && len(cfg.ManualData) > 0) {
+		resolved, err := resolveConnectorFilePath(cfg.FilePath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg.FilePath = resolved
 	}
 
 	conn, err := matcher.NewDataConnector(cfg)

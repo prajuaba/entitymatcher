@@ -201,7 +201,7 @@ test set. Recorded in `rtgs.go` so they are not re-added on the strength of the 
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| M1 | Restrict `IntrospectSchema` file paths | It opens any server-side path the caller supplies and returns the first row — an arbitrary file-read primitive, currently reachable by ADMIN/ENGINEER. Confine reads to a configured directory |
+| ~~M1~~ ✅ | Restrict `IntrospectSchema` file paths | It opens any server-side path the caller supplies and returns the first row — an arbitrary file-read primitive, currently reachable by ADMIN/ENGINEER. Confine reads to a configured directory. **Shipped:** `CONNECTOR_FILE_ROOT` gates caller-supplied paths at both connector endpoints; unset denies. Symlinks are resolved *before* the containment check, and containment requires `root` or `root + separator` — a bare `HasPrefix` would accept `/data/private` under a root of `/data/priv`. All three properties are mutation-checked, as is the endpoint guard itself (removing it while leaving the helper tested fails the end-to-end test). **Unblocks the `file_path` half of K1**, which was deliberately left closed pending this |
 | M2 | Stream Excel | `ExcelConnector` uses `GetRows`, loading the whole sheet into memory. **G4**'s "real file streaming" holds for CSV only; use the streaming reader |
 | M3 | Let `SaveDataset` report failure | The `Repository` signature has no error return, so a write failure can only be logged. Give it an `error` and have callers surface it |
 | M4 | Calibration UI | `POST /api/calibration/fit` and `GET /api/calibration/status` have no frontend at all. Include observation progress toward `MinCalibrationObservations` (20), so an operator sees "14/20" rather than a bare 400 |
