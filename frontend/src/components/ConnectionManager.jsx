@@ -492,7 +492,10 @@ export function ConnectionManager({ onSchemaIntrospected }) {
         </button>
         <p className="text-xs text-slate-500">Reads both connectors to completion and writes a batch the matcher can run against.</p>
         {ingestStatus && (
-          <div className={`p-2.5 rounded text-xs flex items-center gap-2 ${ingestStatus.success ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-rose-950/60 text-rose-300 border border-rose-800'}`}>
+          <div
+            data-testid="ingest-status"
+            data-outcome={ingestStatus.success ? 'success' : 'error'}
+            className={`p-2.5 rounded text-xs flex items-center gap-2 ${ingestStatus.success ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-rose-950/60 text-rose-300 border border-rose-800'}`}>
             {ingestStatus.success ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
             <span>{ingestStatus.message}</span>
           </div>
