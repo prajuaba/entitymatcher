@@ -202,6 +202,14 @@ response rather than silently returning a short dataset.
 
 **Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`
 
+Database connectors page their reads, and a page is only meaningful over a total order, so
+each resolves one before fetching: `extra_params.order_by` if the operator supplied it,
+otherwise the table's primary key, otherwise every orderable column. MongoDB sorts on `_id`
+by default. A table with no primary key and no orderable column cannot be paged safely, and
+the connector says so instead of returning pages that quietly duplicate and drop rows — set
+`extra_params.order_by` to resolve it. SQL Server tables may be schema-qualified
+(`dbo.Customers`); an unqualified name is read as `dbo`.
+
 **Calibration** (ADMIN) — `POST /api/calibration/fit`, `GET /api/calibration/status`
 
 Fit trains on reviewer decisions in the audit log and reports Brier and ECE before and
