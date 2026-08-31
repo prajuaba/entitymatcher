@@ -168,7 +168,7 @@ departures from the ACs:
 | ~~K3~~ ✅ | Connector ingestion in the UI | ConnectionManager's Connect path loads data and starts a batch, instead of only previewing headers. **Shipped with a prerequisite fix:** the panel had inputs for host, database and table only — no port, username or password — so every request it sent carried port 1433, user `sa` and a password of eight literal `•` characters. Test Connection and Introspect Schema had never been usable against a real server either. Added the three missing inputs, defaulted the port from the selected type, and cleared the fake password. Initially shipped with no automated test, since the project had no frontend test framework. That gap is now closed: Vitest + Testing Library added, with 12 tests over the store action and the ingest UI. Two are mutation-checked — reporting a truncated ingest as a success, and sending `port` as a string, each fail their own test |
 | ~~K4~~ ✅ | `GET /api/jobs` | `ListJobs` is implemented in both stores and routed nowhere — no endpoint exists. Route it, with pagination bounds. Closes **H3**. **Shipped**, and it surfaced a store divergence now pinned by a test: `PostgresStore.SaveDataset` inserts a `match_jobs` row, so a batch uploaded but never matched *is* listed, while the in-memory store derives jobs from progress and does *not* list it. Which semantic is correct is a product question, deliberately left open rather than settled inside the endpoint |
 
-## EPIC L — Cross-script matching stops at RTGS spellings (H)
+## EPIC L — Cross-script matching stops at RTGS spellings (H) — L1, L2 closed; L3 measured
 
 Characterized and pinned by `matcher/crossscript_regression_test.go`; not fixed. RTGS
 romanizes จ as `ch`, while the conventional English spelling of such names uses `j`
@@ -177,11 +177,25 @@ the skeletons diverge — `smchjd` vs `smchchd` — leaving that pair at 0.6906,
 0.70 review threshold. Measured effect on the benchmark: BILINGUAL_OUT_OF_DICT TP=2/FN=28
 of 30, BILINGUAL_IN_DICTIONARY TP=2/FN=7 of 9, against 100/100 for same-script Thai.
 
+**Closed 2026-08-31.** L1+L2 `d0f4d7a`. The entry's diagnosis was **incomplete**: it blamed
+`PhoneticSkeleton`, but folding only the skeleton moved the score by *zero*. `romanizedScore`
+is `min(skeletonScore, fullPartsScore)`, and `CrossScriptPartsScore` compares the
+vowel-bearing romanization, where `jaidee` vs `chaidi` still scored 0.6667. The skeleton was
+never the binding constraint. The fold now applies in both places.
+
+**Selection rule for folds — fold only a letter RTGS never emits.** RTGS's alphabet contains
+no `j` and no `v`, so folding those rewrites only the English side. `g` occurs only inside
+`ng`, and `t`/`p` occur both alone and inside `th`/`ph`, so folding them corrupts the RTGS
+side (*thongdi* → *thhongdi*) and merges ต/ท and ป/พ, which Thai contrasts. `t`→`th` and
+`p`→`ph` each measured **+1 TP with no precision loss** — rejected anyway, because the
+benchmark holds no pair that would expose the merged contrast, so the gain is fitting the
+test set. Recorded in `rtgs.go` so they are not re-added on the strength of the numbers.
+
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| L1 | Phonetic equivalence classes | `j`↔`ch` (and any sibling pairs found: `v`/`w`, `k`/`g`, `p`/`ph`, `t`/`th`) treated as equivalent **in comparison only** — romanization output stays RTGS-correct. The regression probe's RTGS guard must still pass |
-| L2 | Re-measure, do not assume | Re-run `TestFullLoopBigDatasetBenchmark`; precision must stay at 1.0000. The probe's `[0.60, 0.70)` band is expected to fail — that is the signal to update it, with the new numbers recorded |
-| L3 | Threshold option for cross-script pairs | 17 of 30 correct out-of-dict pairs already score in [0.70, 0.90). Evaluate a cross-script-specific auto threshold as a cheaper lever than L1, and measure both |
+| ~~L1~~ ✅ | Phonetic equivalence classes | `j`↔`ch` (and any sibling pairs found: `v`/`w`, `k`/`g`, `p`/`ph`, `t`/`th`) treated as equivalent **in comparison only** — romanization output stays RTGS-correct. The regression probe's RTGS guard must still pass |
+| ~~L2~~ ✅ | Re-measure, do not assume | Re-run `TestFullLoopBigDatasetBenchmark`; precision must stay at 1.0000. The probe's `[0.60, 0.70)` band is expected to fail — that is the signal to update it, with the new numbers recorded |
+| **L3** (measured, not shipped) | Threshold option for cross-script pairs | 17 of 30 correct out-of-dict pairs already score in [0.70, 0.90). Evaluate a cross-script-specific auto threshold as a cheaper lever than L1, and measure both. **Measured** by `internal/mockdata/crossscript_threshold_test.go`. On this corpus the distributions separate cleanly: false friends max **0.6266**, correct out-of-dict pairs min **0.6819** (median 0.8400), and **0/52 false friends** cross any bar down to 0.70. **Not shipped, and the evidence is not sufficient on its own:** the sweep scores ground-truth pairings in isolation, so it is blind to the real precision risk — a source matching a *different* destination. The pipeline already shows `WrongScored>=Auto = 2` at 0.90. Shipping also needs a cross-script flag on `MatchResultItem`, which today has none, plumbed through the scorer, schema and Postgres store |
 
 ## EPIC M — Hardening and unfinished surface (M)
 
