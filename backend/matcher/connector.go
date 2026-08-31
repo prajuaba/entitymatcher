@@ -935,6 +935,7 @@ func (c *ExcelConnector) TestConnection(ctx context.Context) error {
 	return nil
 }
 
+// IntrospectSchema needs only the header row, so it must not materialize the whole sheet via GetRows.
 func (c *ExcelConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
 	if len(c.Config.ManualData) > 0 {
 		var cols []ColumnDef
@@ -957,22 +958,34 @@ func (c *ExcelConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, err
 		}
 	}
 
-	rows, err := f.GetRows(sheetName)
+	rows, err := f.Rows(sheetName)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
 	}
+	defer rows.Close()
 
-	if len(rows) == 0 {
+	if !rows.Next() {
 		return nil, fmt.Errorf("Excel sheet is empty")
 	}
 
+	header, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Excel row: %w", err)
+	}
+
 	var cols []ColumnDef
-	for _, h := range rows[0] {
+	for _, h := range header {
 		cols = append(cols, ColumnDef{Name: strings.TrimSpace(h), DataType: "STRING"})
 	}
+
+	if err := rows.Error(); err != nil {
+		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
+	}
+
 	return cols, nil
 }
 
+// FetchRecords streams the sheet and stops at limit, so a paged read's cost does not scale with total sheet size.
 func (c *ExcelConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
 	if len(c.Config.ManualData) > 0 {
 		if limit <= 0 {
@@ -1004,30 +1017,55 @@ func (c *ExcelConnector) FetchRecords(ctx context.Context, limit, offset int) ([
 		}
 	}
 
-	rows, err := f.GetRows(sheetName)
+	rows, err := f.Rows(sheetName)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
 	}
+	defer rows.Close()
 
-	if len(rows) == 0 {
+	if !rows.Next() {
 		return []map[string]interface{}{}, nil
 	}
 
-	headers := rows[0]
+	headers, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Excel row: %w", err)
+	}
+	// Trim header names once here rather than repeating the trim per data row.
+	for i, h := range headers {
+		headers[i] = strings.TrimSpace(h)
+	}
+
 	limit = clamp(limit, 1, 50000)
 	if offset < 0 {
 		offset = 0
 	}
 
-	var result []map[string]interface{}
-	for i := 1 + offset; i < len(rows) && len(result) < limit; i++ {
-		row := make(map[string]interface{})
+	// Skip offset data rows without materializing them.
+	for i := 0; i < offset; i++ {
+		if !rows.Next() {
+			return []map[string]interface{}{}, nil
+		}
+	}
+
+	result := make([]map[string]interface{}, 0)
+	for len(result) < limit && rows.Next() {
+		row, err := rows.Columns()
+		if err != nil {
+			return nil, fmt.Errorf("cannot read Excel row: %w", err)
+		}
+
+		rowMap := make(map[string]interface{})
 		for j, h := range headers {
-			if j < len(rows[i]) {
-				row[strings.TrimSpace(h)] = rows[i][j]
+			if j < len(row) {
+				rowMap[h] = row[j]
 			}
 		}
-		result = append(result, row)
+		result = append(result, rowMap)
+	}
+
+	if err := rows.Error(); err != nil {
+		return nil, fmt.Errorf("cannot read Excel sheet: %w", err)
 	}
 
 	return result, nil
