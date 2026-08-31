@@ -8,7 +8,54 @@ Severity: **C**ritical / **H**igh / **M**edium.
 
 ---
 
-## EPIC A — Match Decision Layer (C)
+## Status — 2026-08-31
+
+**57 of 59 items closed. The two that remain are open by decision, not by neglect.**
+
+| Round | Epics | Items | State |
+| :-- | :-- | --: | :-- |
+| Round 1 | A–J | 41 | 39 closed; **A5** and **C5** deliberately left — see below |
+| Round 2 | K, L, M, N | 18 | ✅ all closed |
+
+### The two open items, and why they stay open
+
+**A5 — score aggregation.** The AC asks for a configurable weighted mean over enabled metrics,
+with `max` demoted to a tie-break. `scorer.go` still computes `max*0.6 + mean*0.4`, and the code
+carries a measured weight sweep explaining why: token-sort is the only metric that fires on a
+transposed name, so averaging destroys the signal the engine exists for. The sweep records
+0.90 scoring higher still (100% top-1, 47.5% recall) and rejects it as fitting a benchmark with
+weak negatives. **The argument in the code is stronger than the AC's**; changing it would trade a
+measured decision for an unmeasured one.
+
+**C5 — unspaced Thai.** The AC asks that single-token names fall back to trigram-dominant scoring.
+There is no explicit branch, but the behaviour emerges — whitespace tokenization yields one token,
+the token metric contributes nothing, and trigram carries the comparison. A Thai syllable segmenter
+exists and serves romanization. The README documents the limitation. **The AC describes a mechanism
+the system reaches another way**; implementing it literally would add a special case for behaviour
+already present.
+
+### What this round actually found
+
+Four defects were **not** in any backlog entry, and every one of them was found by running the
+system rather than reading it:
+
+- A **live nil-deref crash** — searching results on any batch with an unmatched source panicked
+  (`422b357`), found while scoping I3.
+- **`GET /api/jobs` reported 0 sources and 0 destinations** for every job on PostgreSQL
+  (`c711c44`), found by verifying the composed stack in M5.
+- **Four README scale claims were wrong**, including a dataset size that never reconciled with its
+  own throughput figure, and a scaling exponent of 1.12 published as 1.05 (`7392a03`).
+- **N5's premise was false**: the "arbitrary SQL execution" it described had never been reachable,
+  so the fix was to delete dead code, not to bound a live hole (`82c68ff`).
+
+One pattern recurred four times — **a real implementation with no caller**: EPIC K's connectors,
+H3's `ListJobs`, N1's missing `Close`, and I2's `GetResultByID`. Such code compiles, reviews
+cleanly, and passes every test, because nothing exercises it. Worth a standing check whenever an
+interface gains a method.
+
+---
+
+## EPIC A — Match Decision Layer (C) — ✅ closed except **A5** (open by decision)
 
 The engine ranks well (99.3% top-1 on the built-in dataset) but never *decides*. It emits
 13.1 pairs per source and marks every pair over 0.90 as `AUTO_MATCHED`, so 38.6% of
@@ -23,7 +70,7 @@ labelled non-match sources receive a confident verdict against some unrelated re
 | A5 | Score aggregation rework | Replace `max*0.6 + avg*0.4` with a configurable weighted mean over enabled metrics; `max` retained only as a tie-break signal |
 | A6 | Config surface | `margin_threshold`, `assignment_strategy` (`GREEDY_1_1` \| `TOP_1` \| `ALL_CANDIDATES`), `emit_unmatched` |
 
-## EPIC B — Benchmark & Test Integrity (C)
+## EPIC B — Benchmark & Test Integrity (C) — ✅ complete
 
 The 100%/7,854 rec/s headline is measured over 4,000 labelled pairs while ~49,000 emitted
 pairs go uncounted, and the file lives in `backend/testdata/`, which the Go toolchain
@@ -37,7 +84,7 @@ excludes from `./...` — so it never runs in CI.
 | B4 | API tests | Auth enforcement per role, config merge, scheduler persistence, pagination bounds |
 | B5 | Regression tests | Normalizer boundary cases (Williams/Adams/Vincent/ไทยนาย), date parsing, assignment invariants |
 
-## EPIC C — Normalizer Correctness (H)
+## EPIC C — Normalizer Correctness (H) — ✅ closed except **C5** (partial, by decision)
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -47,7 +94,7 @@ excludes from `./...` — so it never runs in CI.
 | C4 | Rune-safe prefix + honest phonetic key | No byte-slicing of UTF-8; consonant-skeleton key that actually drops vowels in both scripts |
 | C5 | Unspaced Thai | Single-token names fall back to trigram-dominant scoring |
 
-## EPIC D — Security & RBAC (H)
+## EPIC D — Security & RBAC (H) — ✅ complete
 
 Currently: no middleware, every route open, `/api/auth/me` returns ADMIN without a token,
 `password123` authenticates any account, hardcoded signing key, `Access-Control-Allow-Origin: *`.
@@ -60,7 +107,7 @@ Currently: no middleware, every route open, `/api/auth/me` returns ADMIN without
 | D4 | CORS allowlist | Origins from `CORS_ORIGINS`, default same-origin |
 | D5 | Frontend auth | Login screen, token persistence, `Authorization` header on every call, role-gated navigation |
 
-## EPIC E — Scheduler & Webhooks (H)
+## EPIC E — Scheduler & Webhooks (H) — ✅ complete
 
 `NewSchedulerManager()` is constructed inside the handler, so every POST is discarded; no
 cron engine exists and `DispatchWebhook` is never called.
@@ -72,13 +119,13 @@ cron engine exists and `DispatchWebhook` is never called.
 | E3 | Webhook dispatch | Fired on completion and on anomaly; Slack/Teams/generic payload shapes; bounded retry |
 | E4 | Scheduler UI | Settings panel with cron validation and last-run status |
 
-## EPIC F — Config Robustness (H)
+## EPIC F — Config Robustness (H) — ✅ complete
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
 | F1 | Merge-on-write + validation | Partial `PUT /api/config` preserves unspecified fields; thresholds bounded to [0,1]; `review <= auto`; weights must be positive |
 
-## EPIC G — Connectors (H)
+## EPIC G — Connectors (H) — ✅ complete
 
 All connectors are simulated. `TestConnection` returns success for hosts that do not exist,
 `IntrospectSchema` returns hardcoded columns, `FetchRecords` fabricates rows, Excel is never
@@ -92,7 +139,7 @@ opened, and `go.mod` contains no drivers.
 | G4 | CSV + Excel | Real file streaming; `.xlsx` parsed via `excelize` |
 | G5 | Honest failure | A bad host fails; no fabricated rows anywhere |
 
-## EPIC H — Persistence (M) — spec EPIC 2, never started
+## EPIC H — Persistence (M) — ✅ complete (was: spec EPIC 2, never started)
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -100,7 +147,7 @@ opened, and `go.mod` contains no drivers.
 | H2 | Repository abstraction | In-memory and Postgres implementations behind one interface; selected by `DATABASE_URL` |
 | H3 | Job history API | `GET /api/jobs` lists historical runs with counters and duration |
 
-## EPIC I — Scale & Performance (M)
+## EPIC I — Scale & Performance (M) — ✅ complete
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -108,7 +155,7 @@ opened, and `go.mod` contains no drivers.
 | I2 | O(1) review actions | Results indexed by ID; no full-batch scan per click |
 | I3 | Stop embedding record copies | Results hold IDs; records hydrated on read |
 
-## EPIC J — Deployment & Docs (M)
+## EPIC J — Deployment & Docs (M) — ✅ complete
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -121,7 +168,8 @@ opened, and `go.mod` contains no drivers.
 
 ## Round 1 audit (A–J), 2026-08-31
 
-Verified against the code, not the table. **36 of 40 items are genuinely closed.** Four are not,
+Per-item verdicts. The tables above carry the original ACs as written; this section records what
+the code actually does. Verified against the code, not the table. **36 of 40 items are genuinely closed.** Four are not,
 and two of those are the "real implementation with no caller" shape this project keeps hitting.
 
 | Item | Verdict | Evidence |
