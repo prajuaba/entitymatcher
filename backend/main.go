@@ -162,6 +162,14 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
+	// Connector ingest (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/connector/ingest",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleConnectorIngest),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
 	// Dictionary: GET for any authenticated, POST for ADMIN,ENGINEER
 	mux.HandleFunc("/api/dictionary",
 		corsHandler(chainMiddleware(

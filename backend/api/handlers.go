@@ -599,6 +599,54 @@ const MaxUploadBytes = 50 << 20 // 50 MiB
 // ceiling inside the CSV/Excel connectors' FetchRecords.
 const MaxIngestRecords = 50000
 
+// IngestPageSize is how many rows each FetchRecords call requests. Ingestion
+// pages rather than asking for the whole table at once so a large source does
+// not have to materialise in one driver round trip.
+const IngestPageSize = 5000
+
+// fetchAllRecords pages a connector to exhaustion, stopping at maxRecords.
+// The bool reports whether rows remained beyond the cap: it is determined by
+// asking for one more row, not by guessing from a full final page, so a source
+// holding exactly maxRecords rows is not falsely reported as truncated.
+//
+// Paging is only meaningful over a stable order; the database connectors
+// resolve a deterministic ORDER BY before fetching, which is what makes reading
+// to exhaustion safe here.
+func fetchAllRecords(ctx context.Context, conn matcher.DataConnector, maxRecords int) ([]map[string]interface{}, bool, error) {
+	rows := make([]map[string]interface{}, 0)
+	offset := 0
+
+	for len(rows) < maxRecords {
+		pageSize := IngestPageSize
+		if maxRecords-len(rows) < pageSize {
+			pageSize = maxRecords - len(rows)
+		}
+		page, err := conn.FetchRecords(ctx, pageSize, offset)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		rows = append(rows, page...)
+		offset += len(page)
+		if len(page) < pageSize {
+			break
+		}
+	}
+
+	truncated := false
+	if len(rows) >= maxRecords {
+		extra, err := conn.FetchRecords(ctx, 1, offset)
+		if err != nil {
+			return nil, false, err
+		}
+		truncated = len(extra) > 0
+	}
+
+	return rows, truncated, nil
+}
+
 // saveUploadedFileToTemp validates the extension of an uploaded multipart file, copies its
 // content to a new temp file on disk, and returns the temp file's path. The caller owns the
 // returned path and is responsible for os.Remove'ing it once done.
@@ -713,7 +761,7 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = sourceConn.Close() }()
 
-	sourceRows, err := sourceConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
+	sourceRows, sourceTruncated, err := fetchAllRecords(r.Context(), sourceConn, MaxIngestRecords)
 	if err != nil {
 		http.Error(w, "Failed to read source_file: "+err.Error(), http.StatusBadRequest)
 		return
@@ -757,13 +805,13 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = destConn.Close() }()
 
-	destRows, err := destConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
+	destRows, destTruncated, err := fetchAllRecords(r.Context(), destConn, MaxIngestRecords)
 	if err != nil {
 		http.Error(w, "Failed to read destination_file: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	truncated := len(sourceRows) == MaxIngestRecords || len(destRows) == MaxIngestRecords
+	truncated := sourceTruncated || destTruncated
 
 	sources := buildSourceRecords(sourceRows, batchID, cfg)
 	destinations := buildDestinationRecords(destRows, batchID, cfg)
@@ -782,6 +830,121 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	if truncated {
 		resp["warning"] = fmt.Sprintf("one or more files returned the maximum of %d rows; additional rows may have been truncated. Increase MaxIngestRecords or split the file if this is unexpected.", MaxIngestRecords)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ingestableSourceTypes are the connector types this endpoint will read from.
+// CSV and Excel are excluded on purpose -- see HandleConnectorIngest.
+func validateIngestableType(t matcher.SourceType) error {
+	switch t {
+	case matcher.SourceTypePostgres, matcher.SourceTypeSQLServer, matcher.SourceTypeMongoDB:
+		return nil
+	case matcher.SourceTypeCSV, matcher.SourceTypeExcel:
+		return fmt.Errorf("connector type %s cannot be ingested here; upload the file to /api/upload/file instead", t)
+	default:
+		return fmt.Errorf("unsupported connector type for ingestion: %q", t)
+	}
+}
+
+// HandleConnectorIngest ingests a source and destination dataset from configured
+// database connectors, paging each to exhaustion, and writes them as a batch a
+// match run can then use.
+//
+// File-backed connector types are deliberately refused here. A .csv/.xlsx is
+// ingested through POST /api/upload/file, which takes the bytes from the
+// request; accepting a server-side file_path on this endpoint would let any
+// ADMIN or ENGINEER read an arbitrary file off the server in full. Confining
+// server-side reads to a configured directory is backlog item M1, and this
+// endpoint should accept file paths only once that lands.
+func (s *Server) HandleConnectorIngest(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		BatchID       string                   `json:"batch_id"`
+		ColumnMapping *matcher.ColumnMapping   `json:"column_mapping"`
+		Source        matcher.ConnectionConfig `json:"source"`
+		Destination   matcher.ConnectionConfig `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := validateIngestableType(req.Source.Type); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateIngestableType(req.Destination.Type); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	batchID := req.BatchID
+	if batchID == "" {
+		batchID = fmt.Sprintf("batch-%d", time.Now().UnixNano())
+	}
+
+	cfg := s.store.GetConfig()
+	if req.ColumnMapping != nil {
+		cfg.ColumnMapping = *req.ColumnMapping
+		s.store.UpdateConfig(cfg)
+	}
+
+	sourceConn, err := matcher.NewDataConnector(req.Source)
+	if err != nil {
+		http.Error(w, "Failed to initialize connector for source: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = sourceConn.Close() }()
+
+	sourceRows, sourceTruncated, err := fetchAllRecords(r.Context(), sourceConn, MaxIngestRecords)
+	if err != nil {
+		http.Error(w, "Failed to read source: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	destConn, err := matcher.NewDataConnector(req.Destination)
+	if err != nil {
+		http.Error(w, "Failed to initialize connector for destination: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = destConn.Close() }()
+
+	destRows, destTruncated, err := fetchAllRecords(r.Context(), destConn, MaxIngestRecords)
+	if err != nil {
+		http.Error(w, "Failed to read destination: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sources := buildSourceRecords(sourceRows, batchID, cfg)
+	destinations := buildDestinationRecords(destRows, batchID, cfg)
+
+	s.store.SaveDataset(batchID, sources, destinations)
+	s.schedulerManager.SetLastBatchID(batchID)
+
+	resp := map[string]interface{}{
+		"status":                "success",
+		"batch_id":              batchID,
+		"source_count":          len(sources),
+		"destination_count":     len(destinations),
+		"column_mapping":        cfg.ColumnMapping,
+		"truncated":             sourceTruncated || destTruncated,
+		"source_truncated":      sourceTruncated,
+		"destination_truncated": destTruncated,
+	}
+
+	if sourceTruncated || destTruncated {
+		resp["warning"] = fmt.Sprintf("ingestion stopped at the %d row cap and more rows remain; the batch is incomplete", MaxIngestRecords)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
