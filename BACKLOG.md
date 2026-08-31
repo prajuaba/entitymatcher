@@ -180,14 +180,14 @@ of 30, BILINGUAL_IN_DICTIONARY TP=2/FN=7 of 9, against 100/100 for same-script T
 | M5 | Verify the containerized stack | `DATABASE_URL` is honoured now, but persistence was verified against a host binary and a throwaway container, not through `docker-compose up`. Confirm the composed stack persists across `down`/`up` |
 | M6 | Re-measure scale on target hardware | Throughput, 220k×220k timing and peak heap were left untouched during the metrics correction — they come from the opt-in `SCALE_TEST` harness and are hardware-specific |
 
-## EPIC N — Connector correctness (H) — N1–N4 closed, N5 open
+## EPIC N — Connector correctness (H) — ✅ complete
 
 EPIC K covers the connectors being *unreachable* for ingestion. These are defects in the
 connectors themselves, found by auditing the SQL Server path and comparing it against the
 other two. They matter the moment K1 lands and real rows start flowing through this code.
 
 **Closed 2026-08-31.** N1 `c666245`, N3+N4 `9a73f02`, N2 `446bb70` (PostgreSQL) and
-`273451e` (SQL Server, MongoDB). Every fix is mutation-checked: reverting it fails a test.
+`273451e` (SQL Server, MongoDB), N5 `82c68ff`. Every fix is mutation-checked: reverting it fails a test.
 Two caveats a resuming reader should not have to rediscover —
 
 - **SQL Server is not verified against a server.** No mssql image is available in this
@@ -196,11 +196,15 @@ Two caveats a resuming reader should not have to rediscover —
   PostgreSQL and MongoDB were verified against live instances.
 - **MongoDB was added to N2**, which named only the two SQL connectors. `skip/limit` with
   no sort has the same defect, and fixing two of three would have left it live on the third.
+- **Line numbers in the rows below refer to the pre-fix code** as it stood at `5b2658a`.
+  They are kept as written so the original findings stay legible; they no longer
+  resolve against the current file.
 
 Worth stating plainly: the SQL Server connector is the *least* exposed of the three. It
 parameterises its introspection query, pages with named parameters, and guards its single
-interpolation point with `validateIdentifier` (`connector.go:756`). N5 below is about the
-PostgreSQL connector, not this one.
+interpolation point with `validateIdentifier` (`connector.go:1084`). N5 was about the
+PostgreSQL connector, not this one — and turned out to be dead code rather than an
+exposure; see its row below.
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -208,4 +212,4 @@ PostgreSQL connector, not this one.
 | ~~N2~~ ✅ | Deterministic paging in connectors | SQL Server pages with `ORDER BY (SELECT NULL)` (`connector.go:352`), which satisfies the `OFFSET/FETCH` syntax but guarantees no order; the PostgreSQL connector has no `ORDER BY` at all (`:227`). Both can therefore duplicate or drop rows across pages. Same defect class as `0fe270d` — order by a stable key (primary key, or the introspected first column) before paging. Blocks K2, which pages to exhaustion. **Shipped** with a stronger fallback than this AC proposed: explicit `extra_params.order_by` → primary key (in key order) → every btree-orderable column → hard error. Ordering by "the introspected first column" was rejected — a non-unique first column reintroduces the very nondeterminism this removes |
 | ~~N3~~ ✅ | SQL Server schema-qualified tables | `validateIdentifier` rejects `.`, so `dbo.Customers` and `sales.Orders` are refused and only the login's default schema is reachable — in SQL Server, `dbo.`-qualification is the norm. The PostgreSQL connector already splits and validates both halves (`:205-217`); give SQL Server the same treatment |
 | ~~N4~~ ✅ | SQL Server introspection must filter by schema | The query filters `WHERE TABLE_NAME = @TableName` with no `TABLE_SCHEMA` predicate (`:309`). Two schemas holding a same-named table return both column sets, merged and interleaved by `ORDINAL_POSITION` — wrong, and silent. Filter by schema once N3 supplies one |
-| **N5** | Bound the PostgreSQL raw-SQL passthrough | When `TableOrQuery` begins with `SELECT`, the PostgreSQL connector concatenates it verbatim (`:146`, `:222`), so any ADMIN/ENGINEER can execute arbitrary SQL as the configured database user. That may be the intent of a query datasource, but it is currently undocumented and unbounded. Decide deliberately: document and keep it read-only (enforce a read-only session/role), or drop it. SQL Server and MongoDB have no equivalent path |
+| ~~N5~~ ✅ | Bound the PostgreSQL raw-SQL passthrough | **The premise of this entry was wrong.** It recorded a live hole — arbitrary SQL as the configured DB user. In both `IntrospectSchema` and `FetchRecords`, `validateIdentifier` runs *before* the `SELECT` branch, and its `^[A-Za-z_][A-Za-z0-9_]*$` rejects any query on its spaces, so the branch had never executed. Proven by running the passthrough tests against the committed code: all three failed with `invalid identifier: SELECT ...`. Dead code, not an exposure. Removed in `82c68ff` — free, since nothing can depend on a path that never ran; making it work would have *added* surface instead. A query datasource is now refused explicitly, before connecting |

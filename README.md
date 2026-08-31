@@ -208,7 +208,8 @@ otherwise the table's primary key, otherwise every orderable column. MongoDB sor
 by default. A table with no primary key and no orderable column cannot be paged safely, and
 the connector says so instead of returning pages that quietly duplicate and drop rows — set
 `extra_params.order_by` to resolve it. SQL Server tables may be schema-qualified
-(`dbo.Customers`); an unqualified name is read as `dbo`.
+(`dbo.Customers`); an unqualified name is read as `dbo`. `table_or_query` must name a
+table — a raw `SELECT` is refused, so no connector executes operator-supplied SQL.
 
 **Calibration** (ADMIN) — `POST /api/calibration/fit`, `GET /api/calibration/status`
 
