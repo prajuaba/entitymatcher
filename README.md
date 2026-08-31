@@ -51,19 +51,27 @@ pair space, fixed seed). Scale figures are from the opt-in harness
 | Verified scale | 220,000 × 220,000 per side in 28.3s (20 cores), 2.5 GiB peak heap |
 | Scaling | time ~ O(N^1.05) over 22k → 220k |
 | Decision precision | 100.00% |
-| Decision recall (auto-match) | 59.0% |
-| F1 | 74.2% |
+| Decision recall (auto-match) | 59.2% |
+| F1 | 74.4% |
 | Top-1 ranking accuracy | 98.84% |
 | Candidate rows per source | 2.76 |
 | Max destinations auto-matched per source | 1 |
 | Max sources claiming one destination | 1 |
 
 **Read these two numbers together.** Top-1 ranking accuracy (98.84%) is how often the correct
-partner is ranked first — that is the quality of the *scorer*. Recall (59.0%) is how often the
+partner is ranked first — that is the quality of the *scorer*. Recall (59.2%) is how often the
 engine is confident enough to decide *without a human* — that is the calibration of the
 *thresholds*. The gap is deliberate: the remainder goes to the review queue rather than being
 auto-matched on thin evidence. Lower `margin_threshold` or `auto_match_threshold` to trade
 precision for recall.
+
+**Cross-script pairs use a lower auto bar.** RTGS romanization and the English spelling of the
+same Thai name never align perfectly, so a correct cross-script pair scores systematically lower
+than a correct same-script one. `cross_script_auto_threshold` (default **0.84**, against 0.90 for
+same-script) is applied to pairs where exactly one side is Thai. Measured on the built-in
+benchmark: cross-script auto-matches rise from 5 to 13 with **no** cross-script false positives
+and no same-script effect — precision stays 100.00%. Set it to 0 to disable the distinction and
+fall back to `auto_match_threshold`.
 
 The benchmark scores **decisions, not pairs**, and the negative set includes hard cases
 (same-surname/different-person, same-corporate-prefix/different-entity, generic-token overlap,
@@ -232,7 +240,7 @@ well-calibrated for the review band and extrapolating outside it.
 - **Thai word segmentation.** Tokenization is whitespace-based. Thai is frequently written without
   inter-word spaces, so unspaced company names lean on the trigram metric rather than token
   comparison. A dictionary-based segmenter would improve this.
-- **Recall is threshold-bound.** 59.0% of true pairs are auto-matched at the default thresholds;
+- **Recall is threshold-bound.** 59.2% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
 - **Peak heap is ~2 GiB at 220k × 220k**, and `docker-compose.yml` sets no memory limit. That is
   2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the

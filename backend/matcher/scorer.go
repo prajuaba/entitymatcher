@@ -12,14 +12,14 @@ type MatchWeights struct {
 }
 
 type AlgorithmToggles struct {
-	UseJaroWinkler     bool `json:"use_jaro_winkler"`
-	UseLevenshtein     bool `json:"use_levenshtein"`
-	UseTokenSort       bool `json:"use_token_sort"`
-	UsePhonetic        bool `json:"use_phonetic"`
-	UseTrigram         bool `json:"use_trigram"`
-	UseThaiPhonetic    bool `json:"use_thai_phonetic"`
-	UseCorpusIDF       bool `json:"use_corpus_idf"`
-	UseRomanizedMatch  bool `json:"use_romanized_match"`
+	UseJaroWinkler    bool `json:"use_jaro_winkler"`
+	UseLevenshtein    bool `json:"use_levenshtein"`
+	UseTokenSort      bool `json:"use_token_sort"`
+	UsePhonetic       bool `json:"use_phonetic"`
+	UseTrigram        bool `json:"use_trigram"`
+	UseThaiPhonetic   bool `json:"use_thai_phonetic"`
+	UseCorpusIDF      bool `json:"use_corpus_idf"`
+	UseRomanizedMatch bool `json:"use_romanized_match"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -354,15 +354,18 @@ func CheckNumberMismatch(srcName, destName CleanName) bool {
 
 // ScoreResult details metrics generated for candidate pair.
 type ScoreResult struct {
-	TotalScore     float64  `json:"total_score"`
-	NameScore      float64  `json:"name_score"`
-	DateScore      float64  `json:"date_score"`
-	JWScore        float64  `json:"jw_score"`
-	LevScore       float64  `json:"lev_score"`
-	TokenScore     float64  `json:"token_score"`
-	TrigramScore   float64  `json:"trigram_score"`
-	RomanizedScore float64  `json:"romanized_score"`
-	MatchReasons   []string `json:"match_reasons"`
+	TotalScore     float64 `json:"total_score"`
+	NameScore      float64 `json:"name_score"`
+	DateScore      float64 `json:"date_score"`
+	JWScore        float64 `json:"jw_score"`
+	LevScore       float64 `json:"lev_score"`
+	TokenScore     float64 `json:"token_score"`
+	TrigramScore   float64 `json:"trigram_score"`
+	RomanizedScore float64 `json:"romanized_score"`
+	// CrossScript records that the pair spans scripts (one side Thai, one side Latin);
+	// the decision layer uses it to pick the auto-match threshold.
+	CrossScript  bool     `json:"cross_script"`
+	MatchReasons []string `json:"match_reasons"`
 }
 
 // CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
@@ -565,6 +568,7 @@ func CalculateCompositeScoreWithCorpus(
 		TokenScore:     math.Round(tokenScore*10000) / 10000,
 		TrigramScore:   math.Round(trigramScore*10000) / 10000,
 		RomanizedScore: math.Round(romanizedScore*10000) / 10000,
+		CrossScript:    crossScriptGate,
 		MatchReasons:   reasons,
 	}
 }

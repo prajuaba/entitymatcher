@@ -2,7 +2,7 @@
 //
 // This file is a PIPELINE-LEVEL MEASUREMENT HARNESS only. It changes no production
 // behaviour: no engine is modified, no scoring logic is altered, no assignment pass
-// is changed. It runs the existing matcher.MatchEngine at different AutoMatchThreshold
+// is changed. It runs the existing matcher.MatchEngine with different CrossScriptAutoThreshold
 // values and reads back the resulting MatchStatus field to measure precision.
 //
 // It complements crossscript_threshold_test.go (TestCrossScriptAutoThresholdSweep),
@@ -46,7 +46,7 @@ func TestCrossScriptPipelineThresholdSweep(t *testing.T) {
 	// 3. Threshold sweep values.
 	thresholds := []float64{0.90, 0.88, 0.86, 0.84, 0.82, 0.80, 0.78, 0.75}
 
-	// 4. Per-threshold result struct and baseline capture variables.
+	// 4. Per-threshold result struct and baseline capture variable.
 	type pipelineRow struct {
 		threshold        float64
 		crossTP          int
@@ -57,16 +57,13 @@ func TestCrossScriptPipelineThresholdSweep(t *testing.T) {
 	}
 	var rows []pipelineRow
 
-	baselineSameTP := 0
-	baselineSameFP := 0
-	baselineOverallPrecision := 0.0
-
 	// 5. Threshold loop.
 	for _, threshold := range thresholds {
 		cfg := matcher.DefaultConfig()
 		cfg.WorkerCount = 8
 		cfg.MaxCandidatesPerSrc = 50
-		cfg.AutoMatchThreshold = threshold
+		cfg.AutoMatchThreshold = 0.90 // pinned at shipped default for same-script pairs
+		cfg.CrossScriptAutoThreshold = threshold
 
 		engine := matcher.NewMatchEngine(cfg)
 
@@ -122,10 +119,6 @@ func TestCrossScriptPipelineThresholdSweep(t *testing.T) {
 
 		// 5h. At the 0.90 baseline, save counters and assert invariants.
 		if threshold == 0.90 {
-			baselineSameTP = sameTP
-			baselineSameFP = sameFP
-			baselineOverallPrecision = overallPrecision
-
 			require.Equal(t, 0, crossFP,
 				"at threshold 0.90 cross-script auto-matches must have zero false positives (pins the pipeline-level precision guarantee)")
 			require.Greater(t, crossTP, 0,
@@ -135,7 +128,24 @@ func TestCrossScriptPipelineThresholdSweep(t *testing.T) {
 		}
 	}
 
-	// 6. Table 1: raw per-threshold pipeline counts.
+	// 6. Verify crossTP varies across the sweep (catches bug where swept threshold has no effect).
+	var allCrossTPEqual = true
+	for _, r := range rows {
+		if r.crossTP != rows[0].crossTP {
+			allCrossTPEqual = false
+			break
+		}
+	}
+	require.False(t, allCrossTPEqual,
+		"crossTP is constant across every threshold in the sweep — the harness is not actually measuring anything; a flat line means the swept threshold has no effect on the observed outcome (this is exactly the bug this test exists to catch)")
+
+	// 7. Verify sameTP does not vary across the sweep.
+	for _, r := range rows {
+		require.Equal(t, rows[0].sameTP, r.sameTP,
+			"sameTP must be constant across all thresholds — same-script pairs are pinned at threshold 0.90 by configuration so any variation indicates 1:1 assignment pass coupling cross-script and same-script decisions together")
+	}
+
+	// 8. Table 1: raw per-threshold pipeline counts.
 	t.Log("")
 	t.Log("==========================================================")
 	t.Log(" PIPELINE-LEVEL CROSS-SCRIPT THRESHOLD SWEEP (backlog L3)")
@@ -149,35 +159,9 @@ func TestCrossScriptPipelineThresholdSweep(t *testing.T) {
 	}
 	t.Log("==========================================================")
 
-	// 7. Table 2: estimated policy precision (same-script held at 0.90 baseline).
+	// 9. Caveat.
 	t.Log("")
-	t.Log("==========================================================")
-	t.Log(" ESTIMATED POLICY PRECISION (same-script held at threshold=0.90)")
-	t.Log("==========================================================")
-	t.Logf(" baseline: sameTP=%d  sameFP=%d  overallPrecision=%.4f",
-		baselineSameTP, baselineSameFP, baselineOverallPrecision)
-	t.Logf("%-10s | %-8s | %-8s | %-18s | %-16s",
-		"threshold", "crossTP", "crossFP", "estPolicyPrecision", "deltaVsBaseline")
-	t.Log("-----------|----------|----------|------------------|----------------")
-	for _, r := range rows {
-		num := r.crossTP + baselineSameTP
-		den := r.crossTP + r.crossFP + baselineSameTP + baselineSameFP
-		estPolicyPrecision := 0.0
-		if den > 0 {
-			estPolicyPrecision = float64(num) / float64(den)
-		}
-		deltaVsBaseline := estPolicyPrecision - baselineOverallPrecision
-		t.Logf("%-10.2f | %-8d | %-8d | %-18.4f | %+.4f",
-			r.threshold, r.crossTP, r.crossFP, estPolicyPrecision, deltaVsBaseline)
-	}
-	t.Log("==========================================================")
-
-	// 8. Caveat.
-	t.Log("")
-	t.Log("CAVEAT: The estimated policy precision in the table above holds the")
-	t.Log("same-script decisions fixed at their threshold=0.90 values. A residual")
-	t.Log("coupling remains because the 1:1 assignment pass (ResolveAssignments)")
-	t.Log("is global: a same-script source could claim a destination that a")
-	t.Log("cross-script source would otherwise have taken at the lower threshold,")
-	t.Log("or vice versa. The estimate is therefore optimistic to an unknown degree.")
+	t.Log("CAVEAT: Same-script pairs are held at threshold 0.90 by the configuration itself (AutoMatchThreshold is pinned at 0.90 every iteration), not by arithmetic estimation, so sameTP and sameFP should be constant across every row in the sweep.")
+	t.Log("If sameTP/sameFP DO move across the sweep, the cause is the 1:1 assignment pass (ResolveAssignments) being global: a cross-script source can claim a destination that a same-script source would otherwise have taken, and vice versa — and that this coupling is now directly observable in the table rather than assumed/estimated as it was before.")
+	t.Log("The negatives remain 52 synthetic false friends, so this measures the corpus, not production.")
 }

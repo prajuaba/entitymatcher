@@ -158,6 +158,20 @@ func validateAndMergeConfig(existing matcher.Config, update map[string]json.RawM
 		}
 	}
 
+	if raw, exists := update["cross_script_auto_threshold"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid cross_script_auto_threshold: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("cross_script_auto_threshold must be between 0 and 1")
+			}
+			// 0 is explicitly allowed and means "unset, use auto_match_threshold"
+			merged.CrossScriptAutoThreshold = *val
+		}
+	}
+
 	if raw, exists := update["review_threshold"]; exists {
 		val, err := parseFloat(raw)
 		if err != nil {
@@ -289,6 +303,16 @@ func validateAndMergeConfig(existing matcher.Config, update map[string]json.RawM
 	// Validate cross-field constraints
 	if merged.ReviewThreshold > merged.AutoMatchThreshold {
 		return merged, fmt.Errorf("review_threshold must be <= auto_match_threshold")
+	}
+
+	// 0 is explicitly allowed and skips both checks below (means unset, falls back to auto_match_threshold)
+	if merged.CrossScriptAutoThreshold != 0 {
+		if merged.CrossScriptAutoThreshold > merged.AutoMatchThreshold {
+			return merged, fmt.Errorf("cross_script_auto_threshold must be <= auto_match_threshold (it is a lower bar by design)")
+		}
+		if merged.CrossScriptAutoThreshold < merged.ReviewThreshold {
+			return merged, fmt.Errorf("cross_script_auto_threshold must be >= review_threshold (auto-matching below the review bar is incoherent)")
+		}
 	}
 
 	return merged, nil

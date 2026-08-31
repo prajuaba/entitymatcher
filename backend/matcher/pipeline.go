@@ -48,10 +48,12 @@ type MatchResultItem struct {
 	TrigramScore    float64            `json:"trigram_score"`
 	MatchStatus     string             `json:"match_status"` // AUTO_MATCHED, REVIEW_NEEDED, CONFIRMED, REJECTED, NO_MATCH
 	MatchReasons    []string           `json:"match_reasons"`
-	Rank            int                `json:"rank"`          // 1 = best candidate for this source
-	ScoreMargin     float64            `json:"score_margin"`  // best - runner_up, 0 when no runner-up
-	DecisionNote    string             `json:"decision_note"` // why this row got its status
-	CreatedAt       time.Time          `json:"created_at"`
+	Rank            int                `json:"rank"`         // 1 = best candidate for this source
+	ScoreMargin     float64            `json:"score_margin"` // best - runner_up, 0 when no runner-up
+	// CrossScript is deliberately NOT persisted to match_results (JWScore, LevScore, TrigramScore, RomanizedScore are likewise not persisted); it is decision-time only and recomputed on every run.
+	CrossScript  bool      `json:"cross_script"`
+	DecisionNote string    `json:"decision_note"` // why this row got its status
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type Config struct {
@@ -69,6 +71,7 @@ type Config struct {
 	EmitUnmatched            bool             `json:"emit_unmatched"`              // Default: true
 	MaxAlternativesPerSource int              `json:"max_alternatives_per_source"` // Default: 5. Use negative to keep all alternatives.
 	CalibrationEnabled       bool             `json:"calibration_enabled"`         // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
+	CrossScriptAutoThreshold float64          `json:"cross_script_auto_threshold"` // Default: 0.84; 0 means "unset, use AutoMatchThreshold"
 }
 
 func DefaultConfig() Config {
@@ -87,7 +90,27 @@ func DefaultConfig() Config {
 		EmitUnmatched:            true,
 		MaxAlternativesPerSource: 5,
 		CalibrationEnabled:       false,
+		CrossScriptAutoThreshold: 0.84,
 	}
+}
+
+// AutoThresholdFor returns the auto-match threshold to apply to a pair.
+//
+// Cross-script pairs use a lower bar because RTGS romanization and English
+// spelling of the same Thai name never align perfectly, so a correct
+// cross-script pair scores systematically lower than a correct same-script one.
+// Measured on internal/mockdata: at 0.84 cross-script true positives rise from
+// 5 to 13 with no cross-script false positives.
+//
+// A zero CrossScriptAutoThreshold means "unset" and falls back to
+// AutoMatchThreshold. This matters because Config is persisted and deserialized:
+// a config stored before this field existed unmarshals it as 0, and treating 0
+// as a real threshold would auto-match every cross-script pair.
+func (c Config) AutoThresholdFor(crossScript bool) float64 {
+	if crossScript && c.CrossScriptAutoThreshold > 0 {
+		return c.CrossScriptAutoThreshold
+	}
+	return c.AutoMatchThreshold
 }
 
 type BatchProgress struct {
@@ -334,7 +357,7 @@ func (e *MatchEngine) ExecuteJob(
 							canAutoMatch, decisionNote := IsAutoMatchable(
 								decisionScore,
 								decisionRunnerUp,
-								e.Config.AutoMatchThreshold,
+								e.Config.AutoThresholdFor(scoreRes.CrossScript),
 								e.Config.MarginThreshold,
 								e.Config.ExactMatchFloor,
 							)
@@ -373,6 +396,7 @@ func (e *MatchEngine) ExecuteJob(
 							MatchReasons:    scoreRes.MatchReasons,
 							Rank:            rankNum,
 							ScoreMargin:     margin,
+							CrossScript:     scoreRes.CrossScript,
 							DecisionNote:    note,
 							CreatedAt:       time.Now(),
 						})

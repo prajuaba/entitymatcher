@@ -44,7 +44,7 @@ func resolveGreedy1to1(items []MatchResultItem, cfg Config) []MatchResultItem {
 			canAutoMatch, decisionNote := IsAutoMatchable(
 				item.ConfidenceScore,
 				runnerUpScore,
-				cfg.AutoMatchThreshold,
+				cfg.AutoThresholdFor(item.CrossScript),
 				cfg.MarginThreshold,
 				cfg.ExactMatchFloor,
 			)
