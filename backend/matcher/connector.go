@@ -299,7 +299,58 @@ func (c *SQLServerConnector) TestConnection(ctx context.Context) error {
 	return nil
 }
 
+// splitQualifiedName splits an optionally schema-qualified table name into its
+// schema and table halves, validating each. An unqualified name takes
+// defaultSchema. Anything with more than one dot is rejected rather than
+// guessed at.
+func splitQualifiedName(name, defaultSchema string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", "", fmt.Errorf("table name is required")
+	}
+
+	parts := strings.Split(name, ".")
+	var schema, table string
+	switch len(parts) {
+	case 1:
+		schema = defaultSchema
+		table = parts[0]
+	case 2:
+		schema = parts[0]
+		table = parts[1]
+	default:
+		return "", "", fmt.Errorf("invalid qualified name: %s", name)
+	}
+
+	schema = strings.TrimSpace(schema)
+	table = strings.TrimSpace(table)
+
+	if err := validateIdentifier(schema); err != nil {
+		return "", "", err
+	}
+	if err := validateIdentifier(table); err != nil {
+		return "", "", err
+	}
+
+	return schema, table, nil
+}
+
+// sqlServerIntrospectColumnsQuery must filter on both TABLE_SCHEMA and
+// TABLE_NAME: two schemas holding a same-named table would otherwise return
+// both column sets, merged and interleaved by ORDINAL_POSITION.
+const sqlServerIntrospectColumnsQuery = `
+		SELECT COLUMN_NAME, DATA_TYPE
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = @TableSchema AND TABLE_NAME = @TableName
+		ORDER BY ORDINAL_POSITION
+	`
+
 func (c *SQLServerConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	schema, table, err := splitQualifiedName(c.Config.TableOrQuery, "dbo")
+	if err != nil {
+		return nil, err
+	}
+
 	if c.conn == nil {
 		if err := c.TestConnection(ctx); err != nil {
 			return nil, err
@@ -309,18 +360,9 @@ func (c *SQLServerConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef,
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := validateIdentifier(c.Config.TableOrQuery); err != nil {
-		return nil, err
-	}
-
-	query := `
-		SELECT COLUMN_NAME, DATA_TYPE
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_NAME = @TableName
-		ORDER BY ORDINAL_POSITION
-	`
-
-	rows, err := c.conn.QueryContext(ctx, query, sql.Named("TableName", c.Config.TableOrQuery))
+	rows, err := c.conn.QueryContext(ctx, sqlServerIntrospectColumnsQuery,
+		sql.Named("TableSchema", schema),
+		sql.Named("TableName", table))
 	if err != nil {
 		return nil, fmt.Errorf("introspect schema failed: %w", err)
 	}
@@ -338,7 +380,24 @@ func (c *SQLServerConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef,
 	return cols, rows.Err()
 }
 
+// quoteMSSQLIdentifier bracket-quotes an identifier. Brackets, unlike bare
+// names, survive reserved words such as a table literally called Order.
+func quoteMSSQLIdentifier(id string) string {
+	return "[" + strings.ReplaceAll(id, "]", "]]") + "]"
+}
+
+// sqlServerFetchQuery builds the paged read for a schema-qualified table.
+func sqlServerFetchQuery(schema, table string) string {
+	qualified := quoteMSSQLIdentifier(schema) + "." + quoteMSSQLIdentifier(table)
+	return fmt.Sprintf("SELECT * FROM %s ORDER BY (SELECT NULL) OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY", qualified)
+}
+
 func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	schema, table, err := splitQualifiedName(c.Config.TableOrQuery, "dbo")
+	if err != nil {
+		return nil, err
+	}
+
 	if c.conn == nil {
 		if err := c.TestConnection(ctx); err != nil {
 			return nil, err
@@ -353,12 +412,7 @@ func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int
 		offset = 0
 	}
 
-	if err := validateIdentifier(c.Config.TableOrQuery); err != nil {
-		return nil, err
-	}
-
-	table := quoteIdentifier(c.Config.TableOrQuery)
-	query := fmt.Sprintf("SELECT * FROM %s ORDER BY (SELECT NULL) OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY", table)
+	query := sqlServerFetchQuery(schema, table)
 
 	rows, err := c.conn.QueryContext(ctx, query, sql.Named("Offset", offset), sql.Named("Limit", limit))
 	if err != nil {
