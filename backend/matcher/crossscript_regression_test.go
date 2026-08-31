@@ -10,11 +10,21 @@ import (
 // for the canonical pair "Somchai Jaidee" / "สมชาย ใจดี". It verifies that:
 // 1. Thai จ maps correctly to "ch" under RTGS (Royal Thai General System),
 //    not the incorrect "j" that would artificially boost cross-script scores
-// 2. The composite score for this pair remains below 0.70 due to the j/ch gap,
-//    which is a known limitation, not a bug to silently fix by loosening tests
+// 2. The composite score for this pair is now 0.8721, which is ABOVE the review threshold (0.70)
+//    but BELOW the auto threshold (0.90). This reflects the fix to phonetic folds:
+//    j->ch and v->w folds in PhoneticSkeleton now align skeletons from both sides.
+//    Benchmark data from internal/mockdata's TestFullLoopBigDatasetBenchmark:
+//    BILINGUAL_OUT_OF_DICT category: true positives 2->3 (out of 30),
+//    mean correct-score 0.836->0.844, precision held at 1.0000.
+//    NEG_BILINGUAL_FALSE_FRIEND category unchanged (TN=52, FP=0).
+//    However, WrongScored>=Auto for BILINGUAL_OUT_OF_DICT rose from 1 to 2:
+//    one wrong pair now exceeds the auto threshold too, and overall precision
+//    held only due to margin rule and 1:1 assignment demoting that wrong pair.
+//    The category remains dominated by spelling variance (examples: Suchat/Suchart,
+//    Bunmi/Boonmee, Narongse, Seawat, Aswin) which is why recall barely moved (0.5900 -> 0.5902).
 // 3. Both retrieval directions work (Latin->Thai and Thai->Latin)
 // 4. Romanization symmetry is preserved between Thai and Latin forms
-// 5. The phonetic skeleton mechanism that explains the score gap is intact
+// 5. The phonetic skeleton mechanism that now aligns skeletons (both "smchchd") is intact
 
 func TestCrossScriptRegression(t *testing.T) {
 	// Helper to compute cross-script score in isolation
@@ -96,13 +106,14 @@ func TestCrossScriptRegression(t *testing.T) {
 		meetsReview := result.TotalScore >= 0.70
 		meetsAuto := result.TotalScore >= 0.90
 		t.Logf("VERDICT: TotalScore=%.4f -> meets review threshold(0.70)=%v, meets auto threshold(0.90)=%v", result.TotalScore, meetsReview, meetsAuto)
+		t.Logf("NOTE: Pair now scores %.4f (meets review threshold but NOT auto threshold)", result.TotalScore)
 
-		if result.TotalScore < 0.60 {
-			t.Errorf("cross-script scoring has REGRESSED: score dropped below the known-limitation floor of 0.60 (actual=%.4f)", result.TotalScore)
-		} else if result.TotalScore >= 0.70 {
-			t.Errorf("cross-script score %.4f now meets the review threshold — the j/ch romanization gap may have been closed. This is an IMPROVEMENT, not a failure: re-measure the BILINGUAL_OUT_OF_DICT category in internal/mockdata's TestFullLoopBigDatasetBenchmark and update this probe's expected band.", result.TotalScore)
+		if result.TotalScore < 0.85 {
+			t.Errorf("cross-script scoring has REGRESSED: score dropped below the measured floor of 0.8721 (actual=%.4f). The j->ch and/or v->w phonetic folds may have been weakened or removed.", result.TotalScore)
+		} else if result.TotalScore >= 0.90 {
+			t.Errorf("cross-script score %.4f now meets the auto threshold — this is an IMPROVEMENT, not a failure: re-measure the BILINGUAL_OUT_OF_DICT category in internal/mockdata's TestFullLoopBigDatasetBenchmark and update this probe's expected band.", result.TotalScore)
 		} else {
-			t.Logf("cross-script score %.4f is within expected range [0.60, 0.70) — this is the expected state", result.TotalScore)
+			t.Logf("cross-script score %.4f is within expected range [0.85, 0.90) — this reflects the fix to phonetic folds (j->ch, v->w)", result.TotalScore)
 		}
 	})
 
@@ -208,18 +219,28 @@ func TestCrossScriptRegression(t *testing.T) {
 		srcSkeleton := PhoneticSkeleton(Normalize("Somchai Jaidee").Romanized)
 		destSkeleton := PhoneticSkeleton(Normalize("สมชาย ใจดี").Romanized)
 
-		if srcSkeleton == destSkeleton {
-			t.Errorf("skeletons should differ, but both are %q", srcSkeleton)
+		if srcSkeleton != destSkeleton {
+			t.Errorf("skeletons should align, but got src=%q and dest=%q", srcSkeleton, destSkeleton)
 		}
-		if !strings.Contains(srcSkeleton, "j") {
-			t.Errorf("source skeleton %q should contain 'j'", srcSkeleton)
+		if srcSkeleton != "smchchd" {
+			t.Errorf("skeleton value changed from expected 'smchchd' to %q", srcSkeleton)
 		}
-		if strings.Contains(destSkeleton, "j") {
-			t.Errorf("destination skeleton %q should not contain 'j'", destSkeleton)
+		if strings.Contains(srcSkeleton, "j") {
+			t.Errorf("source skeleton %q contains 'j' but should be folded to 'ch' by phoneticEquivalents (rtgs.go)", srcSkeleton)
+		}
+
+		romanized := RomanizeThai("ใจดี")
+		if !strings.Contains(romanized, "ch") {
+			t.Errorf("RomanizeThai('ใจดี') should still contain 'ch' under correct RTGS, not 'j'. Actual romanization: %q", romanized)
+		}
+		if strings.Contains(romanized, "j") {
+			t.Errorf("RomanizeThai('ใจดี') maps to 'j' but should be 'ch' under correct RTGS (Royal Thai General System). Actual romanization: %q", romanized)
 		}
 
 		t.Logf("Source skeleton: %q, Destination skeleton: %q", srcSkeleton, destSkeleton)
-		t.Logf("This documents the mechanism: Latin-derived skeleton retains 'j' from 'Jaidee', while Thai-derived has 'ch' from correct RTGS romanization of จ")
+		t.Logf("This documents the mechanism: skeletons now align perfectly ('smchchd' == 'smchchd') due to j->ch and v->w phonetic folds")
+		// The residual gap comes from vowel-bearing per-part comparison in CrossScriptPartsScore,
+		// not the skeleton mechanism. RomanizedScore is 0.9095, which blends down into 0.8721 composite.
 	})
 
 	t.Run("IndexContents", func(t *testing.T) {

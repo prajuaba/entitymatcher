@@ -294,6 +294,11 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 // can be trusted, so MIN (not an average that a single strong part could inflate) is the honest
 // aggregation here.
 //
+// Each part is folded through PhoneticComparisonForm before comparison, so an English "j" spelling
+// aligns with the RTGS "ch" one. The romanization itself (RomanizeThai / RomanizeThaiTokens
+// output) is unchanged by this -- the fold only affects the comparison, never what gets stored or
+// displayed as romanization.
+//
 // Falls back to comparing the joined whole strings if token counts don't align (can't pair parts
 // 1:1), which happens e.g. when a Thai single-token corporate name matches a two-word Latin name.
 func CrossScriptPartsScore(srcTokens, destTokens []string) float64 {
@@ -305,12 +310,15 @@ func CrossScriptPartsScore(srcTokens, destTokens []string) float64 {
 	romDest := RomanizeThaiTokens(destTokens)
 
 	if len(romSrc) != len(romDest) {
-		return JaroWinkler(strings.Join(romSrc, " "), strings.Join(romDest, " "))
+		return JaroWinkler(
+			PhoneticComparisonForm(strings.Join(romSrc, " ")),
+			PhoneticComparisonForm(strings.Join(romDest, " ")),
+		)
 	}
 
 	minScore := 1.0
 	for i := range romSrc {
-		s := JaroWinkler(romSrc[i], romDest[i])
+		s := JaroWinkler(PhoneticComparisonForm(romSrc[i]), PhoneticComparisonForm(romDest[i]))
 		if s < minScore {
 			minScore = s
 		}
