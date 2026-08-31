@@ -115,26 +115,26 @@ export function App() {
         </nav>
 
         {/* User Profile & Logout */}
-        <div className="flex items-center gap-3 ml-auto">
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/80 rounded-lg border border-slate-800">
-            <div>
-              <p className="text-xs font-semibold text-slate-100">{user.name}</p>
-              <p className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
-                user.role === 'ADMIN' ? 'bg-rose-950/80 text-rose-300 border-rose-700/50' :
-                user.role === 'ENGINEER' ? 'bg-sky-950/80 text-sky-300 border-sky-700/50' :
-                user.role === 'REVIEWER' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50' :
-                'bg-amber-950/80 text-amber-300 border-amber-700/50'
-              }`}>
-                {user.role}
-              </p>
-            </div>
+        <div className="flex items-center gap-2.5 bg-slate-950/80 p-1.5 pl-3 rounded-xl border border-slate-800 shrink-0 ml-auto">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-slate-100">{user.name}</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+              user.role === 'ADMIN' ? 'bg-rose-950/80 text-rose-300 border-rose-700/50' :
+              user.role === 'ENGINEER' ? 'bg-sky-950/80 text-sky-300 border-sky-700/50' :
+              user.role === 'REVIEWER' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50' :
+              'bg-amber-950/80 text-amber-300 border-amber-700/50'
+            }`}>
+              {user.role}
+            </span>
           </div>
+          <div className="w-px h-4 bg-slate-800" />
           <button
             onClick={logout}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
+            title="Logout"
+            className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-rose-400 rounded-lg text-xs font-medium flex items-center gap-1 transition"
           >
             <LogOut className="w-3.5 h-3.5" />
-            Logout
+            <span className="hidden sm:inline text-[11px]">Logout</span>
           </button>
         </div>
       </header>
