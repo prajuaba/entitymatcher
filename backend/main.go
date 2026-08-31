@@ -114,6 +114,10 @@ func main() {
 	mux.HandleFunc("/api/match/results",
 		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleGetResults))).ServeHTTP)
 
+	// Job history (authenticated)
+	mux.HandleFunc("/api/jobs",
+		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleListJobs))).ServeHTTP)
+
 	// Match action (ADMIN, REVIEWER)
 	mux.HandleFunc("/api/match/action",
 		corsHandler(chainMiddleware(

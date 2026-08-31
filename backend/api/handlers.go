@@ -1099,6 +1099,58 @@ func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DefaultJobsPageSize is the page size used when the caller does not ask for one.
+const DefaultJobsPageSize = 20
+
+// MaxJobsPageSize bounds what a caller may request, so a single request cannot
+// ask the store for an unbounded scan.
+const MaxJobsPageSize = 200
+
+// HandleListJobs returns historical match runs, most recent first, with their
+// counters and duration.
+func (s *Server) HandleListJobs(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	if limit <= 0 {
+		limit = DefaultJobsPageSize
+	} else if limit > MaxJobsPageSize {
+		limit = MaxJobsPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	jobs, err := s.store.ListJobs(limit, offset)
+	if err != nil {
+		http.Error(w, "Failed to list jobs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Encode an empty list as [], never null: a nil slice marshals to null, which
+	// breaks any caller doing .map() on the result.
+	if jobs == nil {
+		jobs = []store.JobSummary{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobs":   jobs,
+		"count":  len(jobs),
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
 type ActionPayload struct {
 	BatchID        string `json:"batch_id"`
 	MatchID        string `json:"match_id"`
