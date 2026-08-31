@@ -128,11 +128,20 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 	}()
 
 	// Ensure batch exists in match_jobs (create minimal entry if needed for FK constraint).
+	//
+	// SaveDataset is the only place that knows both total_sources and total_destinations at
+	// once, so it is the authoritative writer for those two columns. UpdateProgress's
+	// matcher.BatchProgress carries TotalSources but has no TotalDestinations field at all, so
+	// it must not (and structurally cannot) own these columns -- see the comment on its Exec
+	// call below. ON CONFLICT DO UPDATE (rather than DO NOTHING) ensures re-uploading a batch
+	// refreshes the counts instead of leaving the first upload's stale values in place.
 	_, err = tx.Exec(ctx,
-		`INSERT INTO match_jobs (batch_id, status, started_at)
-		 VALUES ($1, 'IDLE', CURRENT_TIMESTAMP)
-		 ON CONFLICT (batch_id) DO NOTHING`,
-		batchID)
+		`INSERT INTO match_jobs (batch_id, status, started_at, total_sources, total_destinations)
+		 VALUES ($1, 'IDLE', CURRENT_TIMESTAMP, $2, $3)
+		 ON CONFLICT (batch_id) DO UPDATE SET
+		    total_sources = EXCLUDED.total_sources,
+		    total_destinations = EXCLUDED.total_destinations`,
+		batchID, len(sources), len(dests))
 	if err != nil {
 		return fmt.Errorf("save dataset for batch %q: create match_jobs row: %w", batchID, err)
 	}
@@ -648,6 +657,11 @@ func (s *PostgresStore) UpdateProgress(p matcher.BatchProgress) {
 
 	configJSON, _ := json.Marshal(p)
 
+	// total_sources and total_destinations are owned by SaveDataset and are deliberately NOT
+	// included in this DO UPDATE SET, because a progress update can legitimately carry a zero
+	// TotalSources value (an early/IDLE update), which would incorrectly zero out a correct
+	// value already written by SaveDataset. total_destinations isn't even present on
+	// matcher.BatchProgress, so it structurally can't be written from here.
 	_, _ = s.pool.Exec(ctx,
 		`INSERT INTO match_jobs (batch_id, status, total_sources, auto_matched, review_needed,
 		                        no_match_count, total_candidate_pairs, elapsed_ms, started_at,
