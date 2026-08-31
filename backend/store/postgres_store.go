@@ -378,12 +378,47 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 		return tx.Commit(ctx)
 	}
 
+	// The snapshot is deliberately point-in-time evidence of what the reviewer saw, and it
+	// also backs server-side search (GetResultsPage greps source_snapshot/destination_snapshot),
+	// so it is written here at save time from the batch's dataset rather than dropped: the
+	// pipeline no longer embeds Source/Destination on each result item, so result.Source and
+	// result.Destination are nil and cannot be marshaled directly anymore.
+	sources, dests, _ := s.GetDataset(batchID)
+
+	sourceMap := make(map[string]matcher.SourceRecord)
+	for _, src := range sources {
+		sourceMap[src.ID] = src
+	}
+
+	destMap := make(map[string]matcher.DestinationRecord)
+	for _, dst := range dests {
+		destMap[dst.ID] = dst
+	}
+
 	// DEFECT 4: Use CopyFrom for bulk inserts and verify row count
 	rows := make([][]interface{}, len(results))
 	for i, result := range results {
 		matchReasons, _ := json.Marshal(result.MatchReasons)
-		srcSnapshot, _ := json.Marshal(result.Source)
-		dstSnapshot, _ := json.Marshal(result.Destination)
+
+		var srcSnapshot string
+		if srcRec, exists := sourceMap[result.SourceID]; exists {
+			srcBytes, _ := json.Marshal(srcRec)
+			srcSnapshot = string(srcBytes)
+		} else {
+			srcSnapshot = "null"
+		}
+
+		var dstSnapshot string
+		if result.DestinationID != "" {
+			if dstRec, exists := destMap[result.DestinationID]; exists {
+				dstBytes, _ := json.Marshal(dstRec)
+				dstSnapshot = string(dstBytes)
+			} else {
+				dstSnapshot = "null"
+			}
+		} else {
+			dstSnapshot = "null"
+		}
 
 		rows[i] = []interface{}{
 			result.BatchID,
@@ -398,8 +433,8 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 			result.ScoreMargin,
 			result.DecisionNote,
 			string(matchReasons),
-			string(srcSnapshot),
-			string(dstSnapshot),
+			srcSnapshot,
+			dstSnapshot,
 			result.CreatedAt,
 		}
 	}

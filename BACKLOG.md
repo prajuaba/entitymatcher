@@ -138,12 +138,13 @@ and two of those are the "real implementation with no caller" shape this project
 | H1–H3 | ✅ | `applySchema` on boot; `selectStore`; `/api/jobs` routed |
 | I1 | ✅ | `maxPostingRatio` + `skipTrigrams` |
 | ~~I2~~ ✅ | **Closed.** `GetResultByID` was implemented in both stores and called from nowhere while `HandleMatchAction` scanned the whole batch for one id — a 573k-row scan per review click at measured scale. Now an indexed lookup; not-found behaviour preserved exactly (no early 404, which would have changed the response for a case that returns 400 today). The test counts store calls rather than checking the action succeeded, because the outcome is identical either way: `getResultsCalls == 0` is the assertion, and it fails if the scan returns |
-| **I3** | ❌ **open** | `pipeline.go:384/386/422` embed `&srcCopy` / `&candCopy` in every result row. Measured at 1,253 bytes/row by the scale harness; the README documents it as a known cost |
+| ~~I3~~ ✅ | **Closed.** The pipeline embedded a record copy per row (~2.5 rows per source, so each record copied ~2.5×). Rows now carry IDs only and the stores attach records at save time as **pointers into the dataset they already hold** — 8 bytes a row instead of a struct copy — so every read path, the Postgres snapshot columns and the server-side search over them are untouched. Measured: peak heap **2,427.90 → 1,495.99 MiB** (−932 MiB, −38%), bytes/row 1,253 → 478, throughput +1.4%. Snapshots are deliberately kept: they are point-in-time evidence of what the reviewer saw, and they back the Postgres `LIKE` search, so they are now written at save time from the dataset instead of from the row |
 | J1–J3 | ✅ | `golang:1.25-alpine` matches `go 1.25.0`; nginx `/api` proxy verified live during M5; compose and README both 8085/3000 |
 | J4 | ✅ | truth pass ongoing and current — the scale figures were corrected in M6, and the one claim that could not be re-verified (~9% cross-script cost) is now explicitly marked a lower bound |
 
-**Still open after this audit:** A5 (by decision, rationale recorded in `scorer.go`), C5 (partial),
-I3 (result rows embed full record copies, 1,253 bytes/row measured).
+**Still open after this audit:** A5 (by decision, rationale recorded in `scorer.go`) and C5 (partial).
+I2 and I3 were closed on 2026-08-31; a live nil-deref crash in the results search, found while
+scoping I3, was fixed in `422b357`.
 
 ---
 

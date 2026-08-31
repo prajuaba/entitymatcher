@@ -374,16 +374,15 @@ func (e *MatchEngine) ExecuteJob(
 							note = fmt.Sprintf("Alternative candidate (rank %d) for review", rankNum)
 						}
 
-						srcCopy := task.source
-						candCopy := cand
+						// Result rows carry IDs only; the stores attach the records at save time from the
+						// dataset they already hold, because embedding a copy per row cost 933 MiB of peak
+						// heap at benchmark scale.
 
 						matchedItems = append(matchedItems, MatchResultItem{
 							ID:              batchID + "-" + task.source.ID + "-" + cand.ID,
 							BatchID:         batchID,
 							SourceID:        task.source.ID,
-							Source:          &srcCopy,
 							DestinationID:   cand.ID,
-							Destination:     &candCopy,
 							ConfidenceScore: scoreRes.TotalScore,
 							CalibratedScore: calibratedScore,
 							NameScore:       scoreRes.NameScore,
@@ -413,13 +412,10 @@ func (e *MatchEngine) ExecuteJob(
 							note = "All blocking candidates scored below review threshold"
 						}
 
-						srcCopy := task.source
-
 						matchedItems = append(matchedItems, MatchResultItem{
 							ID:            batchID + "-" + task.source.ID + "-NO_MATCH",
 							BatchID:       batchID,
 							SourceID:      task.source.ID,
-							Source:        &srcCopy,
 							DestinationID: "",
 							Destination:   nil,
 							MatchStatus:   "NO_MATCH",

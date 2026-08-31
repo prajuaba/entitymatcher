@@ -82,6 +82,41 @@ func (s *Store) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.De
 func (s *Store) SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Hydrate Source/Destination with pointers into this store's own dataset slices
+	// (s.sources[batchID], s.destinations[batchID]) rather than copies. The pipeline no
+	// longer embeds per-row struct copies (that cost 933 MiB of peak heap at benchmark
+	// scale), so the store attaches the records here, and hydration costs a pointer per
+	// row instead of a struct copy.
+
+	// Build lookup maps once
+	sourceMap := make(map[string]*matcher.SourceRecord, len(s.sources[batchID]))
+	for i := range s.sources[batchID] {
+		sourceMap[s.sources[batchID][i].ID] = &s.sources[batchID][i]
+	}
+
+	destMap := make(map[string]*matcher.DestinationRecord, len(s.destinations[batchID]))
+	for i := range s.destinations[batchID] {
+		destMap[s.destinations[batchID][i].ID] = &s.destinations[batchID][i]
+	}
+
+	// Hydrate results
+	for i := range results {
+		item := results[i]
+
+		if src, exists := sourceMap[item.SourceID]; exists {
+			item.Source = src
+		}
+
+		if item.DestinationID != "" {
+			if dst, exists := destMap[item.DestinationID]; exists {
+				item.Destination = dst
+			}
+		}
+
+		results[i] = item
+	}
+
 	s.results[batchID] = results
 
 	// Rebuild resultIndex from scratch. Reusing the previous map would leave stale

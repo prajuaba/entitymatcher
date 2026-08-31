@@ -49,7 +49,7 @@ re-measured 2026-08-31 on 20 cores / 121 GiB:
 | Metric | Value |
 | :-- | :-- |
 | Throughput | ~8,450 sources/sec at 230k × 230k |
-| Verified scale | 230,120 × 230,120 per side in 27.2s (20 cores), 2.40 GiB peak heap |
+| Verified scale | 230,120 × 230,120 per side in 26.8s (20 cores), 1.46 GiB peak heap |
 | Scaling | time ~ O(N^1.12) over 23k → 230k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 59.2% |
@@ -251,11 +251,12 @@ false — a fitted model changes no scoring until that is turned on.
   comparison. A dictionary-based segmenter would improve this.
 - **Recall is threshold-bound.** 59.2% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
-- **Peak heap is ~2.4 GiB at 230k × 230k**, and `docker-compose.yml` sets no memory limit. That is
-  2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the
-  corpus. Results accumulate in memory during a run and every row embeds full copies of both
-  records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
-  runtime, since GC CPU fraction falls with scale.
+- **Peak heap is ~1.46 GiB at 230k × 230k**, and `docker-compose.yml` sets no memory limit. That is
+  1% of a 121 GiB host but would still OOM a typical 2 GiB container, so size the container for the
+  corpus. Results accumulate in memory during a run, but they no longer embed record copies: rows
+  carry IDs, and the stores attach the records at save time as pointers into the dataset they
+  already hold. Removing that embedding cut peak heap from 2.43 GiB to 1.46 GiB — 932 MiB, 38% —
+  and raised throughput about 1%.
 - **Cross-script retrieval costs ~9% throughput.** Measured by an interleaved A/B in one process
   (alternating `use_romanized_match` on/off, median of three pairs, 57,620 records per side):
   9,389 vs 10,326 sources/sec. The feature is behind that flag — both the scoring signal and the
