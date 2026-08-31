@@ -9,11 +9,9 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/microsoft/go-mssqldb"
 	"github.com/xuri/excelize/v2"
@@ -78,11 +76,22 @@ func NewDataConnector(cfg ConnectionConfig) (DataConnector, error) {
 	}
 }
 
+// errQueryDatasourceUnsupported rejects a raw-SQL datasource. The branch that
+// once claimed to support one never ran: validateIdentifier rejected the query
+// text before it was reached. Rather than make arbitrary SQL executable, the
+// connectors read named tables only -- which is what SQL Server and MongoDB
+// have always done.
+var errQueryDatasourceUnsupported = fmt.Errorf(
+	"query datasources are not supported; set table_or_query to a table name, optionally schema-qualified")
+
 type PostgresConnector struct {
 	Config  ConnectionConfig
 	pool    *pgxpool.Pool
 	orderBy string // cached ORDER BY list; resolved once, reused across pages
 }
+
+// connectorApplicationName tags this connector's backends in pg_stat_activity.
+const connectorApplicationName = "entitymatcher_connector"
 
 func (c *PostgresConnector) buildDSN() string {
 	port := c.Config.Port
@@ -95,8 +104,11 @@ func (c *PostgresConnector) buildDSN() string {
 			sslmode = ssl
 		}
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		c.Config.Username, c.Config.Password, c.Config.Host, port, c.Config.Database, sslmode)
+	// application_name tags this connector's backends in pg_stat_activity --
+	// useful when diagnosing a busy server, and what lets the connection-leak
+	// test count only this connector's own connections.
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s&application_name=%s",
+		c.Config.Username, c.Config.Password, c.Config.Host, port, c.Config.Database, sslmode, connectorApplicationName)
 }
 
 func (c *PostgresConnector) TestConnection(ctx context.Context) error {
@@ -123,6 +135,10 @@ func (c *PostgresConnector) TestConnection(ctx context.Context) error {
 }
 
 func (c *PostgresConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, error) {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(c.Config.TableOrQuery)), "SELECT") {
+		return nil, errQueryDatasourceUnsupported
+	}
+
 	if c.pool == nil {
 		if err := c.TestConnection(ctx); err != nil {
 			return nil, err
@@ -144,22 +160,6 @@ func (c *PostgresConnector) IntrospectSchema(ctx context.Context) ([]ColumnDef, 
 	}
 	if err := validateIdentifier(table); err != nil {
 		return nil, err
-	}
-
-	if strings.HasPrefix(strings.TrimSpace(c.Config.TableOrQuery), "SELECT") {
-		query := c.Config.TableOrQuery + " LIMIT 0"
-		rows, err := c.pool.Query(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("query execution failed: %w", err)
-		}
-		defer rows.Close()
-
-		cols := rows.FieldDescriptions()
-		result := make([]ColumnDef, len(cols))
-		for i, col := range cols {
-			result[i] = ColumnDef{Name: string(col.Name), DataType: fmt.Sprintf("OID:%d", col.DataTypeOID)}
-		}
-		return result, nil
 	}
 
 	query := `
@@ -304,74 +304,11 @@ func (c *PostgresConnector) resolveOrderBy(ctx context.Context, schema, table st
 	return "", fmt.Errorf("cannot page %s.%s deterministically: it has no primary key and no orderable columns; set extra_params.order_by", schema, table)
 }
 
-// resolveQueryOrderBy orders a raw-SELECT datasource. There is no catalog to
-// consult, so it falls back to every orderable output column by ordinal.
-func (c *PostgresConnector) resolveQueryOrderBy(ctx context.Context) (string, error) {
-	if c.orderBy != "" {
-		return c.orderBy, nil
-	}
-
-	if explicit, err := explicitOrderBy(c.Config.ExtraParams, quoteIdentifier); err != nil {
-		return "", err
-	} else if explicit != "" {
-		c.orderBy = explicit
-		return c.orderBy, nil
-	}
-
-	probe := fmt.Sprintf("SELECT * FROM (%s) AS _em_page LIMIT 0", c.Config.TableOrQuery)
-	rows, err := c.pool.Query(ctx, probe)
-	if err != nil {
-		return "", fmt.Errorf("probe query shape: %w", err)
-	}
-	fields := rows.FieldDescriptions()
-	oids := make([]uint32, len(fields))
-	for i, f := range fields {
-		oids[i] = f.DataTypeOID
-	}
-	rows.Close()
-
-	orderableSet := make(map[uint32]bool)
-	if len(oids) > 0 {
-		catalogQuery := `
-			SELECT o.opcintype
-			FROM pg_opclass o JOIN pg_am m ON m.oid = o.opcmethod
-			WHERE m.amname = 'btree' AND o.opcdefault AND o.opcintype = ANY($1)
-		`
-		catRows, err := c.pool.Query(ctx, catalogQuery, oids)
-		if err != nil {
-			return "", fmt.Errorf("resolve orderable output columns: %w", err)
-		}
-		for catRows.Next() {
-			var oid uint32
-			if err := catRows.Scan(&oid); err != nil {
-				catRows.Close()
-				return "", fmt.Errorf("resolve orderable output columns: %w", err)
-			}
-			orderableSet[oid] = true
-		}
-		if err := catRows.Err(); err != nil {
-			catRows.Close()
-			return "", fmt.Errorf("resolve orderable output columns: %w", err)
-		}
-		catRows.Close()
-	}
-
-	var ordinals []string
-	for i, f := range fields {
-		if orderableSet[f.DataTypeOID] {
-			ordinals = append(ordinals, strconv.Itoa(i+1))
-		}
-	}
-
-	if len(ordinals) == 0 {
-		return "", fmt.Errorf("cannot page this query deterministically: no orderable output columns; set extra_params.order_by")
-	}
-
-	c.orderBy = strings.Join(ordinals, ", ")
-	return c.orderBy, nil
-}
-
 func (c *PostgresConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(c.Config.TableOrQuery)), "SELECT") {
+		return nil, errQueryDatasourceUnsupported
+	}
+
 	if c.pool == nil {
 		if err := c.TestConnection(ctx); err != nil {
 			return nil, err
@@ -400,27 +337,13 @@ func (c *PostgresConnector) FetchRecords(ctx context.Context, limit, offset int)
 		return nil, err
 	}
 
-	var rows pgx.Rows
-	var err error
-
-	if strings.HasPrefix(strings.TrimSpace(c.Config.TableOrQuery), "SELECT") {
-		orderBy, oerr := c.resolveQueryOrderBy(ctx)
-		if oerr != nil {
-			return nil, oerr
-		}
-		query := fmt.Sprintf("SELECT * FROM (%s) AS _em_page ORDER BY %s LIMIT $1 OFFSET $2",
-			c.Config.TableOrQuery, orderBy)
-		rows, err = c.pool.Query(ctx, query, limit, offset)
-	} else {
-		orderBy, oerr := c.resolveOrderBy(ctx, schema, table)
-		if oerr != nil {
-			return nil, oerr
-		}
-		query := fmt.Sprintf("SELECT * FROM %s.%s ORDER BY %s LIMIT $1 OFFSET $2",
-			quoteIdentifier(schema), quoteIdentifier(table), orderBy)
-		rows, err = c.pool.Query(ctx, query, limit, offset)
+	orderBy, err := c.resolveOrderBy(ctx, schema, table)
+	if err != nil {
+		return nil, err
 	}
-
+	query := fmt.Sprintf("SELECT * FROM %s.%s ORDER BY %s LIMIT $1 OFFSET $2",
+		quoteIdentifier(schema), quoteIdentifier(table), orderBy)
+	rows, err := c.pool.Query(ctx, query, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("fetch records failed: %w", err)
 	}

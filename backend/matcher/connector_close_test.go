@@ -109,10 +109,18 @@ func TestPostgresConnectorCloseReleasesServerConnection(t *testing.T) {
 		_, _ = observerPool.Exec(context.Background(), "DROP TABLE IF EXISTS em_close_probe")
 	}()
 
+	// countConns counts only this connector's own backends (tagged via
+	// application_name in buildDSN). Counting every backend on the database
+	// would race against other packages' tests, which connect to the same
+	// database concurrently under `go test ./...`.
 	countConns := func() int {
 		var n int
 		err := observerPool.QueryRow(ctx,
-			"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
+			`SELECT count(*) FROM pg_stat_activity
+			 WHERE datname = current_database()
+			   AND pid <> pg_backend_pid()
+			   AND application_name = $1`,
+			connectorApplicationName,
 		).Scan(&n)
 		require.NoError(t, err, "failed to count connections")
 		return n
