@@ -131,29 +131,33 @@ func TestSQLServerFetchQueryIsSchemaQualified(t *testing.T) {
 		name     string
 		schema   string
 		table    string
+		orderBy  string
 		expected string
 	}{
 		{
 			name:     "simple case",
 			schema:   "dbo",
 			table:    "Customers",
-			expected: `SELECT * FROM [dbo].[Customers] ORDER BY (SELECT NULL) OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY`,
+			orderBy:  "[id]",
+			expected: `SELECT * FROM [dbo].[Customers] ORDER BY [id] OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY`,
 		},
 		{
-			name:   "sales orders",
-			schema: "sales",
-			table:  "Orders",
+			name:    "sales orders",
+			schema:  "sales",
+			table:   "Orders",
+			orderBy: "[id]",
 		},
 		{
-			name:   "reserved word",
-			schema: "dbo",
-			table:  "Order",
+			name:    "reserved word",
+			schema:  "dbo",
+			table:   "Order",
+			orderBy: "[id]",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			q := sqlServerFetchQuery(tt.schema, tt.table)
+			q := sqlServerFetchQuery(tt.schema, tt.table, tt.orderBy)
 			if tt.expected != "" {
 				require.Equal(t, tt.expected, q)
 				require.NotContains(t, q, "FROM dbo.Customers")
@@ -162,4 +166,13 @@ func TestSQLServerFetchQueryIsSchemaQualified(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSQLServerFetchQueryHasRealOrdering guards against a regression back to
+// ORDER BY (SELECT NULL), which parses but orders nothing, so OFFSET/FETCH
+// paging could duplicate and drop rows.
+func TestSQLServerFetchQueryHasRealOrdering(t *testing.T) {
+	q := sqlServerFetchQuery("dbo", "Customers", "[id]")
+	require.NotContains(t, q, "(SELECT NULL)")
+	require.Contains(t, q, "ORDER BY [id] OFFSET")
 }

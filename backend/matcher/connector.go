@@ -460,8 +460,9 @@ func (c *PostgresConnector) Close() error {
 }
 
 type SQLServerConnector struct {
-	Config ConnectionConfig
-	conn   *sql.DB
+	Config  ConnectionConfig
+	conn    *sql.DB
+	orderBy string // cached ORDER BY list; resolved once, reused across pages
 }
 
 func (c *SQLServerConnector) buildDSN() string {
@@ -578,10 +579,105 @@ func quoteMSSQLIdentifier(id string) string {
 	return "[" + strings.ReplaceAll(id, "]", "]]") + "]"
 }
 
+// resolveOrderBy determines a total ordering so OFFSET/FETCH paging cannot
+// duplicate or drop rows. Preference: an explicit extra_params.order_by, then
+// the primary key, then every orderable column. ORDER BY (SELECT NULL) parses
+// but orders nothing, which is what this replaces.
+func (c *SQLServerConnector) resolveOrderBy(ctx context.Context, schema, table string) (string, error) {
+	if c.orderBy != "" {
+		return c.orderBy, nil
+	}
+
+	if explicit, err := explicitOrderBy(c.Config.ExtraParams, quoteMSSQLIdentifier); err != nil {
+		return "", err
+	} else if explicit != "" {
+		c.orderBy = explicit
+		return c.orderBy, nil
+	}
+
+	qualified := schema + "." + table
+
+	pkQuery := `
+		SELECT c.name
+		FROM sys.indexes i
+		JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+		JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+		WHERE i.is_primary_key = 1 AND i.object_id = OBJECT_ID(@Table)
+		ORDER BY ic.key_ordinal
+	`
+	rows, err := c.conn.QueryContext(ctx, pkQuery, sql.Named("Table", qualified))
+	if err != nil {
+		return "", fmt.Errorf("resolve primary key for %s: %w", qualified, err)
+	}
+	var pkCols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("resolve primary key for %s: %w", qualified, err)
+		}
+		pkCols = append(pkCols, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("resolve primary key for %s: %w", qualified, err)
+	}
+	rows.Close()
+
+	if len(pkCols) > 0 {
+		quoted := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			quoted[i] = quoteMSSQLIdentifier(col)
+		}
+		c.orderBy = strings.Join(quoted, ", ")
+		return c.orderBy, nil
+	}
+
+	orderableQuery := `
+		SELECT c.name
+		FROM sys.columns c
+		JOIN sys.types t ON t.user_type_id = c.user_type_id
+		WHERE c.object_id = OBJECT_ID(@Table)
+		  AND t.name NOT IN ('text', 'ntext', 'image', 'xml', 'geography', 'geometry')
+		ORDER BY c.column_id
+	`
+	rows2, err := c.conn.QueryContext(ctx, orderableQuery, sql.Named("Table", qualified))
+	if err != nil {
+		return "", fmt.Errorf("resolve orderable columns for %s: %w", qualified, err)
+	}
+	var orderableCols []string
+	for rows2.Next() {
+		var name string
+		if err := rows2.Scan(&name); err != nil {
+			rows2.Close()
+			return "", fmt.Errorf("resolve orderable columns for %s: %w", qualified, err)
+		}
+		orderableCols = append(orderableCols, name)
+	}
+	if err := rows2.Err(); err != nil {
+		rows2.Close()
+		return "", fmt.Errorf("resolve orderable columns for %s: %w", qualified, err)
+	}
+	rows2.Close()
+
+	if len(orderableCols) > 0 {
+		quoted := make([]string, len(orderableCols))
+		for i, col := range orderableCols {
+			quoted[i] = quoteMSSQLIdentifier(col)
+		}
+		c.orderBy = strings.Join(quoted, ", ")
+		return c.orderBy, nil
+	}
+
+	return "", fmt.Errorf("cannot page %s deterministically: it has no primary key and no orderable columns; set extra_params.order_by", qualified)
+}
+
 // sqlServerFetchQuery builds the paged read for a schema-qualified table.
-func sqlServerFetchQuery(schema, table string) string {
+// orderBy must be a resolved, validated column list -- OFFSET/FETCH requires an
+// ORDER BY, and (SELECT NULL) would satisfy the parser while ordering nothing.
+func sqlServerFetchQuery(schema, table, orderBy string) string {
 	qualified := quoteMSSQLIdentifier(schema) + "." + quoteMSSQLIdentifier(table)
-	return fmt.Sprintf("SELECT * FROM %s ORDER BY (SELECT NULL) OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY", qualified)
+	return fmt.Sprintf("SELECT * FROM %s ORDER BY %s OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY", qualified, orderBy)
 }
 
 func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error) {
@@ -604,7 +700,12 @@ func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int
 		offset = 0
 	}
 
-	query := sqlServerFetchQuery(schema, table)
+	orderBy, err := c.resolveOrderBy(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+
+	query := sqlServerFetchQuery(schema, table, orderBy)
 
 	rows, err := c.conn.QueryContext(ctx, query, sql.Named("Offset", offset), sql.Named("Limit", limit))
 	if err != nil {
@@ -721,7 +822,24 @@ func (c *MongoConnector) FetchRecords(ctx context.Context, limit, offset int) ([
 	}
 
 	coll := c.client.Database(c.dbName).Collection(c.collection)
-	cursor, err := coll.Find(ctx, bson.D{}, options.Find().SetSkip(int64(offset)).SetLimit(int64(limit)))
+
+	// MongoDB does not guarantee natural order across queries, so skip/limit
+	// without a sort can duplicate and drop documents as the collection is
+	// concurrently modified. _id is always present and unique, which makes it
+	// a safe default; extra_params.order_by can override it.
+	sortField := "_id"
+	if c.Config.ExtraParams != nil {
+		if raw, ok := c.Config.ExtraParams["order_by"].(string); ok && strings.TrimSpace(raw) != "" {
+			sortField = strings.TrimSpace(raw)
+		}
+	}
+
+	findOpts := options.Find().
+		SetSort(bson.D{{Key: sortField, Value: 1}}).
+		SetSkip(int64(offset)).
+		SetLimit(int64(limit))
+
+	cursor, err := coll.Find(ctx, bson.D{}, findOpts)
 	if err != nil {
 		return nil, fmt.Errorf("fetch records failed: %w", err)
 	}
