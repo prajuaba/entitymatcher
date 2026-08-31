@@ -119,6 +119,34 @@ opened, and `go.mod` contains no drivers.
 
 ---
 
+## Round 1 audit (A–J), 2026-08-31
+
+Verified against the code, not the table. **36 of 40 items are genuinely closed.** Four are not,
+and two of those are the "real implementation with no caller" shape this project keeps hitting.
+
+| Item | Verdict | Evidence |
+| :-- | :-- | :-- |
+| A1–A4, A6 | ✅ | `IsAutoMatchable`, `MarginThreshold`, `GREEDY_1_1`, `NO_MATCH`, `EmitUnmatched` all live |
+| **A5** | ❌ **open by decision** | `scorer.go:510` still computes `max*0.6 + mean*0.4`. Not an oversight: an in-code weight sweep (0.15/0.30/0.60/0.90) records that averaging destroys the transposition signal the engine exists for, and that 0.90 scores better but was rejected to avoid fitting the benchmark. The AC — configurable weighted mean, `max` as tie-break only — is unmet, but the rationale is measured and documented |
+| B1–B5 | ✅ | `backend/testdata` gone, `internal/mockdata` runs under `./...`; decision-level P/R/F1; 6 NEG_ categories; 11 api test files |
+| C1–C4 | ✅ | title stripping, synonym dictionary wired into `Normalize`, Buddhist-era `-543`, rune-safe slicing |
+| **C5** | ⚠️ **partial** | No explicit "single-token → trigram-dominant" branch. A Thai syllable segmenter exists and serves romanization, and unspaced Thai does lean on trigram as an emergent effect, which the README documents as a limitation. Not implemented as specified |
+| D1–D5 | ✅ | 24 `RequireAuth` registrations; bcrypt per user with constant-time compare and a dummy hash against enumeration (`password123` is a seeded demo credential, not a bypass); audit identity from `ClaimsFrom(r.Context())`; `CORS_ORIGINS`; LoginScreen + `Authorization` header |
+| E1–E4 | ✅ | singleton manager on `Server`; `robfig/cron/v3` with `ParseStandard` validation; `DispatchWebhook` called from two sites; SchedulerPanel |
+| F1 | ✅ | `validateAndMergeConfig` merges and bounds |
+| G1–G5 | ✅ | real pgx / go-mssqldb / mongo-driver / excelize; unreachable hosts fail honestly |
+| H1–H3 | ✅ | `applySchema` on boot; `selectStore`; `/api/jobs` routed |
+| I1 | ✅ | `maxPostingRatio` + `skipTrigrams` |
+| **I2** | ❌ **open** | `GetResultByID` is implemented in BOTH stores and **called from nowhere**. `HandleMatchAction` still does `GetResults(batchID)` then a linear scan `for _, item := range results`. At the measured scale that is a 573k-row scan per review click. Same defect shape as K (ingestion), H3 (`ListJobs`) and N1 |
+| **I3** | ❌ **open** | `pipeline.go:384/386/422` embed `&srcCopy` / `&candCopy` in every result row. Measured at 1,253 bytes/row by the scale harness; the README documents it as a known cost |
+| J1–J3 | ✅ | `golang:1.25-alpine` matches `go 1.25.0`; nginx `/api` proxy verified live during M5; compose and README both 8085/3000 |
+| J4 | ✅ | truth pass ongoing and current — the scale figures were corrected in M6, and the one claim that could not be re-verified (~9% cross-script cost) is now explicitly marked a lower bound |
+
+**Recommended next:** I2 is a one-line swap to `GetResultByID` with an existing implementation behind
+it, and it is the only open item with a measured production cost.
+
+---
+
 # Round 2 — remaining after `f1a65a0..8198e03`
 
 Derived from working the calibration, file-ingestion and PostgreSQL branch, not from a
