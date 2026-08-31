@@ -55,6 +55,7 @@ type DataConnector interface {
 	TestConnection(ctx context.Context) error
 	IntrospectSchema(ctx context.Context) ([]ColumnDef, error)
 	FetchRecords(ctx context.Context, limit, offset int) ([]map[string]interface{}, error)
+	Close() error
 }
 
 func NewDataConnector(cfg ConnectionConfig) (DataConnector, error) {
@@ -258,6 +259,14 @@ func (c *PostgresConnector) FetchRecords(ctx context.Context, limit, offset int)
 	return result, rows.Err()
 }
 
+func (c *PostgresConnector) Close() error {
+	if c.pool != nil {
+		c.pool.Close()
+		c.pool = nil
+	}
+	return nil
+}
+
 type SQLServerConnector struct {
 	Config ConnectionConfig
 	conn   *sql.DB
@@ -358,6 +367,15 @@ func (c *SQLServerConnector) FetchRecords(ctx context.Context, limit, offset int
 	defer rows.Close()
 
 	return sqlRowsToMaps(rows)
+}
+
+func (c *SQLServerConnector) Close() error {
+	if c.conn != nil {
+		conn := c.conn
+		c.conn = nil
+		return conn.Close()
+	}
+	return nil
 }
 
 type MongoConnector struct {
@@ -474,6 +492,17 @@ func (c *MongoConnector) FetchRecords(ctx context.Context, limit, offset int) ([
 	}
 
 	return results, cursor.Err()
+}
+
+func (c *MongoConnector) Close() error {
+	if c.client != nil {
+		client := c.client
+		c.client = nil
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return client.Disconnect(ctx)
+	}
+	return nil
 }
 
 type CSVConnector struct {
@@ -596,6 +625,10 @@ func (c *CSVConnector) FetchRecords(ctx context.Context, limit, offset int) ([]m
 	return rows, nil
 }
 
+func (c *CSVConnector) Close() error {
+	return nil
+}
+
 type ExcelConnector struct {
 	Config ConnectionConfig
 }
@@ -713,6 +746,10 @@ func (c *ExcelConnector) FetchRecords(ctx context.Context, limit, offset int) ([
 	return result, nil
 }
 
+func (c *ExcelConnector) Close() error {
+	return nil
+}
+
 type ManualConnector struct {
 	Config ConnectionConfig
 }
@@ -745,6 +782,10 @@ func (c *ManualConnector) FetchRecords(ctx context.Context, limit, offset int) (
 		end = len(c.Config.ManualData)
 	}
 	return c.Config.ManualData[offset:end], nil
+}
+
+func (c *ManualConnector) Close() error {
+	return nil
 }
 
 func ParseJSONPayload(r io.Reader) ([]map[string]interface{}, error) {

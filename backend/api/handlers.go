@@ -711,6 +711,7 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to initialize connector for source_file: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer func() { _ = sourceConn.Close() }()
 
 	sourceRows, err := sourceConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
 	if err != nil {
@@ -754,6 +755,7 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to initialize connector for destination_file: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer func() { _ = destConn.Close() }()
 
 	destRows, err := destConn.FetchRecords(r.Context(), MaxIngestRecords, 0)
 	if err != nil {
@@ -1281,6 +1283,7 @@ func (s *Server) HandleTestConnector(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer func() { _ = conn.Close() }()
 
 	err = conn.TestConnection(r.Context())
 	if err != nil {
@@ -1316,6 +1319,7 @@ func (s *Server) HandleIntrospectSchema(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer func() { _ = conn.Close() }()
 
 	cols, err := conn.IntrospectSchema(r.Context())
 	if err != nil {
