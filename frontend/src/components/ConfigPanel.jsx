@@ -4,6 +4,7 @@ import { ConnectionManager } from './ConnectionManager'
 import { FieldMapper } from './FieldMapper'
 import { DictionaryManager } from './DictionaryManager'
 import { SchedulerPanel } from './SchedulerPanel'
+import { CalibrationPanel } from './CalibrationPanel'
 import { can } from '../lib/rbac'
 import { Sliders, CheckSquare, Square, Save, RotateCcw } from 'lucide-react'
 
@@ -262,6 +263,7 @@ export function ConfigPanel() {
 
       {/* Scheduler Panel (Admin only) */}
       {can(user, 'SCHEDULER_CONFIG') && <SchedulerPanel />}
+      {can(user, 'CALIBRATION') && <CalibrationPanel />}
     </div>
   )
 }

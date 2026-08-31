@@ -229,6 +229,13 @@ which is indistinguishable from a perfect calibrator. Both responses carry a cav
 the training data comes almost entirely from the review queue, so any fitted calibrator is
 well-calibrated for the review band and extrapolating outside it.
 
+Both are driven from an ADMIN-only **Score Calibration** panel in the configuration tab. It
+shows progress toward the 20-observation minimum as `14 / 20` with the number of further
+reviewer decisions required, so the floor is visible before it is hit rather than arriving as
+a bare 400. It renders the server's selection-bias caveat verbatim, reports Brier and ECE
+before and after a fit (lower is better for both), and warns when `calibration_enabled` is
+false — a fitted model changes no scoring until that is turned on.
+
 **Governance** — `GET /api/audit/logs`, `GET /api/audit/export`
 
 **Operations** — `GET|POST /api/scheduler/config`, `GET|POST /api/dictionary`,
