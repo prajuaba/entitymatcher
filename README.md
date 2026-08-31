@@ -43,13 +43,14 @@ winning source and its score.
 
 From `go test ./internal/mockdata/` (4,720 × 4,720 synthetic bilingual records, 22.3M candidate
 pair space, fixed seed). Scale figures are from the opt-in harness
-(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 220,000 × 220,000:
+(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 230,120 × 230,120,
+re-measured 2026-08-31 on 20 cores / 121 GiB:
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~8,100 sources/sec at 220k × 220k |
-| Verified scale | 220,000 × 220,000 per side in 28.3s (20 cores), 2.5 GiB peak heap |
-| Scaling | time ~ O(N^1.05) over 22k → 220k |
+| Throughput | ~8,450 sources/sec at 230k × 230k |
+| Verified scale | 230,120 × 230,120 per side in 27.2s (20 cores), 2.40 GiB peak heap |
+| Scaling | time ~ O(N^1.12) over 23k → 230k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 59.2% |
 | F1 | 74.4% |
@@ -250,7 +251,7 @@ false — a fitted model changes no scoring until that is turned on.
   comparison. A dictionary-based segmenter would improve this.
 - **Recall is threshold-bound.** 59.2% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
-- **Peak heap is ~2 GiB at 220k × 220k**, and `docker-compose.yml` sets no memory limit. That is
+- **Peak heap is ~2.4 GiB at 230k × 230k**, and `docker-compose.yml` sets no memory limit. That is
   2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the
   corpus. Results accumulate in memory during a run and every row embeds full copies of both
   records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
@@ -260,6 +261,11 @@ false — a fitted model changes no scoring until that is turned on.
   9,389 vs 10,326 sources/sec. The feature is behind that flag — both the scoring signal and the
   index construction — so a deployment that never mixes scripts can turn it off.
 
+  **This figure has not been re-measured since the cross-script work in EPIC L**, which added a
+  `PhoneticComparisonForm` fold inside `CrossScriptPartsScore` — extra work on exactly the path
+  being measured. Treat 9% as a lower bound until an interleaved A/B is re-run. There is no
+  automated harness for it; the measurement was manual.
+
   **Methodology note, because this was got wrong once.** An earlier revision of this file claimed a
   42% cost. That came from comparing scale-sweep runs taken hours apart under different machine
   load, and the run-to-run spread under load (4,722–8,127 sources/sec for the same configuration)
@@ -267,8 +273,11 @@ false — a fitted model changes no scoring until that is turned on.
   runs are byte-identical — so comparing code versions requires an interleaved A/B in one load
   window, not two timestamps.
 
-- **Scaling is O(N^1.05), not linear.** The residual comes from the candidate set growing with
-  corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
+- **Scaling is O(N^1.12), not linear.** The residual comes from the candidate set growing with
+  corpus size; bounded top-K selection caps its sort cost but does not eliminate it. Re-measured
+  2026-08-31 across the sweep's four sizes: the per-step exponents are 1.16, 1.01 and 1.20, and a
+  least-squares fit over all four points gives 1.12. An earlier revision of this file claimed
+  1.05, which the measured points do not support.
 - **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
   records are now matched through RTGS romanization: a Thai syllable segmenter determines consonant
   position, `RomanizeThai` produces the romanization, and a shared phonetic skeleton puts both
