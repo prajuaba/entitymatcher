@@ -1286,19 +1286,20 @@ func (s *Server) HandleMatchAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch current item for audit logging
-	results, _ := s.store.GetResults(payload.BatchID)
+	// Fetch current item for audit logging.
+	//
+	// GetResultByID is an indexed lookup in both stores -- a map read in memory,
+	// a composite-key SELECT in PostgreSQL. The previous code pulled the whole
+	// batch and scanned it for one id, which at benchmark scale is a 573k-row
+	// scan per reviewer click.
 	var prevStatus string
 	var srcID, destID string
 	var confScore float64
-	for _, item := range results {
-		if item.ID == payload.MatchID {
-			prevStatus = item.MatchStatus
-			srcID = item.SourceID
-			destID = item.DestinationID
-			confScore = item.ConfidenceScore
-			break
-		}
+	if item, found := s.store.GetResultByID(payload.BatchID, payload.MatchID); found {
+		prevStatus = item.MatchStatus
+		srcID = item.SourceID
+		destID = item.DestinationID
+		confScore = item.ConfidenceScore
 	}
 
 	err := s.store.UpdateMatchStatus(payload.BatchID, payload.MatchID, targetStatus)

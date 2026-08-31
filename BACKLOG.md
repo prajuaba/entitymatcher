@@ -137,13 +137,13 @@ and two of those are the "real implementation with no caller" shape this project
 | G1–G5 | ✅ | real pgx / go-mssqldb / mongo-driver / excelize; unreachable hosts fail honestly |
 | H1–H3 | ✅ | `applySchema` on boot; `selectStore`; `/api/jobs` routed |
 | I1 | ✅ | `maxPostingRatio` + `skipTrigrams` |
-| **I2** | ❌ **open** | `GetResultByID` is implemented in BOTH stores and **called from nowhere**. `HandleMatchAction` still does `GetResults(batchID)` then a linear scan `for _, item := range results`. At the measured scale that is a 573k-row scan per review click. Same defect shape as K (ingestion), H3 (`ListJobs`) and N1 |
+| ~~I2~~ ✅ | **Closed.** `GetResultByID` was implemented in both stores and called from nowhere while `HandleMatchAction` scanned the whole batch for one id — a 573k-row scan per review click at measured scale. Now an indexed lookup; not-found behaviour preserved exactly (no early 404, which would have changed the response for a case that returns 400 today). The test counts store calls rather than checking the action succeeded, because the outcome is identical either way: `getResultsCalls == 0` is the assertion, and it fails if the scan returns |
 | **I3** | ❌ **open** | `pipeline.go:384/386/422` embed `&srcCopy` / `&candCopy` in every result row. Measured at 1,253 bytes/row by the scale harness; the README documents it as a known cost |
 | J1–J3 | ✅ | `golang:1.25-alpine` matches `go 1.25.0`; nginx `/api` proxy verified live during M5; compose and README both 8085/3000 |
 | J4 | ✅ | truth pass ongoing and current — the scale figures were corrected in M6, and the one claim that could not be re-verified (~9% cross-script cost) is now explicitly marked a lower bound |
 
-**Recommended next:** I2 is a one-line swap to `GetResultByID` with an existing implementation behind
-it, and it is the only open item with a measured production cost.
+**Still open after this audit:** A5 (by decision, rationale recorded in `scorer.go`), C5 (partial),
+I3 (result rows embed full record copies, 1,253 bytes/row measured).
 
 ---
 
