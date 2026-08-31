@@ -245,6 +245,42 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
+  ingestFromConnectors: async ({ source, destination, columnMapping }) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await apiFetch('/api/connector/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source,
+          destination,
+          ...(columnMapping ? { column_mapping: columnMapping } : {})
+        }),
+      })
+      const raw = await res.text()
+      if (!res.ok) {
+        let message = raw.trim()
+        try {
+          const parsed = JSON.parse(raw)
+          message = parsed.message || parsed.error || message
+        } catch (e) {
+          // raw is plain text, use as-is
+        }
+        if (!message) {
+          message = `Connector ingestion failed (${res.status})`
+        }
+        throw new Error(message)
+      } else {
+        const data = JSON.parse(raw)
+        set({ batchID: data.batch_id, loading: false })
+        return data
+      }
+    } catch (e) {
+      set({ error: e.message, loading: false })
+      throw e
+    }
+  },
+
   runMatching: async (batchIdToRun) => {
     const bId = batchIdToRun || get().batchID
     set({ loading: true, activeTab: 'progress' })

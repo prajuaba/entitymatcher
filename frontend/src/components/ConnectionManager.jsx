@@ -1,15 +1,18 @@
 import React, { useState } from 'react'
 import { Database, Server, FileSpreadsheet, FileCode, CheckCircle2, AlertCircle, RefreshCcw, Layers, Edit3, Plus, Trash2, Plug } from 'lucide-react'
 import { apiFetch } from '../lib/api.js'
+import { useMatcherStore } from '../store/useMatcherStore'
 
 export function ConnectionManager({ onSchemaIntrospected }) {
+  const DEFAULT_PORTS = { POSTGRES: 5432, SQLSERVER: 1433, MONGODB: 27017 }
+
   const [srcType, setSrcType] = useState('SQLSERVER')
   const [srcConfig, setSrcConfig] = useState({
     host: '10.0.0.12',
     port: 1433,
     database: 'EnterpriseDB',
     username: 'sa',
-    password: '••••••••',
+    password: '',
     table_or_query: 'dbo.Customers',
   })
 
@@ -19,7 +22,7 @@ export function ConnectionManager({ onSchemaIntrospected }) {
     port: 27017,
     database: 'CRM_DB',
     username: 'admin',
-    password: '••••••••',
+    password: '',
     table_or_query: 'clients_collection',
   })
 
@@ -34,6 +37,10 @@ export function ConnectionManager({ onSchemaIntrospected }) {
   // Manual Column & Row Editor State
   const [manualSrcCols, setManualSrcCols] = useState(['id', 'customer_name', 'tx_date', 'tax_id'])
   const [newColName, setNewColName] = useState('')
+
+  const ingestFromConnectors = useMatcherStore((s) => s.ingestFromConnectors)
+  const [ingesting, setIngesting] = useState(false)
+  const [ingestStatus, setIngestStatus] = useState(null)
 
   const handleTestOnly = async (isSource) => {
     const type = isSource ? srcType : destType
@@ -62,6 +69,35 @@ export function ConnectionManager({ onSchemaIntrospected }) {
     } finally {
       if (isSource) setLoadingSrc(false)
       else setLoadingDest(false)
+    }
+  }
+
+  const FILE_TYPES = ['CSV', 'EXCEL']
+
+  const handleLoadData = async () => {
+    if (FILE_TYPES.includes(srcType) || FILE_TYPES.includes(destType)) {
+      setIngestStatus({ success: false, message: 'File sources are loaded from the Data Ingestion tab, which uploads the file itself. This panel loads from database connectors only.' })
+      return
+    }
+
+    setIngesting(true)
+    setIngestStatus(null)
+
+    try {
+      const data = await ingestFromConnectors({
+        source: { type: srcType, ...srcConfig },
+        destination: { type: destType, ...destConfig },
+      })
+
+      let message = `Loaded ${data.source_count} source and ${data.destination_count} destination records into batch ${data.batch_id}.`
+      if (data.truncated) {
+        message += ' ' + (data.warning || 'Some records were truncated.')
+      }
+      setIngestStatus({ success: !data.truncated, message })
+    } catch (e) {
+      setIngestStatus({ success: false, message: e.message })
+    } finally {
+      setIngesting(false)
     }
   }
 
@@ -154,7 +190,13 @@ export function ConnectionManager({ onSchemaIntrospected }) {
             </span>
             <select
               value={srcType}
-              onChange={(e) => setSrcType(e.target.value)}
+              onChange={(e) => {
+                const nextType = e.target.value
+                setSrcType(nextType)
+                if (DEFAULT_PORTS[nextType]) {
+                  setSrcConfig((prev) => ({ ...prev, port: DEFAULT_PORTS[nextType] }))
+                }
+              }}
               className="bg-slate-900 border border-slate-800 text-slate-200 text-xs rounded font-semibold p-1.5"
             >
               <option value="SQLSERVER">SQL Server (MSSQL)</option>
@@ -177,10 +219,31 @@ export function ConnectionManager({ onSchemaIntrospected }) {
                 className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
               />
               <input
+                type="number"
+                placeholder="Port"
+                value={srcConfig.port}
+                onChange={(e) => setSrcConfig({ ...srcConfig, port: parseInt(e.target.value, 10) || 0 })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
                 type="text"
                 placeholder="Database Name"
                 value={srcConfig.database}
                 onChange={(e) => setSrcConfig({ ...srcConfig, database: e.target.value })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
+                type="text"
+                placeholder="Username"
+                value={srcConfig.username}
+                onChange={(e) => setSrcConfig({ ...srcConfig, username: e.target.value })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={srcConfig.password}
+                onChange={(e) => setSrcConfig({ ...srcConfig, password: e.target.value })}
                 className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
               />
               <input
@@ -276,7 +339,13 @@ export function ConnectionManager({ onSchemaIntrospected }) {
             </span>
             <select
               value={destType}
-              onChange={(e) => setDestType(e.target.value)}
+              onChange={(e) => {
+                const nextType = e.target.value
+                setDestType(nextType)
+                if (DEFAULT_PORTS[nextType]) {
+                  setDestConfig((prev) => ({ ...prev, port: DEFAULT_PORTS[nextType] }))
+                }
+              }}
               className="bg-slate-900 border border-slate-800 text-slate-200 text-xs rounded font-semibold p-1.5"
             >
               <option value="MONGODB">MongoDB</option>
@@ -299,10 +368,31 @@ export function ConnectionManager({ onSchemaIntrospected }) {
                 className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
               />
               <input
+                type="number"
+                placeholder="Port"
+                value={destConfig.port}
+                onChange={(e) => setDestConfig({ ...destConfig, port: parseInt(e.target.value, 10) || 0 })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
                 type="text"
                 placeholder="Database Name"
                 value={destConfig.database}
                 onChange={(e) => setDestConfig({ ...destConfig, database: e.target.value })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
+                type="text"
+                placeholder="Username"
+                value={destConfig.username}
+                onChange={(e) => setDestConfig({ ...destConfig, username: e.target.value })}
+                className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={destConfig.password}
+                onChange={(e) => setDestConfig({ ...destConfig, password: e.target.value })}
                 className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-200"
               />
               <input
@@ -389,6 +479,24 @@ export function ConnectionManager({ onSchemaIntrospected }) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Load Data Button Section */}
+      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
+        <button
+          onClick={handleLoadData}
+          disabled={ingesting}
+          className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-60"
+        >
+          <Layers className="w-3.5 h-3.5" /> {ingesting ? 'Loading…' : 'Load Data & Start Batch'}
+        </button>
+        <p className="text-xs text-slate-500">Reads both connectors to completion and writes a batch the matcher can run against.</p>
+        {ingestStatus && (
+          <div className={`p-2.5 rounded text-xs flex items-center gap-2 ${ingestStatus.success ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-rose-950/60 text-rose-300 border border-rose-800'}`}>
+            {ingestStatus.success ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+            <span>{ingestStatus.message}</span>
+          </div>
+        )}
       </div>
 
       {/* Add Custom Manual Column Editor */}

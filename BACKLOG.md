@@ -139,7 +139,7 @@ paginated ones could duplicate or drop rows across pages. Fixed in `0fe270d`.
 
 ---
 
-## EPIC K — Ingestion reaches only uploaded files (C)
+## EPIC K — Ingestion reaches only uploaded files (C) — ✅ complete
 
 `NewDataConnector` is called from exactly two places: the multipart upload handler, and
 `TestConnection`/`IntrospectSchema`. So the PostgreSQL, SQL Server and MongoDB drivers —
@@ -147,12 +147,26 @@ and the server-side `file_path` option in the UI — can be *tested* and *intros
 cannot put a single row into a batch. Only an uploaded `.csv`/`.xlsx` can. This is the same
 shape of defect as the one just fixed: a real implementation with no caller.
 
+**Closed 2026-08-31.** K1+K2 `3520ee2`, K4 `2f59a27`, K3 in this commit. Deliberate
+departures from the ACs:
+
+- **`file_path` ingestion was NOT opened**, though this epic's text names it. `/api/upload/file`
+  already ingests CSV/Excel from request bytes; accepting a server-side path on the new
+  endpoint would let any ADMIN/ENGINEER read an arbitrary file *in full*, turning **M1**'s
+  first-row disclosure into whole-file exfiltration through a brand-new route. The endpoint
+  takes POSTGRES/SQLSERVER/MONGODB and 400s the rest. **Open `file_path` only after M1.**
+- **The UI panel was unusable before K3**, not merely unwired — see the K3 row.
+- **Truncation is now exact.** It is decided by asking for one more row, not by
+  `len(rows) == cap`, so a source holding exactly 50,000 rows is no longer mislabelled as
+  truncated. The paging helper is shared, so `/api/upload/file` stopped issuing a single
+  50,000-row fetch too.
+
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| K1 | Ingest from a configured connector | An endpoint accepts a saved `ConnectionConfig` and a `batch_id`, pages `FetchRecords` to exhaustion, and writes the batch; a match run then succeeds against it |
-| K2 | Paged ingestion, bounded | Ingestion pages rather than issuing one unbounded fetch; the row cap is explicit and a truncated ingest is reported, never silent (mirror the `truncated` flag on `/api/upload/file`) |
-| K3 | Connector ingestion in the UI | ConnectionManager's Connect path loads data and starts a batch, instead of only previewing headers |
-| K4 | `GET /api/jobs` | `ListJobs` is implemented in both stores and routed nowhere — no endpoint exists. Route it, with pagination bounds. Closes **H3** |
+| ~~K1~~ ✅ | Ingest from a configured connector | An endpoint accepts a saved `ConnectionConfig` and a `batch_id`, pages `FetchRecords` to exhaustion, and writes the batch; a match run then succeeds against it |
+| ~~K2~~ ✅ | Paged ingestion, bounded | Ingestion pages rather than issuing one unbounded fetch; the row cap is explicit and a truncated ingest is reported, never silent (mirror the `truncated` flag on `/api/upload/file`) |
+| ~~K3~~ ✅ | Connector ingestion in the UI | ConnectionManager's Connect path loads data and starts a batch, instead of only previewing headers. **Shipped with a prerequisite fix:** the panel had inputs for host, database and table only — no port, username or password — so every request it sent carried port 1433, user `sa` and a password of eight literal `•` characters. Test Connection and Introspect Schema had never been usable against a real server either. Added the three missing inputs, defaulted the port from the selected type, and cleared the fake password. **Not covered by any automated test** — this project has no frontend test framework; `npm run build` is the only check |
+| ~~K4~~ ✅ | `GET /api/jobs` | `ListJobs` is implemented in both stores and routed nowhere — no endpoint exists. Route it, with pagination bounds. Closes **H3**. **Shipped**, and it surfaced a store divergence now pinned by a test: `PostgresStore.SaveDataset` inserts a `match_jobs` row, so a batch uploaded but never matched *is* listed, while the in-memory store derives jobs from progress and does *not* list it. Which semantic is correct is a product question, deliberately left open rather than settled inside the endpoint |
 
 ## EPIC L — Cross-script matching stops at RTGS spellings (H)
 
