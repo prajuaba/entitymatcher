@@ -12,7 +12,7 @@ const demoAccounts = [
 export function LoginScreen() {
   const { login, loading } = useMatcherStore()
   const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('password')
+  const [password, setPassword] = useState('password123')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -32,7 +32,7 @@ export function LoginScreen() {
 
   const handleDemoAccountClick = (account) => {
     setUsername(account.username)
-    setPassword('password')
+    setPassword('password123')
     setError('')
   }
 
