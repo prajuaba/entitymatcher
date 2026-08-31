@@ -601,7 +601,10 @@ func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	sources := buildSourceRecords(payload.Sources, payload.BatchID, cfg)
 	destinations := buildDestinationRecords(payload.Destinations, payload.BatchID, cfg)
 
-	s.store.SaveDataset(payload.BatchID, sources, destinations)
+	if err := s.store.SaveDataset(payload.BatchID, sources, destinations); err != nil {
+		http.Error(w, "Failed to persist dataset: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	// Record the batch as the scheduler's current target
 	s.schedulerManager.SetLastBatchID(payload.BatchID)
@@ -906,7 +909,10 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	sources := buildSourceRecords(sourceRows, batchID, cfg)
 	destinations := buildDestinationRecords(destRows, batchID, cfg)
 
-	s.store.SaveDataset(batchID, sources, destinations)
+	if err := s.store.SaveDataset(batchID, sources, destinations); err != nil {
+		http.Error(w, "Failed to persist dataset: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.schedulerManager.SetLastBatchID(batchID)
 
 	resp := map[string]interface{}{
@@ -1019,7 +1025,10 @@ func (s *Server) HandleConnectorIngest(w http.ResponseWriter, r *http.Request) {
 	sources := buildSourceRecords(sourceRows, batchID, cfg)
 	destinations := buildDestinationRecords(destRows, batchID, cfg)
 
-	s.store.SaveDataset(batchID, sources, destinations)
+	if err := s.store.SaveDataset(batchID, sources, destinations); err != nil {
+		http.Error(w, "Failed to persist dataset: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.schedulerManager.SetLastBatchID(batchID)
 
 	resp := map[string]interface{}{
@@ -1553,7 +1562,10 @@ func (s *Server) HandleSeedBigDataset(w http.ResponseWriter, r *http.Request) {
 	batchID := "big-mock-batch-4000"
 	sources, dests, _, _ := mockdata.GenerateBigMockDataset(1000)
 
-	s.store.SaveDataset(batchID, sources, dests)
+	if err := s.store.SaveDataset(batchID, sources, dests); err != nil {
+		http.Error(w, "Failed to persist dataset: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	// Record the batch as the scheduler's current target
 	s.schedulerManager.SetLastBatchID(batchID)

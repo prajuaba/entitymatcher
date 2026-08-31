@@ -28,7 +28,9 @@ type Repository interface {
 	UpdateConfig(cfg matcher.Config)
 
 	// Dataset management
-	SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord)
+	// Callers MUST check and surface the returned error; silent write failure is
+	// indistinguishable from success to the caller.
+	SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) error
 	GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool)
 
 	// Results management

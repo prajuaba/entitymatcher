@@ -105,23 +105,22 @@ func (s *PostgresStore) UpdateConfig(cfg matcher.Config) {
 }
 
 // SaveDataset stores source and destination records for a batch, replacing any previously
-// saved dataset for the same batch. Follows the same transactional shape as SaveResultsCtx:
+// saved dataset for the same batch. Failures are now returned to the caller instead of only logged.
+//
+// Follows the same transactional shape as SaveResultsCtx:
 // ensure the match_jobs row exists for the FK, delete existing rows for the batch, then
 // bulk-insert with CopyFrom.
-//
-// NOTE: the Repository interface declares SaveDataset with no error return, so failures here
-// cannot be propagated to the caller. They are logged loudly instead of being swallowed --
-// silently discarding the dataset on a save failure is exactly the bug this method fixes
-// (uploads used to succeed while the data vanished, only to fail later at match time).
-func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
+func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		log.Printf("SaveDataset: batch %q: begin transaction: %v", batchID, err)
-		return
+		return fmt.Errorf("save dataset for batch %q: begin transaction: %w", batchID, err)
 	}
+	// This closure keys off the function's named error return, err: every early
+	// "return fmt.Errorf(...)" below assigns that named return automatically, so
+	// this deferred check observes it and rolls back on every error path.
 	defer func() {
 		if err != nil {
 			_ = tx.Rollback(ctx)
@@ -135,20 +134,17 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 		 ON CONFLICT (batch_id) DO NOTHING`,
 		batchID)
 	if err != nil {
-		log.Printf("SaveDataset: batch %q: create match_jobs row: %v", batchID, err)
-		return
+		return fmt.Errorf("save dataset for batch %q: create match_jobs row: %w", batchID, err)
 	}
 
 	// Delete existing rows for this batch so re-uploading replaces rather than accumulates.
 	_, err = tx.Exec(ctx, "DELETE FROM match_sources WHERE batch_id = $1", batchID)
 	if err != nil {
-		log.Printf("SaveDataset: batch %q: delete existing match_sources: %v", batchID, err)
-		return
+		return fmt.Errorf("save dataset for batch %q: delete existing match_sources: %w", batchID, err)
 	}
 	_, err = tx.Exec(ctx, "DELETE FROM match_destinations WHERE batch_id = $1", batchID)
 	if err != nil {
-		log.Printf("SaveDataset: batch %q: delete existing match_destinations: %v", batchID, err)
-		return
+		return fmt.Errorf("save dataset for batch %q: delete existing match_destinations: %w", batchID, err)
 	}
 
 	if len(sources) > 0 {
@@ -156,9 +152,7 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 		for i, src := range sources {
 			attrsJSON, marshalErr := marshalAttributes(src.Attributes)
 			if marshalErr != nil {
-				log.Printf("SaveDataset: batch %q: marshal source %q attributes: %v", batchID, src.ID, marshalErr)
-				err = marshalErr
-				return
+				return fmt.Errorf("save dataset for batch %q: marshal source %q attributes: %w", batchID, src.ID, marshalErr)
 			}
 			srcRows[i] = []interface{}{
 				batchID,
@@ -181,13 +175,10 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 			pgx.CopyFromRows(srcRows),
 		)
 		if err != nil {
-			log.Printf("SaveDataset: batch %q: copy match_sources failed: %v", batchID, err)
-			return
+			return fmt.Errorf("save dataset for batch %q: copy match_sources failed: %w", batchID, err)
 		}
 		if rowCount != int64(len(sources)) {
-			err = fmt.Errorf("copy match_sources inserted %d rows, expected %d", rowCount, len(sources))
-			log.Printf("SaveDataset: batch %q: %v", batchID, err)
-			return
+			return fmt.Errorf("save dataset for batch %q: copy match_sources inserted %d rows, expected %d", batchID, rowCount, len(sources))
 		}
 	}
 
@@ -196,9 +187,7 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 		for i, dst := range dests {
 			attrsJSON, marshalErr := marshalAttributes(dst.Attributes)
 			if marshalErr != nil {
-				log.Printf("SaveDataset: batch %q: marshal destination %q attributes: %v", batchID, dst.ID, marshalErr)
-				err = marshalErr
-				return
+				return fmt.Errorf("save dataset for batch %q: marshal destination %q attributes: %w", batchID, dst.ID, marshalErr)
 			}
 			dstRows[i] = []interface{}{
 				batchID,
@@ -220,20 +209,18 @@ func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceReco
 			pgx.CopyFromRows(dstRows),
 		)
 		if err != nil {
-			log.Printf("SaveDataset: batch %q: copy match_destinations failed: %v", batchID, err)
-			return
+			return fmt.Errorf("save dataset for batch %q: copy match_destinations failed: %w", batchID, err)
 		}
 		if rowCount != int64(len(dests)) {
-			err = fmt.Errorf("copy match_destinations inserted %d rows, expected %d", rowCount, len(dests))
-			log.Printf("SaveDataset: batch %q: %v", batchID, err)
-			return
+			return fmt.Errorf("save dataset for batch %q: copy match_destinations inserted %d rows, expected %d", batchID, rowCount, len(dests))
 		}
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		log.Printf("SaveDataset: batch %q: commit transaction: %v", batchID, err)
-		return
+		return fmt.Errorf("save dataset for batch %q: commit transaction: %w", batchID, err)
 	}
+
+	return nil
 }
 
 // marshalAttributes marshals an attributes map to JSON, storing a nil/empty map as the

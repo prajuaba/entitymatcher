@@ -60,11 +60,15 @@ func (s *Store) UpdateConfig(cfg matcher.Config) {
 	s.config = cfg
 }
 
-func (s *Store) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
+// SaveDataset saves the source and destination datasets for a batch.
+// The in-memory store cannot fail, but the signature is shared with the Repository interface
+// so it can report the failures the PostgreSQL-backed store genuinely has.
+func (s *Store) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sources[batchID] = sources
 	s.destinations[batchID] = dests
+	return nil
 }
 
 func (s *Store) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {

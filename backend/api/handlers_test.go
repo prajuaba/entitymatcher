@@ -300,7 +300,8 @@ func (m *mockRepository) GetConfig() matcher.Config {
 func (m *mockRepository) UpdateConfig(cfg matcher.Config) {
 }
 
-func (m *mockRepository) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
+func (m *mockRepository) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) error {
+	return nil
 }
 
 func (m *mockRepository) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {
