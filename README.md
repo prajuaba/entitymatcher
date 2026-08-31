@@ -43,14 +43,15 @@ winning source and its score.
 
 From `go test ./internal/mockdata/` (4,720 × 4,720 synthetic bilingual records, 22.3M candidate
 pair space, fixed seed). Scale figures are from the opt-in harness
-(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 230,120 × 230,120,
-re-measured 2026-08-31 on 20 cores / 121 GiB:
+(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleMatching` for the point measurement,
+`-run TestScaleSweep` for the scaling fit) at 230,120 × 230,120, re-measured 2026-08-31 on
+20 cores / 121 GiB:
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~8,450 sources/sec at 230k × 230k |
+| Throughput | ~8,590 sources/sec at 230k × 230k |
 | Verified scale | 230,120 × 230,120 per side in 26.8s (20 cores), 1.46 GiB peak heap |
-| Scaling | time ~ O(N^1.12) over 23k → 230k |
+| Scaling | time ~ O(N^1.09) over 23k → 230k |
 | Decision precision | 100.00% |
 | Decision recall (auto-match) | 59.2% |
 | F1 | 74.4% |
@@ -202,7 +203,13 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
 `POST /api/upload/file` (multipart `.csv`/`.xlsx`/`.xls`), `POST /api/match/run`,
 `GET /api/match/progress` (SSE), `GET /api/match/results`, `POST /api/match/action`,
 `POST /api/match/manual-link`, `GET /api/destinations/search`, `GET /api/export/csv`,
-`POST /api/llm/evaluate`
+`POST /api/llm/evaluate`, `GET /api/jobs`
+
+`GET /api/jobs` lists historical runs with their counters and duration, most recent first.
+`limit` defaults to 20 and is clamped to 200; a negative or unparseable value falls back to the
+default rather than erroring. Note the two stores disagree about what a job is: PostgreSQL
+records one when a dataset is saved, so a batch uploaded but never matched is listed, while the
+in-memory store derives them from run progress and does not list it.
 
 `POST /api/upload/file` takes `source_file` and `destination_file`, plus optional
 `batch_id`, `column_mapping` (JSON) and `source_sheet`/`destination_sheet` for Excel.
@@ -210,7 +217,16 @@ Files are read through the same connectors used elsewhere. Requests are capped a
 and 50,000 rows per file; hitting the row cap sets `truncated` and a warning in the
 response rather than silently returning a short dataset.
 
-**Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`
+**Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`,
+`POST /api/connector/ingest` (ADMIN, ENGINEER)
+
+`POST /api/connector/ingest` reads a source and destination connector into a batch a match run
+can use, paging each to exhaustion under the same 50,000-row cap. Truncation is decided by asking
+for one more row, not inferred from a full final page, so a source holding exactly the cap is not
+mislabelled. It accepts `POSTGRES`, `SQLSERVER` and `MONGODB` only: a `.csv`/`.xlsx` is ingested
+through `/api/upload/file`, which takes the bytes from the request, and accepting a server-side
+`file_path` here would let any ADMIN or ENGINEER read an arbitrary file off the server in full.
+
 
 Database connectors page their reads, and a page is only meaningful over a total order, so
 each resolves one before fetching: `extra_params.order_by` if the operator supplied it,
@@ -274,11 +290,15 @@ false — a fitted model changes no scoring until that is turned on.
   runs are byte-identical — so comparing code versions requires an interleaved A/B in one load
   window, not two timestamps.
 
-- **Scaling is O(N^1.12), not linear.** The residual comes from the candidate set growing with
+- **Scaling is O(N^1.09), not linear.** The residual comes from the candidate set growing with
   corpus size; bounded top-K selection caps its sort cost but does not eliminate it. Re-measured
-  2026-08-31 across the sweep's four sizes: the per-step exponents are 1.16, 1.01 and 1.20, and a
-  least-squares fit over all four points gives 1.12. An earlier revision of this file claimed
-  1.05, which the measured points do not support.
+  2026-08-31 across the sweep's four sizes, a least-squares fit gives 1.09 (endpoint-to-endpoint
+  1.10). It measured 1.12 before the result rows stopped embedding record copies, which is
+  consistent with a third less heap pressure. An earlier revision of this file claimed 1.05, which
+  no pair of measured points supports.
+
+  Run-to-run spread is about 1% at this size — the dedicated run measured 8,593 sources/sec and the
+  sweep 8,501 in the same window — so treat differences below a few percent as noise, not signal.
 - **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
   records are now matched through RTGS romanization: a Thai syllable segmenter determines consonant
   position, `RomanizeThai` produces the romanization, and a shared phonetic skeleton puts both
