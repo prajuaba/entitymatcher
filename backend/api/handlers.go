@@ -1164,10 +1164,19 @@ func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if searchQuery != "" {
-			srcMatch := strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchQuery) ||
-				strings.Contains(strings.ToLower(item.Source.ReferenceID), searchQuery)
-			destMatch := strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchQuery) ||
-				strings.Contains(strings.ToLower(item.Destination.CustomerID), searchQuery)
+			// Source and Destination are pointers and are legitimately nil: a
+			// NO_MATCH row has no destination at all. Dereferencing them here
+			// panicked on any batch containing an unmatched source.
+			srcMatch := false
+			if item.Source != nil {
+				srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchQuery) ||
+					strings.Contains(strings.ToLower(item.Source.ReferenceID), searchQuery)
+			}
+			destMatch := false
+			if item.Destination != nil {
+				destMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchQuery) ||
+					strings.Contains(strings.ToLower(item.Destination.CustomerID), searchQuery)
+			}
 			if !srcMatch && !destMatch {
 				continue
 			}
