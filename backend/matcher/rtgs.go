@@ -3,6 +3,7 @@ package matcher
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // RomanizeThai converts Thai text to its RTGS (Royal Thai General System) romanization.
@@ -149,6 +150,13 @@ func romanizeInitial(initial string) string {
 	case "ห", "ฮ":
 		return "h"
 
+	// ฤ/ฦ are vowel-consonants: RTGS romanizes them as rue/lue. Without these
+	// they fall to default, which is what exposed the recursion bug above.
+	case "ฤ":
+		return "rue"
+	case "ฦ":
+		return "lue"
+
 	// อ-class (glottal stop, handled in romanizeSyllable)
 	case "อ":
 		return ""
@@ -156,12 +164,16 @@ func romanizeInitial(initial string) string {
 	// If initial is a cluster, recursively handle it
 	// (clusters should already be in the initial position from segmenter)
 	default:
-		// Try to handle clusters by mapping component consonants
-		if len(initial) > 1 {
+		// Try to handle clusters by mapping component consonants.
+		//
+		// This MUST count runes, not bytes: a Thai consonant is 3 bytes in UTF-8,
+		// so a byte-length check treats a single unmapped character (ฤ, ฦ) as a
+		// cluster, decodes it to one rune, and recurses on the identical string
+		// until the stack is exhausted and the process dies.
+		if utf8.RuneCountInString(initial) > 1 {
 			// For clusters like "กร", map each component
-			runes := []rune(initial)
 			var result string
-			for _, r := range runes {
+			for _, r := range initial {
 				result += romanizeInitial(string(r))
 			}
 			return result
