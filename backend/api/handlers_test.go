@@ -300,6 +300,13 @@ func (m *mockRepository) GetConfig() matcher.Config {
 func (m *mockRepository) UpdateConfig(cfg matcher.Config) {
 }
 
+func (m *mockRepository) GetConnectorSettings() store.ConnectorSettings {
+	return store.ConnectorSettings{}
+}
+
+func (m *mockRepository) UpdateConnectorSettings(cs store.ConnectorSettings) {
+}
+
 func (m *mockRepository) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) error {
 	return nil
 }

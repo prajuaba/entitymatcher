@@ -9,6 +9,15 @@ CREATE TABLE IF NOT EXISTS config (
     CONSTRAINT only_one_row CHECK (id = 1)
 );
 
+-- Connector settings: single row holds the source/destination data source
+-- connection settings the UI shows. Passwords are deliberately NOT stored.
+CREATE TABLE IF NOT EXISTS connector_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    settings JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT connector_settings_only_one_row CHECK (id = 1)
+);
+
 -- Match jobs: high-level summary of each batch matching job
 CREATE TABLE IF NOT EXISTS match_jobs (
     batch_id VARCHAR(255) PRIMARY KEY,

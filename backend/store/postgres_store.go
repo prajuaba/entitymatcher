@@ -104,6 +104,44 @@ func (s *PostgresStore) UpdateConfig(cfg matcher.Config) {
 		configJSON)
 }
 
+// GetConnectorSettings retrieves the stored connector settings. A missing row
+// is normal on a fresh database and yields the zero value.
+func (s *PostgresStore) GetConnectorSettings() ConnectorSettings {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var settingsJSON []byte
+	err := s.pool.QueryRow(ctx,
+		"SELECT settings FROM connector_settings WHERE id = 1").
+		Scan(&settingsJSON)
+	if err != nil {
+		return ConnectorSettings{}
+	}
+
+	var cs ConnectorSettings
+	if err := json.Unmarshal(settingsJSON, &cs); err != nil {
+		return ConnectorSettings{}
+	}
+	return cs
+}
+
+func (s *PostgresStore) UpdateConnectorSettings(cs ConnectorSettings) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	settingsJSON, err := json.Marshal(cs)
+	if err != nil {
+		log.Printf("connector settings: marshal failed: %v", err)
+		return
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO connector_settings (id, settings, updated_at) VALUES (1, $1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = CURRENT_TIMESTAMP`,
+		settingsJSON); err != nil {
+		log.Printf("connector settings: write failed: %v", err)
+	}
+}
+
 // SaveDataset stores source and destination records for a batch, replacing any previously
 // saved dataset for the same batch. Failures are now returned to the caller instead of only logged.
 //

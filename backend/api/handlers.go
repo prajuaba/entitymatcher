@@ -517,10 +517,13 @@ func buildSourceRecords(raw []map[string]interface{}, batchID string, cfg matche
 		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsSrc)
 
 		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldSrc)
-		txDate, _ := time.Parse("2006-01-02", dateStr)
-		if txDate.IsZero() {
-			txDate = time.Now()
-		}
+		// ParseFlexibleDate, not time.Parse: the rigid "2006-01-02" layout silently
+		// turned every DD/MM/YYYY, Buddhist-era and Thai-digit date into time.Now(),
+		// which made the date component of the score meaningless.
+		// Leave the zero value when there is no parseable date: the scorer needs
+		// to tell "no date supplied" apart from a real one, and a fabricated
+		// time.Now() is indistinguishable from a genuine same-day transaction.
+		txDate, _ := matcher.ParseFlexibleDate(dateStr)
 
 		txType := matcher.ExtractFieldValue(rawMap, "transaction_type")
 
@@ -554,10 +557,13 @@ func buildDestinationRecords(raw []map[string]interface{}, batchID string, cfg m
 		nameStr := matcher.ExtractCompositeName(rawMap, cfg.ColumnMapping.NameFieldsDest)
 
 		dateStr := matcher.ExtractFieldValue(rawMap, cfg.ColumnMapping.DateFieldDest)
-		txDate, _ := time.Parse("2006-01-02", dateStr)
-		if txDate.IsZero() {
-			txDate = time.Now()
-		}
+		// ParseFlexibleDate, not time.Parse: the rigid "2006-01-02" layout silently
+		// turned every DD/MM/YYYY, Buddhist-era and Thai-digit date into time.Now(),
+		// which made the date component of the score meaningless.
+		// Leave the zero value when there is no parseable date: the scorer needs
+		// to tell "no date supplied" apart from a real one, and a fabricated
+		// time.Now() is indistinguishable from a genuine same-day transaction.
+		txDate, _ := matcher.ParseFlexibleDate(dateStr)
 
 		destinations = append(destinations, matcher.DestinationRecord{
 			ID:              fmt.Sprintf("dest-%d", i+1),
@@ -622,9 +628,30 @@ func (s *Server) HandleUpload(w http.ResponseWriter, r *http.Request) {
 // MaxUploadBytes caps a single multipart ingestion request.
 const MaxUploadBytes = 50 << 20 // 50 MiB
 
-// MaxIngestRecords caps rows read from one uploaded file. Matches the clamp
-// ceiling inside the CSV/Excel connectors' FetchRecords.
-const MaxIngestRecords = 50000
+// MaxIngestRecordsEnv names the environment variable that overrides the ingest cap.
+const MaxIngestRecordsEnv = "MAX_INGEST_RECORDS"
+
+// defaultMaxIngestRecords is the cap applied when MAX_INGEST_RECORDS is unset.
+const defaultMaxIngestRecords = 500000
+
+// MaxIngestRecords bounds how many rows one ingest will read from a single
+// source. It is a ceiling on memory: every row is held in memory and persisted
+// as JSONB, so raising it trades RAM for completeness. A file that hits the cap
+// is reported as truncated rather than silently short.
+var MaxIngestRecords = resolveMaxIngestRecords()
+
+func resolveMaxIngestRecords() int {
+	raw := strings.TrimSpace(os.Getenv(MaxIngestRecordsEnv))
+	if raw == "" {
+		return defaultMaxIngestRecords
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		log.Printf("%s=%q is not a positive integer; using default %d", MaxIngestRecordsEnv, raw, defaultMaxIngestRecords)
+		return defaultMaxIngestRecords
+	}
+	return n
+}
 
 // IngestPageSize is how many rows each FetchRecords call requests. Ingestion
 // pages rather than asking for the whole table at once so a large source does
@@ -1683,6 +1710,108 @@ func (s *Server) HandleIntrospectSchema(w http.ResponseWriter, r *http.Request) 
 		"type":    cfg.Type,
 		"columns": cols,
 	})
+}
+
+// HandleIntrospectUploadedFile returns the column headers of a CSV/Excel file
+// submitted as multipart/form-data. The bytes come from the request, so unlike
+// HandleIntrospectSchema this endpoint needs no CONNECTOR_FILE_ROOT confinement:
+// the caller can only read back a file it already had. The temp file is removed
+// before the handler returns; nothing is persisted.
+func (s *Server) HandleIntrospectUploadedFile(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadBytes)
+	err := r.ParseMultipartForm(MaxUploadBytes)
+	if err != nil {
+		http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file is required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	path, err := saveUploadedFileToTemp(header)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer os.Remove(path)
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	var srcType matcher.SourceType
+	if ext == ".csv" {
+		srcType = matcher.SourceTypeCSV
+	} else {
+		srcType = matcher.SourceTypeExcel
+	}
+
+	sheetValue := r.FormValue("sheet")
+	cfg := matcher.ConnectionConfig{
+		Type:     srcType,
+		FilePath: path,
+	}
+	if srcType == matcher.SourceTypeExcel && sheetValue != "" {
+		cfg.ExtraParams = map[string]interface{}{"sheet": sheetValue}
+	}
+
+	conn, err := matcher.NewDataConnector(cfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	cols, err := conn.IntrospectSchema(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Schema introspection failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "success",
+		"type":     cfg.Type,
+		"filename": header.Filename,
+		"columns":  cols,
+	})
+}
+
+// HandleConnectorSettings reads and writes the connector configuration the UI
+// shows. Passwords are never stored: store.ConnectorEndpoint has no password
+// field, so any password in the request body is discarded at decode time.
+func (s *Server) HandleConnectorSettings(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.store.GetConnectorSettings())
+	case "PUT", "POST":
+		var cs store.ConnectorSettings
+		if err := json.NewDecoder(r.Body).Decode(&cs); err != nil {
+			http.Error(w, "Invalid connector settings JSON", http.StatusBadRequest)
+			return
+		}
+		s.store.UpdateConnectorSettings(cs)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.store.GetConnectorSettings())
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) HandleSchedulerConfig(w http.ResponseWriter, r *http.Request) {

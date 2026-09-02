@@ -5,19 +5,40 @@ import (
 	"entitymatcher/matcher"
 )
 
+// ConnectorEndpoint is one side (source or destination) of the connector
+// configuration the UI shows. There is deliberately no password field: the
+// struct is the persistence boundary, so a password sent by a client is
+// dropped by encoding/json rather than relying on a caller to strip it.
+type ConnectorEndpoint struct {
+	Type         string   `json:"type"`
+	Host         string   `json:"host"`
+	Port         int      `json:"port"`
+	Database     string   `json:"database"`
+	Username     string   `json:"username"`
+	TableOrQuery string   `json:"table_or_query"`
+	FilePath     string   `json:"file_path"`
+	Columns      []string `json:"columns"`
+}
+
+// ConnectorSettings is the single stored row of connector configuration.
+type ConnectorSettings struct {
+	Source      ConnectorEndpoint `json:"source"`
+	Destination ConnectorEndpoint `json:"destination"`
+}
+
 // JobSummary represents a summary of a matching job
 type JobSummary struct {
-	BatchID              string `json:"batch_id"`
-	Status               string `json:"status"`
-	TotalSources         int    `json:"total_sources"`
-	TotalDestinations    int    `json:"total_destinations"`
-	AutoMatched          int    `json:"auto_matched"`
-	ReviewNeeded         int    `json:"review_needed"`
-	NoMatchCount         int    `json:"no_match_count"`
-	TotalCandidatePairs  int    `json:"total_candidate_pairs"`
-	ElapsedMs            int64  `json:"elapsed_ms"`
-	StartedAt            string `json:"started_at"` // RFC3339
-	CompletedAt          string `json:"completed_at"` // RFC3339
+	BatchID             string `json:"batch_id"`
+	Status              string `json:"status"`
+	TotalSources        int    `json:"total_sources"`
+	TotalDestinations   int    `json:"total_destinations"`
+	AutoMatched         int    `json:"auto_matched"`
+	ReviewNeeded        int    `json:"review_needed"`
+	NoMatchCount        int    `json:"no_match_count"`
+	TotalCandidatePairs int    `json:"total_candidate_pairs"`
+	ElapsedMs           int64  `json:"elapsed_ms"`
+	StartedAt           string `json:"started_at"`   // RFC3339
+	CompletedAt         string `json:"completed_at"` // RFC3339
 }
 
 // Repository defines the storage interface for the entity matcher.
@@ -26,6 +47,10 @@ type Repository interface {
 	// Config management
 	GetConfig() matcher.Config
 	UpdateConfig(cfg matcher.Config)
+
+	// Connector settings (never includes passwords)
+	GetConnectorSettings() ConnectorSettings
+	UpdateConnectorSettings(cs ConnectorSettings)
 
 	// Dataset management
 	// Callers MUST check and surface the returned error; silent write failure is

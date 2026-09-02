@@ -21,15 +21,16 @@ type BatchSummary struct {
 }
 
 type Store struct {
-	mu           sync.RWMutex
-	config       matcher.Config
-	sources      map[string][]matcher.SourceRecord      // batch_id -> sources
-	destinations map[string][]matcher.DestinationRecord // batch_id -> dests
-	results      map[string][]matcher.MatchResultItem   // batch_id -> results
-	resultIndex  map[string]map[string]int              // batch_id -> matchID -> slice position
-	progresses   map[string]matcher.BatchProgress       // batch_id -> progress
-	sseClients   map[string][]chan matcher.BatchProgress
-	auditStore   *AuditStore
+	mu                sync.RWMutex
+	config            matcher.Config
+	connectorSettings ConnectorSettings
+	sources           map[string][]matcher.SourceRecord      // batch_id -> sources
+	destinations      map[string][]matcher.DestinationRecord // batch_id -> dests
+	results           map[string][]matcher.MatchResultItem   // batch_id -> results
+	resultIndex       map[string]map[string]int              // batch_id -> matchID -> slice position
+	progresses        map[string]matcher.BatchProgress       // batch_id -> progress
+	sseClients        map[string][]chan matcher.BatchProgress
+	auditStore        *AuditStore
 
 	calibrationModels []CalibrationModel
 }
@@ -58,6 +59,18 @@ func (s *Store) UpdateConfig(cfg matcher.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.config = cfg
+}
+
+func (s *Store) GetConnectorSettings() ConnectorSettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connectorSettings
+}
+
+func (s *Store) UpdateConnectorSettings(cs ConnectorSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connectorSettings = cs
 }
 
 // SaveDataset saves the source and destination datasets for a batch.

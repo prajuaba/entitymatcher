@@ -166,11 +166,27 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
+	// Connector introspect from an uploaded file (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/connector/introspect/upload",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleIntrospectUploadedFile),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
 	// Connector ingest (ADMIN, ENGINEER)
 	mux.HandleFunc("/api/connector/ingest",
 		corsHandler(chainMiddleware(
 			http.HandlerFunc(server.HandleConnectorIngest),
 			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Connector settings: GET for any authenticated, PUT/POST for ADMIN,ENGINEER
+	mux.HandleFunc("/api/connector/settings",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleConnectorSettings),
+			newMethodRoleMiddleware([]string{"PUT", "POST"}, api.RoleAdmin, api.RoleEngineer),
 			api.RequireAuth,
 		)).ServeHTTP)
 
