@@ -190,6 +190,18 @@ func IsAutoMatchable(topScore, runnerUpScore, autoMatchThreshold, marginThreshol
 	return false, "Below auto-match threshold — needs review"
 }
 
+// isManyToMany reports whether the configured assignment strategy allows a
+// source and a destination to participate in more than one link.
+//
+// Under ALL_CANDIDATES the data is genuinely many-to-many: one application can
+// name several co-borrowers and one customer can hold several applications. A
+// second candidate scoring as well as the first is then a second real link, not
+// evidence that the first is uncertain -- so neither the rank-1 restriction nor
+// the runner-up margin rule applies.
+func isManyToMany(strategy string) bool {
+	return strategy == "ALL_CANDIDATES"
+}
+
 type matchTask struct {
 	source SourceRecord
 }
@@ -340,18 +352,25 @@ func (e *MatchEngine) ExecuteJob(
 							calibratedRunnerUpScore = e.calibrator.Calibrate(runnerUpScore)
 						}
 
-						// Propose decision for rank-1 only
 						status := "REVIEW_NEEDED"
 						note := ""
 
-						if rankNum == 1 {
-							// First-ranked candidate: apply decision rules via helper
-							// Use calibrated score for decisions if calibration is enabled, else use raw score
+						manyToMany := isManyToMany(e.Config.AssignmentStrategy)
+						if rankNum == 1 || manyToMany {
 							decisionScore := scoreRes.TotalScore
 							decisionRunnerUp := runnerUpScore
 							if e.Config.CalibrationEnabled && e.calibrator != nil {
 								decisionScore = calibratedScore
 								decisionRunnerUp = calibratedRunnerUpScore
+							}
+
+							// Under many-to-many a tied sibling is another real link, so the
+							// margin rule must not downgrade it. Passing a zero runner-up
+							// makes the margin unconditionally satisfied, leaving the
+							// auto-match threshold as the only bar -- which is the intended
+							// rule: judge every candidate on its own score.
+							if manyToMany {
+								decisionRunnerUp = 0
 							}
 
 							canAutoMatch, decisionNote := IsAutoMatchable(
@@ -368,8 +387,10 @@ func (e *MatchEngine) ExecuteJob(
 								atomic.AddInt64(&reviewNeededCount, 1)
 							}
 							note = decisionNote
+							if manyToMany && rankNum > 1 {
+								note = fmt.Sprintf("%s (rank %d of several valid links)", decisionNote, rankNum)
+							}
 						} else {
-							// Rank >= 2: alternative for human review
 							atomic.AddInt64(&reviewNeededCount, 1)
 							note = fmt.Sprintf("Alternative candidate (rank %d) for review", rankNum)
 						}
