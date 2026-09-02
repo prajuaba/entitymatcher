@@ -19,10 +19,13 @@ export function MasterDetailView() {
     setSelectedMatch,
     fetchResults,
     batchID,
+    jobs,
+    fetchJobs,
+    setBatchID
   } = useMatcherStore()
 
   useEffect(() => {
-    fetchResults()
+    fetchJobs().then(() => fetchResults())
   }, [])
 
   const handleExportCSV = async () => {
@@ -69,6 +72,24 @@ export function MasterDetailView() {
 
         {/* Search Input & CSV Export */}
         <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-400">Batch</span>
+          <select
+            value={batchID}
+            onChange={(e) => setBatchID(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 max-w-xs"
+            title="Which match run to review"
+          >
+            {!batchID && <option value="">— select a batch —</option>}
+            {jobs.map((j) => (
+              <option key={j.batch_id} value={j.batch_id}>
+                {`${j.batch_id} — ${j.auto_matched} matched, ${j.review_needed} to review`}
+              </option>
+            ))}
+            {batchID && !jobs.some((j) => j.batch_id === batchID) && (
+              <option value={batchID}>{batchID}</option>
+            )}
+          </select>
+          
           <div className="relative">
             <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
             <input

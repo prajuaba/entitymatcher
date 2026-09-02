@@ -14,8 +14,8 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
     name_fields_dest: ['customer_name'],
     ref_id_src: 'reference_id',
     ref_id_dest: 'customer_id',
-    date_field_src: 'transaction_date',
-    date_field_dest: 'transaction_date',
+    date_field_src: '',
+    date_field_dest: '',
     secondary_fields: [],
   })
 
@@ -93,6 +93,21 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
       list[index] = { ...list[index], [key]: val }
       return { ...prev, secondary_fields: list }
     })
+  }
+
+  // A <select> whose value is absent from its options renders the FIRST option,
+  // so an unset mapping silently displays a column that was never chosen. Always
+  // offer an explicit empty option, and keep a saved-but-missing column visible
+  // rather than letting it be replaced by an unrelated one.
+  const columnOptions = (cols, selected, placeholder) => {
+    const opts = [<option key="__none__" value="">{placeholder}</option>]
+    for (const col of cols) {
+      opts.push(<option key={col} value={col}>{col}</option>)
+    }
+    if (selected && !cols.includes(selected)) {
+      opts.push(<option key={`__missing__${selected}`} value={selected}>{`${selected} (not in current columns)`}</option>)
+    }
+    return opts
   }
 
   const handleSave = async () => {
@@ -187,9 +202,7 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, ref_id_src: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {srcCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(srcCols, mapping.ref_id_src, '— select a column —')}
           </select>
         </div>
 
@@ -200,9 +213,7 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, ref_id_dest: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {destCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(destCols, mapping.ref_id_dest, '— select a column —')}
           </select>
         </div>
 
@@ -213,10 +224,9 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, date_field_src: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {srcCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(srcCols, mapping.date_field_src, '— none (no date column) —')}
           </select>
+          <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
         </div>
 
         <div>
@@ -226,10 +236,9 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, date_field_dest: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {destCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(destCols, mapping.date_field_dest, '— none (no date column) —')}
           </select>
+          <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
         </div>
       </div>
 

@@ -1,9 +1,30 @@
 import { create } from 'zustand'
 import { apiFetch, getAccessToken, readErrorMessage } from '../lib/api.js'
 
+const BATCH_ID_STORAGE_KEY = 'entity_matcher_batch_id'
+
+function rememberBatchID(id) {
+  try {
+    if (id) localStorage.setItem(BATCH_ID_STORAGE_KEY, id)
+  } catch {
+    // ignore
+  }
+  return id
+}
+
 export const useMatcherStore = create((set, get) => ({
   activeTab: 'results',
-  batchID: 'benchmark-batch-001',
+  // Seeded from localStorage so a reload keeps the batch the user was reviewing.
+  // Falls back to '' rather than the demo batch: showing seeded example data as
+  // if it were the user's results is worse than showing nothing.
+  batchID: (() => {
+    try {
+      return localStorage.getItem(BATCH_ID_STORAGE_KEY) || ''
+    } catch {
+      return ''
+    }
+  })(),
+  jobs: [],
   loading: false,
   error: null,
 
@@ -80,6 +101,16 @@ export const useMatcherStore = create((set, get) => ({
   setSelectedMatch: (match) => set({ selectedMatch: match }),
   setManualSearchOpen: (open) => set({ isManualSearchOpen: open }),
   setLLMModalOpen: (open) => set({ isLLMModalOpen: open }),
+  setBatchID: (id) => {
+    try {
+      if (id) localStorage.setItem(BATCH_ID_STORAGE_KEY, id)
+      else localStorage.removeItem(BATCH_ID_STORAGE_KEY)
+    } catch {
+      // A browser that refuses storage still works for this session.
+    }
+    set({ batchID: id, page: 1, selectedMatch: null })
+    return get().fetchResults(id)
+  },
 
   // Authentication methods
   initAuth: async () => {
@@ -173,6 +204,27 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
+  fetchJobs: async () => {
+    try {
+      const res = await apiFetch('/api/jobs')
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to load job history'))
+      }
+      const data = await res.json()
+      const jobs = data.jobs || []
+      set({ jobs })
+      // Nothing selected yet (first visit, or storage cleared): fall back to the
+      // most recent real run instead of the seeded demo batch.
+      if (!get().batchID && jobs.length > 0) {
+        get().setBatchID(jobs[0].batch_id)
+      }
+      return jobs
+    } catch (e) {
+      set({ error: e.message })
+      return []
+    }
+  },
+
   fetchConnectorSettings: async () => {
     const res = await apiFetch('/api/connector/settings')
     if (!res.ok) {
@@ -199,7 +251,7 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch('/api/seed', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id })
+        set({ batchID: rememberBatchID(data.batch_id) })
         await get().runMatching(data.batch_id)
       }
     } catch (e) {
@@ -213,7 +265,7 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch('/api/seed/big', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id })
+        set({ batchID: rememberBatchID(data.batch_id) })
         await get().runMatching(data.batch_id)
       }
     } catch (e) {
@@ -231,7 +283,7 @@ export const useMatcherStore = create((set, get) => ({
       })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id, loading: false })
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
         return data.batch_id
       } else {
         throw new Error(data.message || 'Upload failed')
@@ -264,7 +316,7 @@ export const useMatcherStore = create((set, get) => ({
         throw new Error(message)
       } else {
         const data = JSON.parse(raw)
-        set({ batchID: data.batch_id, loading: false })
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
         return data
       }
     } catch (e) {
@@ -300,7 +352,7 @@ export const useMatcherStore = create((set, get) => ({
         throw new Error(message)
       } else {
         const data = JSON.parse(raw)
-        set({ batchID: data.batch_id, loading: false })
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
         return data
       }
     } catch (e) {

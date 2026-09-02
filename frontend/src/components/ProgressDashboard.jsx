@@ -14,7 +14,7 @@ export function ProgressDashboard() {
     <div className="max-w-4xl mx-auto space-y-6 bg-slate-900/60 p-8 rounded-2xl border border-slate-800">
       <div className="flex items-center justify-between border-b border-slate-800 pb-4">
         <div>
-          <span className="text-xs font-mono text-slate-400 uppercase tracking-widest">Batch execution ID: {batchID || 'benchmark-batch-001'}</span>
+          <span className="text-xs font-mono text-slate-400 uppercase tracking-widest">Batch execution ID: {batchID || 'none selected'}</span>
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2 mt-0.5">
             <Activity className="w-5 h-5 text-sky-400" /> Real-Time Engine Execution Stream
           </h2>
