@@ -62,8 +62,8 @@ func TestSegmentThaiSyllables(t *testing.T) {
 			},
 		},
 		{
-			name:  "empty string",
-			input: "",
+			name:     "empty string",
+			input:    "",
 			expected: []Syllable{},
 		},
 		{
@@ -184,40 +184,40 @@ func TestSegmentThaiSyllablesKnownFailures(t *testing.T) {
 
 func TestSegmentThaiSyllablesEdgeCases(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantLen  int
+		name          string
+		input         string
+		wantLen       int
 		wantRoundTrip bool
 	}{
 		{
-			name:            "nil/empty handled gracefully",
-			input:           "",
-			wantLen:         0,
-			wantRoundTrip:   true,
+			name:          "nil/empty handled gracefully",
+			input:         "",
+			wantLen:       0,
+			wantRoundTrip: true,
 		},
 		{
-			name:            "single thai consonant",
-			input:           "ก",
-			wantLen:         1,
-			wantRoundTrip:   true,
+			name:          "single thai consonant",
+			input:         "ก",
+			wantLen:       1,
+			wantRoundTrip: true,
 		},
 		{
-			name:            "single latin char",
-			input:           "A",
-			wantLen:         1,
-			wantRoundTrip:   true,
+			name:          "single latin char",
+			input:         "A",
+			wantLen:       1,
+			wantRoundTrip: true,
 		},
 		{
-			name:            "mixed spacing",
-			input:           "สวัสดี",
-			wantLen:         3, // สวัสดี = สวัส + ดี
-			wantRoundTrip:   true,
+			name:          "mixed spacing",
+			input:         "สวัสดี",
+			wantLen:       3, // สวัสดี = สวัส + ดี
+			wantRoundTrip: true,
 		},
 		{
-			name:            "punctuation preserved",
-			input:           "ทดสอบ, ABC, 123",
-			wantLen:         4, // Thai segments coalesce with punctuation/spaces into runs
-			wantRoundTrip:   true,
+			name:          "punctuation preserved",
+			input:         "ทดสอบ, ABC, 123",
+			wantLen:       4, // Thai segments coalesce with punctuation/spaces into runs
+			wantRoundTrip: true,
 		},
 	}
 
@@ -248,9 +248,9 @@ func TestSegmentThaiSyllablesEdgeCases(t *testing.T) {
 func TestSegmentThaiSyllablesTermination(t *testing.T) {
 	// Critical test cases that previously hung: leading vowel + consonant with no final
 	hangCases := []string{
-		"โน",       // leading vowel + single consonant
-		"โลยี",     // leading vowel + consonant + vowel + consonant
-		"โนโลยี",   // multiple leading-vowel cases
+		"โน",        // leading vowel + single consonant
+		"โลยี",      // leading vowel + consonant + vowel + consonant
+		"โนโลยี",    // multiple leading-vowel cases
 		"เทคโนโลยี", // mixed case with both final and non-final
 		"โซลูชั่น",  // complex case with multiple vowels
 	}

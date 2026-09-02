@@ -17,14 +17,14 @@ type LabeledPair struct {
 
 // Thai realistic homophone consonant classes (commonly-occurring substitutions)
 var thaiInitialHomophones = map[rune][]rune{
-	'ศ': {'ส'},           // s class
-	'ส': {'ศ'},           // s class
-	'ท': {'ธ'},           // th class
-	'ธ': {'ท'},           // th class
-	'พ': {'ภ'},           // ph class
-	'ภ': {'พ'},           // ph class
-	'ณ': {'น'},           // n class
-	'น': {'ณ'},           // n class
+	'ศ': {'ส'}, // s class
+	'ส': {'ศ'}, // s class
+	'ท': {'ธ'}, // th class
+	'ธ': {'ท'}, // th class
+	'พ': {'ภ'}, // ph class
+	'ภ': {'พ'}, // ph class
+	'ณ': {'น'}, // n class
+	'น': {'ณ'}, // n class
 }
 
 // applyConsonantVariant replaces the first Thai consonant with a homophone
@@ -220,10 +220,10 @@ func GenerateBigMockDataset(count int) ([]matcher.SourceRecord, []matcher.Destin
 	shortGivenPairs := []struct {
 		base, variant string
 	}{
-		{"ศิริ", "สิริ"},     {"ณัฐ", "นัฐ"},       {"ธนา", "ทนา"},       {"ภัทร", "พัทร"},
-		{"ศักดิ์", "สักดิ์"},  {"สุข", "สุก"},       {"เอก", "เอ็ก"},
-		{"โชค", "ชค"},       {"ไพศาล", "พิศาล"},   {"ธีร์", "ทีร์"},     {"วุฒิ", "วุฐิ"},
-		{"จรัส", "จรัซ"},     {"ปิติ", "ปีติ"},     {"สุวรรณ", "สุวัน"},
+		{"ศิริ", "สิริ"}, {"ณัฐ", "นัฐ"}, {"ธนา", "ทนา"}, {"ภัทร", "พัทร"},
+		{"ศักดิ์", "สักดิ์"}, {"สุข", "สุก"}, {"เอก", "เอ็ก"},
+		{"โชค", "ชค"}, {"ไพศาล", "พิศาล"}, {"ธีร์", "ทีร์"}, {"วุฒิ", "วุฐิ"},
+		{"จรัส", "จรัซ"}, {"ปิติ", "ปีติ"}, {"สุวรรณ", "สุวัน"},
 	}
 	for _, pair := range shortGivenPairs {
 		srcID := fmt.Sprintf("src-%05d", pairID)

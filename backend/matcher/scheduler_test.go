@@ -90,7 +90,7 @@ func TestOverlapGuardSkipsSecondInvocation(t *testing.T) {
 
 	// Start first job in a goroutine
 	go sm.runScheduledJob()
-	time.Sleep(10 * time.Millisecond)  // Ensure first job has started
+	time.Sleep(10 * time.Millisecond) // Ensure first job has started
 
 	// Try to start second job - should be skipped
 	sm.runScheduledJob()
@@ -121,10 +121,10 @@ func TestSetReconcileFuncWhenNone(t *testing.T) {
 func TestAnomalyDetectionLowAutoMatchRate(t *testing.T) {
 	// Test: auto-match rate < 50%
 	outcome := ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       40,  // 40%
-		ReviewNeeded:      50,
-		NoMatch:           10,
+		TotalSources: 100,
+		AutoMatched:  40, // 40%
+		ReviewNeeded: 50,
+		NoMatch:      10,
 	}
 
 	// Note: We can't call the isAnomalous function directly since it's in api/,
@@ -138,10 +138,10 @@ func TestAnomalyDetectionLowAutoMatchRate(t *testing.T) {
 func TestAnomalyDetectionHighNoMatchRate(t *testing.T) {
 	// Test: no-match rate > 30%
 	outcome := ReconcileOutcome{
-		TotalSources:      100,
-		AutoMatched:       60,
-		ReviewNeeded:      10,
-		NoMatch:           31,  // 31% (> 30%)
+		TotalSources: 100,
+		AutoMatched:  60,
+		ReviewNeeded: 10,
+		NoMatch:      31, // 31% (> 30%)
 	}
 
 	if int64(outcome.NoMatch) <= int64(outcome.TotalSources)*30/100 {
@@ -152,10 +152,10 @@ func TestAnomalyDetectionHighNoMatchRate(t *testing.T) {
 func TestAnomalyDetectionEmptyBatch(t *testing.T) {
 	// Test: empty batch should not panic
 	outcome := ReconcileOutcome{
-		TotalSources:      0,
-		AutoMatched:       0,
-		ReviewNeeded:      0,
-		NoMatch:           0,
+		TotalSources: 0,
+		AutoMatched:  0,
+		ReviewNeeded: 0,
+		NoMatch:      0,
 	}
 
 	// This should not cause a divide-by-zero panic

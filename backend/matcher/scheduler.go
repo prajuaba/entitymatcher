@@ -30,7 +30,7 @@ type ReconcileOutcome struct {
 type SchedulerConfig struct {
 	Enabled          bool      `json:"enabled"`
 	CronExpression   string    `json:"cron_expression"` // e.g. "0 2 * * *" (Nightly 2 AM)
-	WebhookURL       string    `json:"webhook_url"`      // e.g. Slack/Teams/Custom REST URL
+	WebhookURL       string    `json:"webhook_url"`     // e.g. Slack/Teams/Custom REST URL
 	NotifyOnSuccess  bool      `json:"notify_on_success"`
 	NotifyOnAnomaly  bool      `json:"notify_on_anomaly"`
 	LastRunTimestamp time.Time `json:"last_run_timestamp,omitempty"`
@@ -60,13 +60,13 @@ type WebhookPayload struct {
 }
 
 type SchedulerManager struct {
-	mu              sync.RWMutex
-	config          SchedulerConfig
-	cronScheduler   *cron.Cron
-	cronEntry       cron.EntryID
-	lastBatchID     string
-	runInProgress   bool
-	reconcileFunc   ReconcileFunc
+	mu            sync.RWMutex
+	config        SchedulerConfig
+	cronScheduler *cron.Cron
+	cronEntry     cron.EntryID
+	lastBatchID   string
+	runInProgress bool
+	reconcileFunc ReconcileFunc
 }
 
 // JobFunc is the function executed by the cron scheduler.
@@ -143,7 +143,7 @@ func (sm *SchedulerManager) runScheduledJob() {
 	}
 	sm.runInProgress = true
 	batchID := sm.lastBatchID
-	reconcileFunc := sm.reconcileFunc  // Capture under lock
+	reconcileFunc := sm.reconcileFunc // Capture under lock
 	sm.mu.Unlock()
 
 	if reconcileFunc == nil {

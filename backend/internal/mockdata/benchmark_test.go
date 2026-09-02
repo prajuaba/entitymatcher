@@ -46,9 +46,9 @@ func TestFullLoopBigDatasetBenchmark(t *testing.T) {
 	// =======================
 	// For each source, find its decided row: Rank == 1 && MatchStatus == "AUTO_MATCHED"
 	// Build a map from sourceID to the DestinationID it was auto-matched to (if any)
-	autoMatches := make(map[string]string) // sourceID -> destinationID (or empty if not auto-matched)
+	autoMatches := make(map[string]string)      // sourceID -> destinationID (or empty if not auto-matched)
 	destinationClaimers := make(map[string]int) // destinationID -> count of sources that auto-matched to it (should be 0 or 1)
-	autoMatchPerSource := make(map[string]int) // sourceID -> count of AUTO_MATCHED rows (should be 0 or 1)
+	autoMatchPerSource := make(map[string]int)  // sourceID -> count of AUTO_MATCHED rows (should be 0 or 1)
 
 	for _, res := range results {
 		if res.Rank == 1 && res.MatchStatus == "AUTO_MATCHED" {

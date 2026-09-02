@@ -6,8 +6,8 @@ import (
 
 func TestNormalizerC1C2(t *testing.T) {
 	tests := []struct {
-		name           string
-		input          string
+		name            string
+		input           string
 		expectedCleaned string
 	}{
 		// C1 - Token-boundary title stripping
@@ -39,12 +39,12 @@ func TestNormalizerC1C2(t *testing.T) {
 		{
 			name:            "Thai: นาย สมชาย เข็มกลัด (space-separated title)",
 			input:           "นาย สมชาย เข็มกลัด",
-			expectedCleaned: "สมชาย เข็มกลัด",  // Thai diacritics preserved
+			expectedCleaned: "สมชาย เข็มกลัด", // Thai diacritics preserved
 		},
 		{
 			name:            "Thai: นายสมชาย เข็มกลัด (prefix stripping)",
 			input:           "นายสมชาย เข็มกลัด",
-			expectedCleaned: "สมชาย เข็มกลัด",  // Thai diacritics preserved
+			expectedCleaned: "สมชาย เข็มกลัด", // Thai diacritics preserved
 		},
 		{
 			name:            "Bangkok Bank Public Company Limited",
@@ -81,22 +81,22 @@ func TestNormalizerC1C2(t *testing.T) {
 
 func TestPhoneticKey(t *testing.T) {
 	tests := []struct {
-		name              string
-		input             string
-		expectDifferent   string // Should be different from this
-		expectSameKey     bool   // Whether to expect same key
+		name            string
+		input           string
+		expectDifferent string // Should be different from this
+		expectSameKey   bool   // Whether to expect same key
 	}{
 		{
-			name:              "somchai vs sumchai (vowel only diff - should collide)",
-			input:             "somchai",
-			expectDifferent:   "sumchai",
-			expectSameKey:     true,
+			name:            "somchai vs sumchai (vowel only diff - should collide)",
+			input:           "somchai",
+			expectDifferent: "sumchai",
+			expectSameKey:   true,
 		},
 		{
-			name:              "somchai vs sonchai (consonant diff - should NOT collide)",
-			input:             "somchai",
-			expectDifferent:   "sonchai",
-			expectSameKey:     false,
+			name:            "somchai vs sonchai (consonant diff - should NOT collide)",
+			input:           "somchai",
+			expectDifferent: "sonchai",
+			expectSameKey:   false,
 		},
 	}
 

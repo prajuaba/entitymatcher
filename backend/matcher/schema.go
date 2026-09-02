@@ -7,11 +7,11 @@ import (
 )
 
 type SecondaryFieldMapping struct {
-	Name        string  `json:"name"`          // e.g. "Tax ID", "Phone Number", "Category"
-	FieldSrc    string  `json:"field_src"`     // Source column name
-	FieldDest   string  `json:"field_dest"`    // Destination column name
-	MatchType   string  `json:"match_type"`    // "EXACT" | "FUZZY" | "NUMERIC_DELTA"
-	Weight      float64 `json:"weight"`        // Weight fraction e.g. 0.10
+	Name        string  `json:"name"`         // e.g. "Tax ID", "Phone Number", "Category"
+	FieldSrc    string  `json:"field_src"`    // Source column name
+	FieldDest   string  `json:"field_dest"`   // Destination column name
+	MatchType   string  `json:"match_type"`   // "EXACT" | "FUZZY" | "NUMERIC_DELTA"
+	Weight      float64 `json:"weight"`       // Weight fraction e.g. 0.10
 	IsMandatory bool    `json:"is_mandatory"` // If true, mismatch drops overall score
 }
 
@@ -20,17 +20,17 @@ type ColumnMapping struct {
 	NameFieldsDest  []string                `json:"name_fields_dest"` // Single or multiple dest name columns
 	RefIDSrc        string                  `json:"ref_id_src"`       // Source reference ID column
 	RefIDDest       string                  `json:"ref_id_dest"`      // Destination customer ID column
-	DateFieldSrc     string                  `json:"date_field_src"`   // Source date column
-	DateFieldDest    string                  `json:"date_field_dest"`  // Destination date column
+	DateFieldSrc    string                  `json:"date_field_src"`   // Source date column
+	DateFieldDest   string                  `json:"date_field_dest"`  // Destination date column
 	SecondaryFields []SecondaryFieldMapping `json:"secondary_fields"` // Additional pairing columns
 }
 
 func DefaultColumnMapping() ColumnMapping {
 	return ColumnMapping{
-		NameFieldsSrc:  []string{"customer_name", "name", "raw_name", "company_name"},
-		NameFieldsDest: []string{"customer_name", "name", "raw_name", "company_name"},
-		RefIDSrc:       "reference_id",
-		RefIDDest:      "customer_id",
+		NameFieldsSrc:   []string{"customer_name", "name", "raw_name", "company_name"},
+		NameFieldsDest:  []string{"customer_name", "name", "raw_name", "company_name"},
+		RefIDSrc:        "reference_id",
+		RefIDDest:       "customer_id",
 		DateFieldSrc:    "transaction_date",
 		DateFieldDest:   "transaction_date",
 		SecondaryFields: []SecondaryFieldMapping{},

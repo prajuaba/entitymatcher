@@ -19,14 +19,14 @@ func TestConfigMergePutsUnchangedFields(t *testing.T) {
 
 	// First, set initial config with weights
 	initialCfg := matcher.Config{
-		AutoMatchThreshold:  0.90,
-		ReviewThreshold:     0.70,
-		DateToleranceDays:   30,
+		AutoMatchThreshold: 0.90,
+		ReviewThreshold:    0.70,
+		DateToleranceDays:  30,
 		Weights: matcher.MatchWeights{
 			NameWeight: 0.7,
 			DateWeight: 0.3,
 		},
-		WorkerCount:        4,
+		WorkerCount:         4,
 		MaxCandidatesPerSrc: 50,
 	}
 	memStore.UpdateConfig(initialCfg)

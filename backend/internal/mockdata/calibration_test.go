@@ -214,7 +214,7 @@ func TestCalibratorFitting(t *testing.T) {
 			trueDestID := trueMatches[res.SourceID]
 			isMatch := (res.DestinationID == trueDestID)
 			allObs = append(allObs, matcher.LabelledScore{
-				Score:  res.ConfidenceScore,
+				Score:   res.ConfidenceScore,
 				IsMatch: isMatch,
 			})
 		}
@@ -403,7 +403,7 @@ func TestCalibratorBenchmarkComparison(t *testing.T) {
 			trueDestID := trueMatches[res.SourceID]
 			isMatch := (res.DestinationID == trueDestID)
 			fitObs = append(fitObs, matcher.LabelledScore{
-				Score:  res.ConfidenceScore,
+				Score:   res.ConfidenceScore,
 				IsMatch: isMatch,
 			})
 		}
