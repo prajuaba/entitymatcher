@@ -237,3 +237,180 @@ func TestSharedSurnameStillMatchesGenuineCoBorrower(t *testing.T) {
 		t.Errorf("Expected TotalScore >= 0.95 to preserve genuine co-borrower match, got %f", result.TotalScore)
 	}
 }
+
+// TestPublicCompanyQualifierIsNotAParty is the CONFIRMED false-positive fix: the
+// legal-form qualifier "(มหาชน)" (Public) is not a party name. This exact pair
+// scored 1.0000 AUTO_MATCHED in production on the word "มหาชน" alone before the fix.
+func TestPublicCompanyQualifierIsNotAParty(t *testing.T) {
+	src := Normalize("บริษัท เสนาดีเวลลอปเม้นท์ จำกัด (มหาชน)")
+	dest := Normalize("บริษัท ทีฆทัศน์ ดีเวลลอปเมนท์ จำกัด (มหาชน) หรือ นายสุรศักดิ์ จำรัสการ")
+	result := CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+
+	if result.TotalScore >= 0.90 {
+		t.Errorf("Expected TotalScore < 0.90 to avoid false positive (was 1.0000 before the fix), got %f", result.TotalScore)
+	}
+
+	parties := SplitParties(src.Raw)
+	for _, party := range parties {
+		if strings.TrimSpace(party) == "มหาชน" {
+			t.Errorf("SplitParties should not extract 'มหาชน' as a separate party. Got: %v", parties)
+		}
+	}
+}
+
+// TestCountryQualifierIsNotAParty is the same fix applied to the country
+// qualifier "(ประเทศไทย)" (Thailand), the second-largest blast radius in the
+// production false-positive audit (1,964 auto-matches).
+func TestCountryQualifierIsNotAParty(t *testing.T) {
+	src := Normalize("บจก.ไมโครเพียว อินโนเวชั่น (ประเทศไทย)")
+	dest := Normalize("บจก.เทเลคอม แอคเซส คอมมิวนิเคชั่น (ประเทศไทย)")
+	result := CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+
+	if result.TotalScore >= 0.90 {
+		t.Errorf("Expected TotalScore < 0.90 to avoid false positive (was 1.0000 before the fix), got %f", result.TotalScore)
+	}
+
+	parties := SplitParties(src.Raw)
+	for _, party := range parties {
+		if strings.TrimSpace(party) == "ประเทศไทย" {
+			t.Errorf("SplitParties should not extract 'ประเทศไทย' as a separate party. Got: %v", parties)
+		}
+	}
+}
+
+// TestGenuineMatchWithParentheticalInfixSurvives is the over-correction guard for
+// the qualifier fix: "(เอส)" is no longer extracted as its own party, but these two
+// records are genuinely the same company, so the OUTER name must still carry the
+// match. Verified empirically to still score 1.0000 after the fix.
+func TestGenuineMatchWithParentheticalInfixSurvives(t *testing.T) {
+	src := Normalize("ห้างหุ้นส่วนจำกัด เอพีเจ (เอส) เทรดดิ้ง")
+	dest := Normalize("หจก.เอพีเจ (เอส) เทรดดิ้ง")
+	result := CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+
+	if result.TotalScore < 0.95 {
+		t.Errorf("Expected TotalScore >= 0.95 to preserve genuine match (guards against over-correction), got %f", result.TotalScore)
+	}
+}
+
+// TestRealCoBorrowerParentheticalStillAParty guards the other true positive that
+// must survive the qualifier fix: a real co-borrower name inside parentheses still
+// carries enough distinctive content to be extracted as its own party.
+func TestRealCoBorrowerParentheticalStillAParty(t *testing.T) {
+	raw := "จุฑาทิพย์ บุตรอินทร์ (คุณศรัณย์ พลับเจริญสุข)PL63001961"
+	parties := SplitParties(raw)
+
+	found := false
+	for _, party := range parties {
+		if strings.TrimSpace(party) == "คุณศรัณย์ พลับเจริญสุข" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected to find 'คุณศรัณย์ พลับเจริญสุข' in parties, got %v", parties)
+	}
+
+	src := Normalize("ศรัณย์ พลับเจริญสุข")
+	dest := Normalize(raw)
+	result := CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+
+	if result.TotalScore < 0.95 {
+		t.Errorf("Expected TotalScore >= 0.95 to preserve genuine co-borrower match, got %f", result.TotalScore)
+	}
+}
+
+// TestIsIdentifyingPartyRejectsQualifiers is a direct unit test of the helper
+// introduced by the qualifier fix: it must reject bare legal-form/country
+// qualifiers and lone short tokens, but accept fragments that carry a real name.
+func TestIsIdentifyingPartyRejectsQualifiers(t *testing.T) {
+	tests := []struct {
+		fragment string
+		want     bool
+	}{
+		{"มหาชน", false},
+		{"ประเทศไทย", false},
+		{"ไทยแลนด์", false},
+		{"เอส", false},
+		{"สาขาที่ 3", false},
+		{"คุณศรัณย์ พลับเจริญสุข", true},
+		{"นายบุญจันทร์ รัตแมด", true},
+	}
+
+	for _, tc := range tests {
+		got := isIdentifyingParty(tc.fragment)
+		if got != tc.want {
+			t.Errorf("isIdentifyingParty(%q) = %v, want %v", tc.fragment, got, tc.want)
+		}
+	}
+}
+
+// TestTrailingRefCodeStrippedFromSingleName is a direct unit test of the
+// widened reTrailingRefCode pattern: it must strip both letters+digits codes
+// ("PL64000306", glued "SB63000164") and bare 8+ digit codes, whether glued
+// ("0002019000592") or space-separated ("2022090361").
+func TestTrailingRefCodeStrippedFromSingleName(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"นายนฤพนธ์ ชูชีพ PL64000306", "นายนฤพนธ์ ชูชีพ"},
+		{"บุญจันทร์ รัตแมดSB63000164", "บุญจันทร์ รัตแมด"},
+		{"นางสาวกุลธิดา ภาษิต0002019000592", "นางสาวกุลธิดา ภาษิต"},
+		{"นางสาวณัฎฐนัน พิชิตสังข์ 2022090361", "นางสาวณัฎฐนัน พิชิตสังข์"},
+	}
+
+	for _, tc := range tests {
+		got := StripTrailingRefCode(tc.input)
+		if got != tc.want {
+			t.Errorf("StripTrailingRefCode(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestTrailingRefCodeKeepsShortNumbers(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"บจก.มาทวีอินเตอร์กรุ๊ป 2006", "บจก.มาทวีอินเตอร์กรุ๊ป 2006"},
+		{"บจก.ทีฆพล 222", "บจก.ทีฆพล 222"},
+	}
+
+	for _, tc := range tests {
+		got := StripTrailingRefCode(tc.input)
+		if got != tc.want {
+			t.Errorf("StripTrailingRefCode(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestSingleNameWithRefCodeScoresExact(t *testing.T) {
+	src := Normalize("นายเอกชัย บุญจันทร์")
+	dest := Normalize("นายเอกชัย บุญจันทร์0102019000025")
+	result := CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+	if result.TotalScore < 0.99 {
+		t.Errorf("Expected TotalScore >= 0.99 (measured 0.939 before this fix), got %f", result.TotalScore)
+	}
+
+	src = Normalize("นายนฤพนธ์ ชูชีพ")
+	dest = Normalize("นายนฤพนธ์ ชูชีพ PL64000306")
+	result = CalculateCompositeScore(src, dest, time.Time{}, time.Time{}, DefaultWeights, DefaultAlgorithms, 30)
+	if result.TotalScore < 0.99 {
+		t.Errorf("Expected TotalScore >= 0.99 (measured 0.922 before this fix), got %f", result.TotalScore)
+	}
+}
+
+func TestRefCodeNotTreatedAsIdentifierNumber(t *testing.T) {
+	cn := Normalize("นายเอกชัย บุญจันทร์0102019000025")
+	for _, num := range cn.Numbers {
+		if num == "0102019000025" {
+			t.Errorf("Normalize(%q).Numbers should not contain %q (would incorrectly trigger CheckNumberMismatch)", "นายเอกชัย บุญจันทร์0102019000025", num)
+		}
+	}
+}
+
+func TestNameThatIsOnlyARefCodeSurvives(t *testing.T) {
+	got := StripTrailingRefCode("SB63000164")
+	want := "SB63000164"
+	if got != want {
+		t.Errorf("StripTrailingRefCode(%q) = %q, want %q", "SB63000164", got, want)
+	}
+}

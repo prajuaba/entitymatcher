@@ -23,6 +23,18 @@ func normalizedPartyCached(s string) CleanName {
 	return n
 }
 
+// distinctiveOverlapMinWeight is the corpus-IDF floor at which a shared token
+// counts as evidence of identity rather than shared boilerplate. Derived from
+// the data, not a fixed word list, so it adapts to whatever vocabulary a corpus
+// happens to overuse.
+const distinctiveOverlapMinWeight = 0.30
+
+// noDistinctiveOverlapCap bounds a pair that agrees only on generic words. It
+// sits below the default auto-match threshold (0.90) and inside the review band,
+// so such a pair is surfaced for a human rather than silently accepted or
+// silently discarded.
+const noDistinctiveOverlapCap = 0.85
+
 type MatchWeights struct {
 	NameWeight float64 `json:"name_weight"`
 	DateWeight float64 `json:"date_weight"`
@@ -296,6 +308,42 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 	return matched / total, bilingualMatch
 }
 
+// sharesDistinctiveToken reports whether two names agree on at least one token
+// the corpus considers distinctive.
+//
+// It returns true whenever the question cannot be answered fairly: if either
+// side carries no distinctive token at all, there is nothing to require, and
+// blocking on that would punish names built entirely from common words.
+func sharesDistinctiveToken(a, b CleanName, corpus *CorpusStats) bool {
+	if corpus == nil {
+		return true
+	}
+	if a.Cleaned == b.Cleaned {
+		return true // identical after normalisation; nothing to doubt
+	}
+
+	aDistinctive := make(map[string]bool)
+	for _, t := range a.Tokens {
+		if corpus.Weight(t) >= distinctiveOverlapMinWeight {
+			aDistinctive[t] = true
+		}
+	}
+	bHasDistinctive := false
+	for _, t := range b.Tokens {
+		if corpus.Weight(t) >= distinctiveOverlapMinWeight {
+			bHasDistinctive = true
+			if aDistinctive[t] {
+				return true
+			}
+		}
+	}
+	// Neither side can be judged on distinctiveness: do not block.
+	if len(aDistinctive) == 0 || !bHasDistinctive {
+		return true
+	}
+	return false
+}
+
 // CrossScriptPartsScore compares two token sequences ACROSS SCRIPTS by aligning tokens
 // position-by-position (e.g. given-name-to-given-name, surname-to-surname) and taking the
 // WEAKEST per-part Jaro-Winkler similarity of the FULL vowel-bearing RTGS romanization
@@ -436,6 +484,12 @@ func CalculateCompositeScoreWithCorpus(
 				}
 				best.TotalScore = math.Round(best.TotalScore*10000) / 10000
 				best.MatchReasons = append(best.MatchReasons, "Branch / numerical identifier mismatch penalty (-50%)")
+			}
+			if !best.CrossScript && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus) {
+				if best.TotalScore > noDistinctiveOverlapCap {
+					best.TotalScore = noDistinctiveOverlapCap
+					best.MatchReasons = append(best.MatchReasons, "No distinctive token in common; capped for review")
+				}
 			}
 			best.MatchReasons = append(best.MatchReasons,
 				fmt.Sprintf("Best of %dx%d parties: %q matched %q", len(srcParties), len(destParties), bestSrc, bestDest))
@@ -633,6 +687,18 @@ func CalculateCompositeScoreWithCorpus(
 		// distinguishes "no date to compare" from "dates too far apart".
 		reasons = append(reasons, "No comparable transaction date; scored on name similarity alone")
 		totalScore = nameScore
+	}
+
+	// A pair that agrees only on boilerplate is not the same entity: "สาน
+	// ทรานสปอร์ต" and "สุทิน ทรานสปอร์ต" share only the word for "transport".
+	// Cap it into the review band instead of letting generic overlap carry it
+	// over the auto-match bar. Cross-script pairs are exempt: a Thai name and
+	// its romanisation share no literal token by construction.
+	if !crossScriptGate && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus) {
+		if totalScore > noDistinctiveOverlapCap {
+			totalScore = noDistinctiveOverlapCap
+			reasons = append(reasons, "No distinctive token in common; capped for review")
+		}
 	}
 
 	return ScoreResult{

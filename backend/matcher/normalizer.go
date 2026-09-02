@@ -76,6 +76,7 @@ var (
 		"technology": true, "technologies": true, "innovation": true, "innovations": true, "solutions": true, "service": true,
 		"services": true, "group": true, "holding": true, "holdings": true, "global": true, "trading": true, "enterprise": true,
 		"enterprises": true, "international": true, "system": true, "systems": true, "digital": true,
+		"มหาชน": true, "ประเทศไทย": true, "ไทยแลนด์": true, "thailand": true,
 	}
 
 	// Known Bilingual Transliteration Mappings (Thai <-> English)
@@ -98,10 +99,12 @@ var (
 	reMultiSpace     = regexp.MustCompile(`\s+`)
 	reNumbers        = regexp.MustCompile(`\b\d+\b`)
 
-	// reTrailingRefCode matches a reference code glued to the end of a name,
-	// e.g. "บุญจันทร์ รัตแมดSB63000164" or "...)PL63001961". It is record-keeping
-	// noise, not part of any name, and it dilutes every similarity comparison.
-	reTrailingRefCode = regexp.MustCompile(`[A-Za-z]{2,}[0-9]{5,}\s*$`)
+	// reTrailingRefCode matches a record-keeping reference code glued to the end of
+	// a name: "...รัตแมดSB63000164", "...ชูชีพ PL64000306", "...ภาษิต0002019000592".
+	// Two shapes occur: letters followed by digits, or a long run of bare digits.
+	// The bare-digit arm requires 8+ digits so that a number which is genuinely part
+	// of a name survives -- "บจก.มาทวีอินเตอร์กรุ๊ป 2006" keeps its 2006.
+	reTrailingRefCode = regexp.MustCompile(`(?:[A-Za-z]{2,}[0-9]{5,}|[0-9]{8,})\s*$`)
 
 	// reBranchAnnotation matches a parenthetical that is branch/office metadata
 	// rather than a party name -- "(สาขาที่ 1)", "(สาขา 5)", "(2)", "(branch 3)".
@@ -109,6 +112,21 @@ var (
 	// on their identical company name alone.
 	reBranchAnnotation = regexp.MustCompile(`^\s*(?i:สาขาที่|สาขา|branch|br\.?|no\.?|#)?\s*[0-9]+\s*$`)
 )
+
+// StripTrailingRefCode removes a trailing record-keeping reference code. It is
+// applied to every name, not only to ones that split into several parties: the
+// overwhelming majority of records carry no separator at all, and for those the
+// code used to survive into scoring and cost roughly 0.06-0.08 of similarity on
+// an otherwise exact match.
+func StripTrailingRefCode(s string) string {
+	stripped := strings.TrimSpace(reTrailingRefCode.ReplaceAllString(s, ""))
+	// Never return empty: a name that is nothing but a code is better compared as
+	// itself than as the empty string.
+	if stripped == "" {
+		return strings.TrimSpace(s)
+	}
+	return stripped
+}
 
 type CleanName struct {
 	Raw               string   `json:"raw"`
@@ -155,6 +173,10 @@ func Normalize(input string) CleanName {
 	for _, e := range thaiAbbrevExpansions {
 		lower = strings.ReplaceAll(lower, e.from, e.to)
 	}
+
+	// Drop a trailing reference code before anything else reads the text, so it
+	// neither dilutes the similarity nor pollutes Numbers.
+	lower = StripTrailingRefCode(lower)
 
 	// Extract numbers before stripping
 	numMatches := reNumbers.FindAllString(lower, -1)
@@ -450,6 +472,27 @@ func CheckBilingualMatch(tok1, tok2 string) bool {
 	return false
 }
 
+// isIdentifyingParty reports whether a fragment carries enough content to name a
+// party. A parenthetical often holds a qualifier rather than a name -- "(มหาชน)"
+// (Public), "(ประเทศไทย)" (Thailand), "(สาขาที่ 3)" (branch 3) -- and treating
+// those as parties makes every company sharing a qualifier match every other at
+// 1.0: "บริษัท เสนาดีเวลลอปเม้นท์ จำกัด (มหาชน)" matched an unrelated
+// "บริษัท ทีฆทัศน์ ดีเวลลอปเมนท์ จำกัด (มหาชน)" on the word "มหาชน" alone.
+//
+// A fragment qualifies only if, once normalised, it retains at least one
+// distinctive (non-generic) token, and is not a lone very short token that
+// cannot identify an entity on its own.
+func isIdentifyingParty(fragment string) bool {
+	n := Normalize(fragment)
+	if len(n.DistinctiveTokens) == 0 {
+		return false
+	}
+	if len(n.Tokens) == 1 && len([]rune(n.Tokens[0])) <= 3 {
+		return false
+	}
+	return true
+}
+
 // SplitParties breaks a raw name field into the individual parties it names.
 //
 // A single field routinely carries more than one party: a customer who changed
@@ -462,8 +505,7 @@ func CheckBilingualMatch(tok1, tok2 string) bool {
 // exactly one party, so single-party records take an unchanged code path.
 func SplitParties(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
-	stripped := reTrailingRefCode.ReplaceAllString(trimmed, "")
-	trimmed = strings.TrimSpace(stripped)
+	trimmed = StripTrailingRefCode(trimmed)
 
 	// Step 2: Scan for parenthetical groups
 	var candidates []string
@@ -490,7 +532,7 @@ func SplitParties(raw string) []string {
 					// Found a complete parenthetical group
 					// Use byte slice to preserve Thai characters correctly
 					content := trimmed[start+1 : i]
-					if !reBranchAnnotation.MatchString(strings.TrimSpace(content)) {
+					if !reBranchAnnotation.MatchString(strings.TrimSpace(content)) && isIdentifyingParty(strings.TrimSpace(content)) {
 						candidates = append(candidates, content)
 					}
 					inParen = false
