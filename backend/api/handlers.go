@@ -198,6 +198,32 @@ func validateAndMergeConfig(existing matcher.Config, update map[string]json.RawM
 		}
 	}
 
+	if raw, exists := update["no_distinctive_overlap_cap"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid no_distinctive_overlap_cap: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("no_distinctive_overlap_cap must be between 0 and 1")
+			}
+			merged.NoDistinctiveOverlapCap = *val
+		}
+	}
+
+	if raw, exists := update["distinctive_overlap_min_weight"]; exists {
+		val, err := parseFloat(raw)
+		if err != nil {
+			return merged, fmt.Errorf("invalid distinctive_overlap_min_weight: %v", err)
+		}
+		if val != nil {
+			if *val < 0 || *val > 1 {
+				return merged, fmt.Errorf("distinctive_overlap_min_weight must be between 0 and 1")
+			}
+			merged.DistinctiveOverlapMinWeight = *val
+		}
+	}
+
 	if raw, exists := update["date_tolerance_days"]; exists {
 		val, err := parseInt(raw)
 		if err != nil {
@@ -303,6 +329,13 @@ func validateAndMergeConfig(existing matcher.Config, update map[string]json.RawM
 	// Validate cross-field constraints
 	if merged.ReviewThreshold > merged.AutoMatchThreshold {
 		return merged, fmt.Errorf("review_threshold must be <= auto_match_threshold")
+	}
+
+	// A cap at or above the auto-match bar cannot demote anything, so the rule
+	// would silently do nothing. Refuse the combination rather than accept a
+	// setting that looks active but is not.
+	if merged.NoDistinctiveOverlapCap > 0 && merged.NoDistinctiveOverlapCap >= merged.AutoMatchThreshold {
+		return merged, fmt.Errorf("no_distinctive_overlap_cap must be < auto_match_threshold, otherwise it can never demote a match")
 	}
 
 	// 0 is explicitly allowed and skips both checks below (means unset, falls back to auto_match_threshold)

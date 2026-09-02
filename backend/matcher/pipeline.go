@@ -57,40 +57,44 @@ type MatchResultItem struct {
 }
 
 type Config struct {
-	AutoMatchThreshold       float64          `json:"auto_match_threshold"` // Default: 0.90
-	ReviewThreshold          float64          `json:"review_threshold"`     // Default: 0.70
-	DateToleranceDays        int              `json:"date_tolerance_days"`  // Default: 30
-	Weights                  MatchWeights     `json:"weights"`
-	Algorithms               AlgorithmToggles `json:"algorithms"`
-	ColumnMapping            ColumnMapping    `json:"column_mapping"`
-	WorkerCount              int              `json:"worker_count"`
-	MaxCandidatesPerSrc      int              `json:"max_candidates_per_src"`
-	MarginThreshold          float64          `json:"margin_threshold"`            // Default: 0.05
-	ExactMatchFloor          float64          `json:"exact_match_floor"`           // Default: 0.99
-	AssignmentStrategy       string           `json:"assignment_strategy"`         // Default: "GREEDY_1_1"
-	EmitUnmatched            bool             `json:"emit_unmatched"`              // Default: true
-	MaxAlternativesPerSource int              `json:"max_alternatives_per_source"` // Default: 5. Use negative to keep all alternatives.
-	CalibrationEnabled       bool             `json:"calibration_enabled"`         // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
-	CrossScriptAutoThreshold float64          `json:"cross_script_auto_threshold"` // Default: 0.84; 0 means "unset, use AutoMatchThreshold"
+	AutoMatchThreshold          float64          `json:"auto_match_threshold"` // Default: 0.90
+	ReviewThreshold             float64          `json:"review_threshold"`     // Default: 0.70
+	DateToleranceDays           int              `json:"date_tolerance_days"`  // Default: 30
+	Weights                     MatchWeights     `json:"weights"`
+	Algorithms                  AlgorithmToggles `json:"algorithms"`
+	ColumnMapping               ColumnMapping    `json:"column_mapping"`
+	WorkerCount                 int              `json:"worker_count"`
+	MaxCandidatesPerSrc         int              `json:"max_candidates_per_src"`
+	MarginThreshold             float64          `json:"margin_threshold"`               // Default: 0.05
+	ExactMatchFloor             float64          `json:"exact_match_floor"`              // Default: 0.99
+	AssignmentStrategy          string           `json:"assignment_strategy"`            // Default: "GREEDY_1_1"
+	EmitUnmatched               bool             `json:"emit_unmatched"`                 // Default: true
+	MaxAlternativesPerSource    int              `json:"max_alternatives_per_source"`    // Default: 5. Use negative to keep all alternatives.
+	CalibrationEnabled          bool             `json:"calibration_enabled"`            // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
+	CrossScriptAutoThreshold    float64          `json:"cross_script_auto_threshold"`    // Default: 0.84; 0 means "unset, use AutoMatchThreshold"
+	NoDistinctiveOverlapCap     float64          `json:"no_distinctive_overlap_cap"`     // Default: 0.85. Ceiling for a pair sharing no distinctive token. Must sit below AutoMatchThreshold or the rule cannot bite.
+	DistinctiveOverlapMinWeight float64          `json:"distinctive_overlap_min_weight"` // Default: 0.30. Corpus-IDF floor above which a shared token counts as identity evidence.
 }
 
 func DefaultConfig() Config {
 	return Config{
-		AutoMatchThreshold:       0.90,
-		ReviewThreshold:          0.70,
-		DateToleranceDays:        30,
-		Weights:                  DefaultWeights,
-		Algorithms:               DefaultAlgorithms,
-		ColumnMapping:            DefaultColumnMapping(),
-		WorkerCount:              runtime.NumCPU() * 2,
-		MaxCandidatesPerSrc:      50,
-		MarginThreshold:          0.05,
-		ExactMatchFloor:          0.99,
-		AssignmentStrategy:       "GREEDY_1_1",
-		EmitUnmatched:            true,
-		MaxAlternativesPerSource: 5,
-		CalibrationEnabled:       false,
-		CrossScriptAutoThreshold: 0.84,
+		AutoMatchThreshold:          0.90,
+		ReviewThreshold:             0.70,
+		DateToleranceDays:           30,
+		Weights:                     DefaultWeights,
+		Algorithms:                  DefaultAlgorithms,
+		ColumnMapping:               DefaultColumnMapping(),
+		WorkerCount:                 runtime.NumCPU() * 2,
+		MaxCandidatesPerSrc:         50,
+		MarginThreshold:             0.05,
+		ExactMatchFloor:             0.99,
+		AssignmentStrategy:          "GREEDY_1_1",
+		EmitUnmatched:               true,
+		MaxAlternativesPerSource:    5,
+		CalibrationEnabled:          false,
+		CrossScriptAutoThreshold:    0.84,
+		NoDistinctiveOverlapCap:     0.85,
+		DistinctiveOverlapMinWeight: 0.30,
 	}
 }
 
@@ -277,7 +281,7 @@ func (e *MatchEngine) ExecuteJob(
 					var ScoredCandidates []ScoredCandidate
 
 					for _, cand := range candidates {
-						scoreRes := CalculateCompositeScoreWithCorpus(
+						scoreRes := CalculateCompositeScoreWithCorpusTuned(
 							task.source.NormalizedName,
 							cand.NormalizedName,
 							task.source.TransactionDate,
@@ -286,6 +290,10 @@ func (e *MatchEngine) ExecuteJob(
 							e.Config.Algorithms,
 							e.Config.DateToleranceDays,
 							corpusStats,
+							ScoreTuning{
+								NoDistinctiveOverlapCap:     e.Config.NoDistinctiveOverlapCap,
+								DistinctiveOverlapMinWeight: e.Config.DistinctiveOverlapMinWeight,
+							},
 						)
 
 						// Evaluate dynamic secondary field mappings if configured

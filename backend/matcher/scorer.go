@@ -23,17 +23,43 @@ func normalizedPartyCached(s string) CleanName {
 	return n
 }
 
-// distinctiveOverlapMinWeight is the corpus-IDF floor at which a shared token
+// defaultDistinctiveOverlapMinWeight is the corpus-IDF floor at which a shared token
 // counts as evidence of identity rather than shared boilerplate. Derived from
 // the data, not a fixed word list, so it adapts to whatever vocabulary a corpus
 // happens to overuse.
-const distinctiveOverlapMinWeight = 0.30
+// It is the fallback used when Config leaves the tuning value at zero.
+const defaultDistinctiveOverlapMinWeight = 0.30
 
-// noDistinctiveOverlapCap bounds a pair that agrees only on generic words. It
+// defaultNoDistinctiveOverlapCap bounds a pair that agrees only on generic words. It
 // sits below the default auto-match threshold (0.90) and inside the review band,
 // so such a pair is surfaced for a human rather than silently accepted or
 // silently discarded.
-const noDistinctiveOverlapCap = 0.85
+// It is the fallback used when Config leaves the tuning value at zero.
+const defaultNoDistinctiveOverlapCap = 0.85
+
+// ScoreTuning carries optional numeric tuning. A zero field means "use the
+// package default", so callers that do not care can pass the zero value.
+type ScoreTuning struct {
+	// NoDistinctiveOverlapCap bounds a pair that agrees only on generic words.
+	NoDistinctiveOverlapCap float64
+	// DistinctiveOverlapMinWeight is the corpus-IDF floor at which a shared
+	// token counts as evidence of identity.
+	DistinctiveOverlapMinWeight float64
+}
+
+func (t ScoreTuning) capOrDefault() float64 {
+	if t.NoDistinctiveOverlapCap > 0 {
+		return t.NoDistinctiveOverlapCap
+	}
+	return defaultNoDistinctiveOverlapCap
+}
+
+func (t ScoreTuning) minWeightOrDefault() float64 {
+	if t.DistinctiveOverlapMinWeight > 0 {
+		return t.DistinctiveOverlapMinWeight
+	}
+	return defaultDistinctiveOverlapMinWeight
+}
 
 type MatchWeights struct {
 	NameWeight float64 `json:"name_weight"`
@@ -314,7 +340,7 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 // It returns true whenever the question cannot be answered fairly: if either
 // side carries no distinctive token at all, there is nothing to require, and
 // blocking on that would punish names built entirely from common words.
-func sharesDistinctiveToken(a, b CleanName, corpus *CorpusStats) bool {
+func sharesDistinctiveToken(a, b CleanName, corpus *CorpusStats, minWeight float64) bool {
 	if corpus == nil {
 		return true
 	}
@@ -324,13 +350,13 @@ func sharesDistinctiveToken(a, b CleanName, corpus *CorpusStats) bool {
 
 	aDistinctive := make(map[string]bool)
 	for _, t := range a.Tokens {
-		if corpus.Weight(t) >= distinctiveOverlapMinWeight {
+		if corpus.Weight(t) >= minWeight {
 			aDistinctive[t] = true
 		}
 	}
 	bHasDistinctive := false
 	for _, t := range b.Tokens {
-		if corpus.Weight(t) >= distinctiveOverlapMinWeight {
+		if corpus.Weight(t) >= minWeight {
 			bHasDistinctive = true
 			if aDistinctive[t] {
 				return true
@@ -438,16 +464,17 @@ type ScoreResult struct {
 	MatchReasons []string `json:"match_reasons"`
 }
 
-// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// CalculateCompositeScoreWithCorpusTuned calculates name and date metrics with optional corpus IDF weighting.
 // If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
 // If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
-func CalculateCompositeScoreWithCorpus(
+func CalculateCompositeScoreWithCorpusTuned(
 	srcName, destName CleanName,
 	srcDate, destDate time.Time,
 	weights MatchWeights,
 	algos AlgorithmToggles,
 	dateTolerance int,
 	corpus *CorpusStats,
+	tuning ScoreTuning,
 ) ScoreResult {
 	// A name field may carry several parties (a former name, or co-borrowers).
 	// Score every source party against every destination party and keep the best
@@ -461,9 +488,9 @@ func CalculateCompositeScoreWithCorpus(
 		found := false
 		for _, sp := range srcParties {
 			for _, dp := range destParties {
-				sub := CalculateCompositeScoreWithCorpus(
+				sub := CalculateCompositeScoreWithCorpusTuned(
 					normalizedPartyCached(sp), normalizedPartyCached(dp),
-					srcDate, destDate, weights, algos, dateTolerance, corpus)
+					srcDate, destDate, weights, algos, dateTolerance, corpus, tuning)
 				if !found || sub.TotalScore > best.TotalScore {
 					best, bestSrc, bestDest, found = sub, sp, dp, true
 				}
@@ -485,9 +512,9 @@ func CalculateCompositeScoreWithCorpus(
 				best.TotalScore = math.Round(best.TotalScore*10000) / 10000
 				best.MatchReasons = append(best.MatchReasons, "Branch / numerical identifier mismatch penalty (-50%)")
 			}
-			if !best.CrossScript && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus) {
-				if best.TotalScore > noDistinctiveOverlapCap {
-					best.TotalScore = noDistinctiveOverlapCap
+			if !best.CrossScript && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus, tuning.minWeightOrDefault()) {
+				if best.TotalScore > tuning.capOrDefault() {
+					best.TotalScore = tuning.capOrDefault()
 					best.MatchReasons = append(best.MatchReasons, "No distinctive token in common; capped for review")
 				}
 			}
@@ -694,9 +721,9 @@ func CalculateCompositeScoreWithCorpus(
 	// Cap it into the review band instead of letting generic overlap carry it
 	// over the auto-match bar. Cross-script pairs are exempt: a Thai name and
 	// its romanisation share no literal token by construction.
-	if !crossScriptGate && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus) {
-		if totalScore > noDistinctiveOverlapCap {
-			totalScore = noDistinctiveOverlapCap
+	if !crossScriptGate && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus, tuning.minWeightOrDefault()) {
+		if totalScore > tuning.capOrDefault() {
+			totalScore = tuning.capOrDefault()
 			reasons = append(reasons, "No distinctive token in common; capped for review")
 		}
 	}
@@ -713,6 +740,20 @@ func CalculateCompositeScoreWithCorpus(
 		CrossScript:    crossScriptGate,
 		MatchReasons:   reasons,
 	}
+}
+
+// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
+// If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
+func CalculateCompositeScoreWithCorpus(
+	srcName, destName CleanName,
+	srcDate, destDate time.Time,
+	weights MatchWeights,
+	algos AlgorithmToggles,
+	dateTolerance int,
+	corpus *CorpusStats,
+) ScoreResult {
+	return CalculateCompositeScoreWithCorpusTuned(srcName, destName, srcDate, destDate, weights, algos, dateTolerance, corpus, ScoreTuning{})
 }
 
 // CalculateCompositeScore is the backward-compatible version that maintains the original signature.

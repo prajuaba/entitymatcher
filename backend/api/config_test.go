@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"entitymatcher/matcher"
@@ -234,5 +235,96 @@ func TestConfigValidationAssignmentStrategy(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("Expected 200 for strategy %s, got %d", strategy, w.Code)
 		}
+	}
+}
+
+// TestConfigValidationDistinctiveOverlapFields tests round-trip, range validation, and the
+// cross-field guard for no_distinctive_overlap_cap and distinctive_overlap_min_weight.
+func TestConfigValidationDistinctiveOverlapFields(t *testing.T) {
+	// Round-trip: valid values are accepted and reflected back in the response.
+	memStore := store.NewStore()
+	server := NewServer(memStore)
+
+	partialUpdate := map[string]interface{}{
+		"no_distinctive_overlap_cap":     0.5,
+		"distinctive_overlap_min_weight": 0.2,
+	}
+
+	body, _ := json.Marshal(partialUpdate)
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewBuffer(body))
+	w := httptest.NewRecorder()
+
+	server.HandleConfig(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var respCfg matcher.Config
+	json.Unmarshal(w.Body.Bytes(), &respCfg)
+
+	if respCfg.NoDistinctiveOverlapCap != 0.5 {
+		t.Fatalf("Expected no_distinctive_overlap_cap 0.5, got %f", respCfg.NoDistinctiveOverlapCap)
+	}
+	if respCfg.DistinctiveOverlapMinWeight != 0.2 {
+		t.Fatalf("Expected distinctive_overlap_min_weight 0.2, got %f", respCfg.DistinctiveOverlapMinWeight)
+	}
+
+	// Reject a value > 1.
+	memStore2 := store.NewStore()
+	server2 := NewServer(memStore2)
+
+	partialUpdate = map[string]interface{}{
+		"no_distinctive_overlap_cap": 1.5,
+	}
+
+	body, _ = json.Marshal(partialUpdate)
+	req = httptest.NewRequest("PUT", "/api/config", bytes.NewBuffer(body))
+	w = httptest.NewRecorder()
+
+	server2.HandleConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for no_distinctive_overlap_cap > 1, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Reject distinctive_overlap_min_weight > 1 too.
+	memStore3 := store.NewStore()
+	server3 := NewServer(memStore3)
+
+	partialUpdate = map[string]interface{}{
+		"distinctive_overlap_min_weight": 1.5,
+	}
+
+	body, _ = json.Marshal(partialUpdate)
+	req = httptest.NewRequest("PUT", "/api/config", bytes.NewBuffer(body))
+	w = httptest.NewRecorder()
+
+	server3.HandleConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for distinctive_overlap_min_weight > 1, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Reject a cap >= auto_match_threshold with the specific cross-field error.
+	// Default AutoMatchThreshold from matcher.DefaultConfig() is 0.90.
+	memStore4 := store.NewStore()
+	server4 := NewServer(memStore4)
+
+	partialUpdate = map[string]interface{}{
+		"no_distinctive_overlap_cap": 0.95,
+	}
+
+	body, _ = json.Marshal(partialUpdate)
+	req = httptest.NewRequest("PUT", "/api/config", bytes.NewBuffer(body))
+	w = httptest.NewRecorder()
+
+	server4.HandleConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for no_distinctive_overlap_cap >= auto_match_threshold, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no_distinctive_overlap_cap must be < auto_match_threshold") {
+		t.Fatalf("Expected cross-field error message about no_distinctive_overlap_cap, got: %s", w.Body.String())
 	}
 }
