@@ -25,6 +25,51 @@ var (
 		"mr.", "mr", "mrs.", "mrs", "ms.", "ms", "miss", "dr.", "dr", "prof.", "prof", "ph.d.", "phd", "m.d.", "md",
 	}
 
+	// thaiPersonalPrefixes are honorifics stripped when they are glued to the name
+	// with no space ("นางสาวกัลยา"). ORDER MATTERS: entries must be longest-first,
+	// because stripping stops at the first match. "นาง" before "นางสาว" would turn
+	// "นางสาวกัลยา" into "สาวกัลยา" and never match the equivalent "น.ส.กัลยา".
+	thaiPersonalPrefixes = []string{
+		"ว่าที่ร้อยตรี", "ว่าที่ร.ต.",
+		"เด็กชาย", "เด็กหญิง",
+		"นางสาว", "น.ส.", "น.ส", "นส.",
+		"ด.ช.", "ด.ญ.", "ดช.", "ดญ.",
+		"หม่อมหลวง", "หม่อมราชวงศ์", "ม.ล.", "ม.ร.ว.",
+		"นาย", "นาง", "คุณ",
+		"ดร.", "นพ.", "พญ.", "ศ.", "รศ.", "ผศ.",
+	}
+
+	// thaiCorporateSuffixes are legal-form suffixes, also longest-first so
+	// "ห้างหุ้นส่วนจำกัด" is not shortened to "ห้างหุ้นส่วน" by the "จำกัด" entry.
+	thaiCorporateSuffixes = []string{
+		"จำกัด(มหาชน)", "จำกัดมหาชน", "ห้างหุ้นส่วนจำกัด", "ห้างหุ้นส่วนสามัญ",
+		"จำกัด", "บมจ", "บจก", "หจก",
+	}
+
+	// thaiCorporatePrefixes are legal-form prefixes, longest-first.
+	thaiCorporatePrefixes = []string{
+		"ห้างหุ้นส่วนจำกัด", "ห้างหุ้นส่วนสามัญ", "บริษัท", "บมจ.", "บจก.", "หจก.", "บมจ", "บจก", "หจก",
+	}
+
+	// thaiAbbrevExpansions rewrite dotted Thai honorific and legal-form abbreviations
+	// to their full spellings BEFORE punctuation is stripped. reCleanChars replaces
+	// "." with a space, which shatters "น.ส." into the fragments "น ส" that no title
+	// rule can recognise -- that is why "น.ส.กัลยา" and "นางสาวกัลยา" (the same
+	// person, same title) scored 0.81 instead of matching. Ordered longest-first so
+	// a shorter entry cannot consume the prefix of a longer one.
+	thaiAbbrevExpansions = []struct{ from, to string }{
+		{"ว่าที่ร.ต.", "ว่าที่ร้อยตรี"},
+		{"ม.ร.ว.", "หม่อมราชวงศ์"},
+		{"ม.ล.", "หม่อมหลวง"},
+		{"น.ส.", "นางสาว"},
+		{"นส.", "นางสาว"},
+		{"ด.ช.", "เด็กชาย"},
+		{"ด.ญ.", "เด็กหญิง"},
+		{"บมจ.", "บริษัท"},
+		{"บจก.", "บริษัท"},
+		{"หจก.", "ห้างหุ้นส่วนจำกัด"},
+	}
+
 	// Generic high-frequency corporate words that should carry lower matching weight
 	genericWords = map[string]bool{
 		"เทคโนโลยี": true, "นวัตกรรม": true, "อินโนเวชั่น": true, "กรุ๊ป": true, "โซลูชั่น": true, "การค้า": true, "บริการ": true, "ไทย": true,
@@ -52,18 +97,29 @@ var (
 	reThaiDiacritics = regexp.MustCompile(`[\x{0E31}\x{0E34}-\x{0E3A}\x{0E47}-\x{0E4C}]`)
 	reMultiSpace     = regexp.MustCompile(`\s+`)
 	reNumbers        = regexp.MustCompile(`\b\d+\b`)
+
+	// reTrailingRefCode matches a reference code glued to the end of a name,
+	// e.g. "บุญจันทร์ รัตแมดSB63000164" or "...)PL63001961". It is record-keeping
+	// noise, not part of any name, and it dilutes every similarity comparison.
+	reTrailingRefCode = regexp.MustCompile(`[A-Za-z]{2,}[0-9]{5,}\s*$`)
+
+	// reBranchAnnotation matches a parenthetical that is branch/office metadata
+	// rather than a party name -- "(สาขาที่ 1)", "(สาขา 5)", "(2)", "(branch 3)".
+	// Treating these as parties lets two different branches of one company match
+	// on their identical company name alone.
+	reBranchAnnotation = regexp.MustCompile(`^\s*(?i:สาขาที่|สาขา|branch|br\.?|no\.?|#)?\s*[0-9]+\s*$`)
 )
 
 type CleanName struct {
-	Raw              string   `json:"raw"`
-	Cleaned          string   `json:"cleaned"`
-	SortedTokens     string   `json:"sorted_tokens"`
-	Tokens           []string `json:"tokens"`
+	Raw               string   `json:"raw"`
+	Cleaned           string   `json:"cleaned"`
+	SortedTokens      string   `json:"sorted_tokens"`
+	Tokens            []string `json:"tokens"`
 	DistinctiveTokens []string `json:"distinctive_tokens"`
-	Numbers          []string `json:"numbers"`
-	PhoneticKey      string   `json:"phonetic_key"`
-	PhoneticForm     string   `json:"phonetic_form"`
-	Romanized        string   `json:"romanized"`
+	Numbers           []string `json:"numbers"`
+	PhoneticKey       string   `json:"phonetic_key"`
+	PhoneticForm      string   `json:"phonetic_form"`
+	Romanized         string   `json:"romanized"`
 }
 
 func RunePrefix(s string, n int) string {
@@ -94,6 +150,11 @@ func Normalize(input string) CleanName {
 	normText := norm.NFC.String(input)
 	normText = strings.TrimSpace(normText)
 	lower := strings.ToLower(normText)
+
+	// Expand dotted abbreviations while the dots still exist (see thaiAbbrevExpansions).
+	for _, e := range thaiAbbrevExpansions {
+		lower = strings.ReplaceAll(lower, e.from, e.to)
+	}
 
 	// Extract numbers before stripping
 	numMatches := reNumbers.FindAllString(lower, -1)
@@ -159,13 +220,13 @@ func Normalize(input string) CleanName {
 	return CleanName{
 		Raw:               input,
 		Cleaned:           text,
-		SortedTokens:     sortedTokensStr,
-		Tokens:           tokens,
+		SortedTokens:      sortedTokensStr,
+		Tokens:            tokens,
 		DistinctiveTokens: distinctive,
-		Numbers:          numMatches,
-		PhoneticKey:      GeneratePhoneticKey(phoneticForm, text),
-		PhoneticForm:     phoneticForm,
-		Romanized:        romanized,
+		Numbers:           numMatches,
+		PhoneticKey:       GeneratePhoneticKey(phoneticForm, text),
+		PhoneticForm:      phoneticForm,
+		Romanized:         romanized,
 	}
 }
 
@@ -219,18 +280,24 @@ func stripTitlesFromTokens(tokens []string) []string {
 			continue
 		}
 
-		// Strip corporate prefixes as prefix only (บริษัท)
-		if strings.HasPrefix(tok, "บริษัท") && len(tok) > len("บริษัท") {
-			after := strings.TrimPrefix(tok, "บริษัท")
-			if len([]rune(after)) >= 2 {
-				tokens[i] = after
-				continue
+		// Strip corporate prefixes as prefix only (บริษัท, ห้างหุ้นส่วนจำกัด, ...), longest-first.
+		strippedCorpPrefix := false
+		for _, pref := range thaiCorporatePrefixes {
+			if strings.HasPrefix(tok, pref) && len(tok) > len(pref) {
+				after := strings.TrimPrefix(tok, pref)
+				if len([]rune(after)) >= 2 {
+					tokens[i] = after
+					strippedCorpPrefix = true
+					break
+				}
 			}
 		}
+		if strippedCorpPrefix {
+			continue
+		}
 
-		// Strip corporate suffixes as suffix only (จำกัด, บจก, บมจ, หจก)
-		corpSuffixes := []string{"จำกัด", "บจก", "บมจ", "หจก"}
-		for _, suf := range corpSuffixes {
+		// Strip corporate suffixes as suffix only (จำกัด, บจก, บมจ, หจก, ...), longest-first.
+		for _, suf := range thaiCorporateSuffixes {
 			if strings.HasSuffix(tok, suf) && len(tok) > len(suf) {
 				before := strings.TrimSuffix(tok, suf)
 				if len([]rune(before)) >= 2 {
@@ -240,9 +307,9 @@ func stripTitlesFromTokens(tokens []string) []string {
 			}
 		}
 
-		// Strip personal titles: only as prefix, and not if result would be just a single Thai character
-		personalPrefixes := []string{"นาย", "นาง", "น.ส.", "ด.ช.", "ด.ญ.", "คุณ"}
-		for _, pref := range personalPrefixes {
+		// Strip personal titles: only as prefix, and not if result would be just a single Thai character.
+		// thaiPersonalPrefixes is ordered longest-first so "นางสาว" is tried before "นาง".
+		for _, pref := range thaiPersonalPrefixes {
 			if strings.HasPrefix(tok, pref) && len(tok) > len(pref) {
 				after := strings.TrimPrefix(tok, pref)
 				if len([]rune(after)) >= 2 {
@@ -335,6 +402,41 @@ func GeneratePhoneticKey(phoneticForm, originalText string) string {
 	return RunePrefix(string(result), 8)
 }
 
+// propagateSharedSurname applies the Thai convention that a comma- or
+// "และ"-separated list of people carries the surname only once, after the last
+// name: "นายคณิน,นายธรรมากร,น.ส.กฤตินี ทองบุญ" is three people all surnamed
+// ทองบุญ. Without this, the earlier parties reduce to bare given names, which
+// match any unrelated person sharing that given name.
+//
+// Only the LAST fragment in the list is treated as carrying the shared surname
+// (its final whitespace-separated token). Any earlier fragment that already has
+// two or more tokens is assumed to carry its own surname and is left untouched.
+// This must be called per-candidate (i.e. per one comma/และ list), never across
+// unrelated parenthetical groups, since those are independent parties.
+func propagateSharedSurname(fragments []string) []string {
+	if len(fragments) < 2 {
+		return fragments
+	}
+
+	lastIdx := len(fragments) - 1
+	lastTokens := strings.Fields(fragments[lastIdx])
+	if len(lastTokens) < 2 {
+		// No surname to share.
+		return fragments
+	}
+	surname := lastTokens[len(lastTokens)-1]
+
+	result := make([]string, len(fragments))
+	copy(result, fragments)
+	for i := 0; i < lastIdx; i++ {
+		tokens := strings.Fields(fragments[i])
+		if len(tokens) == 1 {
+			result[i] = fragments[i] + " " + surname
+		}
+	}
+	return result
+}
+
 // CheckBilingualMatch checks if Thai and English tokens have a mapped transliteration match.
 func CheckBilingualMatch(tok1, tok2 string) bool {
 	t1 := strings.ToLower(tok1)
@@ -346,4 +448,151 @@ func CheckBilingualMatch(tok1, tok2 string) bool {
 		return true
 	}
 	return false
+}
+
+// SplitParties breaks a raw name field into the individual parties it names.
+//
+// A single field routinely carries more than one party: a customer who changed
+// their name, or co-borrowers. They appear inside parentheses, or separated by
+// commas or "และ". Scoring the whole concatenated string against a single name
+// dilutes the similarity below any useful threshold, so callers score each
+// party separately and keep the best pairing.
+//
+// The result always has at least one element. A name with no separators yields
+// exactly one party, so single-party records take an unchanged code path.
+func SplitParties(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	stripped := reTrailingRefCode.ReplaceAllString(trimmed, "")
+	trimmed = strings.TrimSpace(stripped)
+
+	// Step 2: Scan for parenthetical groups
+	var candidates []string
+
+	// Track depth and extract parenthetical content
+	var depth int
+	var start int
+	var inParen bool
+	// Handle both ASCII and full-width parentheses
+	for i, r := range trimmed {
+		switch r {
+		case '(', '（':
+			if !inParen {
+				start = i
+				inParen = true
+				depth = 1
+			} else {
+				depth++
+			}
+		case ')', '）':
+			if inParen {
+				depth--
+				if depth == 0 {
+					// Found a complete parenthetical group
+					// Use byte slice to preserve Thai characters correctly
+					content := trimmed[start+1 : i]
+					if !reBranchAnnotation.MatchString(strings.TrimSpace(content)) {
+						candidates = append(candidates, content)
+					}
+					inParen = false
+				}
+			}
+		default:
+			if inParen {
+				// We're inside a parenthesis, so accumulate content
+			}
+		}
+	}
+
+	// If we had unmatched opening parentheses, treat the whole string as one candidate
+	var unbalanced bool
+	if inParen {
+		candidates = candidates[:0] // Reset if unbalanced
+		candidates = append(candidates, trimmed)
+		unbalanced = true
+	}
+
+	// Collect all text outside parentheses
+	var nonParenContent strings.Builder
+	depth = 0
+	inParen = false
+	for _, r := range trimmed {
+		switch r {
+		case '(', '（':
+			if !inParen {
+				inParen = true
+				depth = 1
+			} else {
+				depth++
+			}
+		case ')', '）':
+			if inParen {
+				depth--
+				if depth == 0 {
+					inParen = false
+				}
+			}
+		default:
+			if !inParen {
+				nonParenContent.WriteRune(r)
+			}
+		}
+	}
+	if !unbalanced && nonParenContent.Len() > 0 {
+		candidates = append(candidates, nonParenContent.String())
+	}
+
+	// If no candidates were collected due to unbalanced parentheses or other issue,
+	// fall back to using the entire string as a single candidate
+	if len(candidates) == 0 {
+		candidates = []string{trimmed}
+	}
+
+	// Step 3: Split each candidate on comma, "และ", "&", and "/" in sequence
+	var fragments []string
+	for _, cand := range candidates {
+		// Helper function to split a slice of strings by a delimiter and flatten
+		splitAndFlatten := func(input []string, sep string) []string {
+			var result []string
+			for _, s := range input {
+				parts := strings.Split(s, sep)
+				result = append(result, parts...)
+			}
+			return result
+		}
+
+		// Chain the splits in order: ",", "และ", "&", "/"
+		current := []string{cand}
+		current = splitAndFlatten(current, ",")
+		current = splitAndFlatten(current, "และ")
+		current = splitAndFlatten(current, "&")
+		current = splitAndFlatten(current, "/")
+
+		// Propagate a surname shared across this one candidate's fragments
+		// (see propagateSharedSurname doc comment). Scoped per-candidate so
+		// it never bleeds across an unrelated parenthetical group.
+		current = propagateSharedSurname(current)
+
+		fragments = append(fragments, current...)
+	}
+
+	// Step 4: trim whitespace, drop short runes, drop duplicates
+	var deduped []string
+	seen := make(map[string]bool)
+	for _, frag := range fragments {
+		trimmedFrag := strings.Trim(frag, " \t\n\r()") // also remove stray parentheses
+		if len([]rune(trimmedFrag)) < 2 {
+			continue
+		}
+		if seen[trimmedFrag] {
+			continue
+		}
+		seen[trimmedFrag] = true
+		deduped = append(deduped, trimmedFrag)
+	}
+
+	// Step 5: Return if non-empty, else fallback to original string
+	if len(deduped) > 0 {
+		return deduped
+	}
+	return []string{strings.TrimSpace(raw)}
 }

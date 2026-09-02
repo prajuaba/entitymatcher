@@ -1,10 +1,27 @@
 package matcher
 
 import (
+	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 )
+
+// partyCache memoises Normalize per party string. Scoring visits the same
+// source and destination names across many candidate pairs, so without this the
+// multi-party path would re-normalise the same strings hundreds of thousands of
+// times.
+var partyCache sync.Map // string -> CleanName
+
+func normalizedPartyCached(s string) CleanName {
+	if v, ok := partyCache.Load(s); ok {
+		return v.(CleanName)
+	}
+	n := Normalize(s)
+	partyCache.Store(s, n)
+	return n
+}
 
 type MatchWeights struct {
 	NameWeight float64 `json:"name_weight"`
@@ -192,6 +209,11 @@ func extractTrigrams(s string) []string {
 }
 
 // CalculateDateScore uses exponential decay for date proximity scoring.
+//
+// NOTE: it returns 1.0 when either date is zero. That is deliberately permissive
+// for callers that do not distinguish an absent date from a close one;
+// CalculateCompositeScoreWithCorpus checks IsZero itself and drops the date term
+// entirely rather than scoring an absent date as a perfect match.
 func CalculateDateScore(srcDate, destDate time.Time, maxToleranceDays int) float64 {
 	if srcDate.IsZero() || destDate.IsZero() {
 		return 1.0
@@ -379,6 +401,48 @@ func CalculateCompositeScoreWithCorpus(
 	dateTolerance int,
 	corpus *CorpusStats,
 ) ScoreResult {
+	// A name field may carry several parties (a former name, or co-borrowers).
+	// Score every source party against every destination party and keep the best
+	// pairing: any party matching is a real link. Single-party names fall through
+	// to the normal path below, so the common case is untouched.
+	srcParties := SplitParties(srcName.Raw)
+	destParties := SplitParties(destName.Raw)
+	if len(srcParties) > 1 || len(destParties) > 1 {
+		best := ScoreResult{}
+		bestSrc, bestDest := "", ""
+		found := false
+		for _, sp := range srcParties {
+			for _, dp := range destParties {
+				sub := CalculateCompositeScoreWithCorpus(
+					normalizedPartyCached(sp), normalizedPartyCached(dp),
+					srcDate, destDate, weights, algos, dateTolerance, corpus)
+				if !found || sub.TotalScore > best.TotalScore {
+					best, bestSrc, bestDest, found = sub, sp, dp, true
+				}
+			}
+		}
+		if found {
+			// Branch and reference numbers live in the ORIGINAL strings. Splitting can
+			// move a differing number into a party that is never the winning pairing,
+			// which let "(สาขาที่ 1)" and "(สาขาที่ 99)" score 1.0. Re-apply the
+			// whole-string mismatch penalty so splitting can never launder a genuine
+			// numeric difference.
+			if CheckNumberMismatch(srcName, destName) {
+				best.NameScore = math.Round(best.NameScore*0.50*10000) / 10000
+				if !srcDate.IsZero() && !destDate.IsZero() {
+					best.TotalScore = (best.NameScore * weights.NameWeight) + (best.DateScore * weights.DateWeight)
+				} else {
+					best.TotalScore = best.NameScore
+				}
+				best.TotalScore = math.Round(best.TotalScore*10000) / 10000
+				best.MatchReasons = append(best.MatchReasons, "Branch / numerical identifier mismatch penalty (-50%)")
+			}
+			best.MatchReasons = append(best.MatchReasons,
+				fmt.Sprintf("Best of %dx%d parties: %q matched %q", len(srcParties), len(destParties), bestSrc, bestDest))
+			return best
+		}
+	}
+
 	var scores []float64
 	var jwScore, levScore, tokenScore, trigramScore, romanizedScore float64
 	var crossScriptGate bool
@@ -546,18 +610,30 @@ func CalculateCompositeScoreWithCorpus(
 		reasons = append(reasons, "Branch / numerical identifier mismatch penalty (-50%)")
 	}
 
-	// Compute date score
-	dateScore := CalculateDateScore(srcDate, destDate, dateTolerance)
-	if dateScore >= 0.95 {
-		reasons = append(reasons, "Exact or 1-day transaction date proximity")
-	} else if dateScore >= 0.70 {
-		reasons = append(reasons, "Transaction date within close tolerance window")
-	} else if dateScore == 0.0 {
-		reasons = append(reasons, "Transaction date exceeds tolerance delta")
-	}
+	// A pair is only date-comparable when BOTH sides carry a real date. Absent
+	// dates used to score 1.0 and still draw their full weight, handing every
+	// pair a free DateWeight of confidence for a comparison that never ran.
+	// Instead, drop the date term and let the name carry the whole score, so
+	// confidence reflects only what was actually compared.
+	dateComparable := !srcDate.IsZero() && !destDate.IsZero()
 
-	// Composite total score
-	totalScore := (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
+	var dateScore, totalScore float64
+	if dateComparable {
+		dateScore = CalculateDateScore(srcDate, destDate, dateTolerance)
+		if dateScore >= 0.95 {
+			reasons = append(reasons, "Exact or 1-day transaction date proximity")
+		} else if dateScore >= 0.70 {
+			reasons = append(reasons, "Transaction date within close tolerance window")
+		} else if dateScore == 0.0 {
+			reasons = append(reasons, "Transaction date exceeds tolerance delta")
+		}
+		totalScore = (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
+	} else {
+		// dateScore stays 0 and is reported as such; the reason string is what
+		// distinguishes "no date to compare" from "dates too far apart".
+		reasons = append(reasons, "No comparable transaction date; scored on name similarity alone")
+		totalScore = nameScore
+	}
 
 	return ScoreResult{
 		TotalScore:     math.Round(totalScore*10000) / 10000,
