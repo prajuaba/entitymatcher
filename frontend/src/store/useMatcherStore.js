@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { apiFetch, getAccessToken } from '../lib/api.js'
+import { apiFetch, getAccessToken, readErrorMessage } from '../lib/api.js'
 
 export const useMatcherStore = create((set, get) => ({
   activeTab: 'results',
@@ -17,7 +17,7 @@ export const useMatcherStore = create((set, get) => ({
     auto_match_threshold: 0.90,
     review_threshold: 0.70,
     date_tolerance_days: 30,
-    margin_threshold: 0.10,
+    margin_threshold: 0.05,
     assignment_strategy: 'GREEDY_1_1',
     emit_unmatched: false,
     weights: {
@@ -30,6 +30,9 @@ export const useMatcherStore = create((set, get) => ({
       use_token_sort: true,
       use_phonetic: true,
       use_trigram: true,
+      use_thai_phonetic: true,
+      use_corpus_idf: true,
+      use_romanized_match: true,
     },
   },
 
@@ -139,30 +142,55 @@ export const useMatcherStore = create((set, get) => ({
   fetchConfig: async () => {
     try {
       const res = await apiFetch('/api/config')
-      if (res.ok) {
-        const cfg = await res.json()
-        set({ config: cfg })
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to load configuration'))
       }
+      set({ config: await res.json(), error: null })
     } catch (e) {
-      console.error('Failed to fetch config', e)
+      set({ error: `Could not load saved configuration: ${e.message}` })
     }
   },
 
   updateConfig: async (newCfg) => {
-    set({ loading: true })
+    set({ loading: true, error: null })
     try {
       const res = await apiFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCfg),
       })
-      if (res.ok) {
-        const updated = await res.json()
-        set({ config: updated, loading: false })
+      // A rejected save used to fall through this branch silently, leaving
+      // loading stuck true while the caller reported success.
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to save configuration'))
       }
+      const updated = await res.json()
+      set({ config: updated, loading: false })
+      return updated
     } catch (e) {
       set({ error: e.message, loading: false })
+      throw e
     }
+  },
+
+  fetchConnectorSettings: async () => {
+    const res = await apiFetch('/api/connector/settings')
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, 'Failed to load connector settings'))
+    }
+    return res.json()
+  },
+
+  saveConnectorSettings: async (settings) => {
+    const res = await apiFetch('/api/connector/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    })
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, 'Failed to save connector settings'))
+    }
+    return res.json()
   },
 
   loadSeedDataset: async () => {

@@ -10,7 +10,13 @@ beforeEach(() => {
 describe('ConnectionManager', () => {
   it('refuses file types without calling the API', async () => {
     // Failing fast here is better than round-tripping to a backend that will reject the file type anyway.
-    global.fetch = vi.fn()
+    global.fetch = vi.fn(async (url) => {
+      if (url === '/api/connector/settings') {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      // For any other URL, we don't expect it to be called
+      throw new Error(`Unexpected fetch call to ${url}`)
+    })
 
     render(<ConnectionManager />)
 
@@ -21,16 +27,25 @@ describe('ConnectionManager', () => {
     await userEvent.click(loadBtn)
 
     const statusEl = await screen.findByTestId('ingest-status')
-    expect(global.fetch).not.toHaveBeenCalled()
+    // Verify that no fetch call was made to the ingest endpoint
+    expect(global.fetch.mock.calls.some(call => call[0] === '/api/connector/ingest')).toBe(false)
     expect(statusEl.getAttribute('data-outcome')).toBe('error')
     expect(statusEl.textContent).toMatch(/Data Ingestion/i)
   })
 
   it('reports the row counts it actually loaded', async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({ batch_id: 'batch-7', source_count: 250, destination_count: 120, truncated: false }),
+    global.fetch = vi.fn(async (url) => {
+      if (url === '/api/connector/settings') {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      if (url === '/api/connector/ingest') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ batch_id: 'batch-7', source_count: 250, destination_count: 120, truncated: false }),
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
     })
 
     render(<ConnectionManager />)
@@ -48,17 +63,25 @@ describe('ConnectionManager', () => {
   it('a truncated ingest is not reported as success', async () => {
     // A partial/truncated batch that renders as a clean success banner is one an operator will trust
     // and match against, so this must render as an error outcome even on HTTP 200.
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({
-        batch_id: 'batch-8',
-        source_count: 50000,
-        destination_count: 10,
-        truncated: true,
-        source_truncated: true,
-        warning: 'ingestion stopped at the 50000 row cap and more rows remain; the batch is incomplete',
-      }),
+    global.fetch = vi.fn(async (url) => {
+      if (url === '/api/connector/settings') {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      if (url === '/api/connector/ingest') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            batch_id: 'batch-8',
+            source_count: 50000,
+            destination_count: 10,
+            truncated: true,
+            source_truncated: true,
+            warning: 'ingestion stopped at the 50000 row cap and more rows remain; the batch is incomplete',
+          }),
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
     })
 
     render(<ConnectionManager />)
@@ -75,10 +98,18 @@ describe('ConnectionManager', () => {
   it('sends the port as a number, not a string', async () => {
     // The Go backend decodes `port` into an int, so a quoted string fails JSON decoding
     // with a 400 that looks like a connection error.
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({ batch_id: 'batch-9', source_count: 10, destination_count: 5, truncated: false }),
+    global.fetch = vi.fn(async (url) => {
+      if (url === '/api/connector/settings') {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      if (url === '/api/connector/ingest') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ batch_id: 'batch-9', source_count: 10, destination_count: 5, truncated: false }),
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
     })
 
     render(<ConnectionManager />)
@@ -96,8 +127,9 @@ describe('ConnectionManager', () => {
 
     await screen.findByTestId('ingest-status')
 
-    const [, options] = global.fetch.mock.calls[0]
-    const body = JSON.parse(options.body)
+    // Find the call to /api/connector/ingest
+    const ingestCall = global.fetch.mock.calls.find(call => call[0] === '/api/connector/ingest')
+    const body = JSON.parse(ingestCall[1].body)
     expect(typeof body.source.port).toBe('number')
     expect(body.source.port).toBe(6543)
   })

@@ -10,10 +10,13 @@ import { Sliders, CheckSquare, Square, Save, RotateCcw } from 'lucide-react'
 
 export function ConfigPanel() {
   const { config, updateConfig, fetchConfig, loading, user } = useMatcherStore()
+  const saveConnectorSettings = useMatcherStore((s) => s.saveConnectorSettings)
   const [localCfg, setLocalCfg] = useState(config)
   const [savedMessage, setSavedMessage] = useState(false)
+  const [saveError, setSaveError] = useState(null)
   const [introspectedSrcCols, setIntrospectedSrcCols] = useState([])
   const [introspectedDestCols, setIntrospectedDestCols] = useState([])
+  const [connectorPayload, setConnectorPayload] = useState(null)
 
   useEffect(() => {
     fetchConfig()
@@ -24,9 +27,17 @@ export function ConfigPanel() {
   }, [config])
 
   const handleSave = async () => {
-    await updateConfig(localCfg)
-    setSavedMessage(true)
-    setTimeout(() => setSavedMessage(false), 3000)
+    setSaveError(null)
+    try {
+      await updateConfig(localCfg)
+      // Persist the connector settings too -- the introspected column lists live
+      // there, and the pairing selection is meaningless without them.
+      if (connectorPayload) await saveConnectorSettings(connectorPayload)
+      setSavedMessage(true)
+      setTimeout(() => setSavedMessage(false), 3000)
+    } catch (e) {
+      setSaveError(e.message)
+    }
   }
 
   const toggleAlgo = (key) => {
@@ -71,12 +82,16 @@ export function ConfigPanel() {
           setIntrospectedSrcCols(srcCols)
           setIntrospectedDestCols(destCols)
         }}
+        onSettingsChange={setConnectorPayload}
       />
 
       {/* Dynamic Schema & Multi-Field Pairing Mapper */}
       <FieldMapper
         availableSourceCols={introspectedSrcCols}
         availableDestCols={introspectedDestCols}
+        onMappingChange={(mapping) =>
+          setLocalCfg((prev) => ({ ...prev, column_mapping: mapping }))
+        }
       />
 
       {/* Enterprise Brand Synonym & Alias Manager */}
@@ -85,6 +100,11 @@ export function ConfigPanel() {
       {savedMessage && (
         <div className="p-3 bg-emerald-950/80 border border-emerald-700/50 text-emerald-300 rounded-lg text-xs font-medium text-center">
           Configuration updated successfully!
+        </div>
+      )}
+      {saveError && (
+        <div className="p-3 bg-rose-950/80 border border-rose-700/50 text-rose-300 rounded-lg text-xs font-medium text-center">
+          {saveError}
         </div>
       )}
 
@@ -104,7 +124,15 @@ export function ConfigPanel() {
               max="1.00"
               step="0.01"
               value={localCfg.auto_match_threshold || 0.90}
-              onChange={(e) => setLocalCfg({ ...localCfg, auto_match_threshold: parseFloat(e.target.value) })}
+              onChange={(e) => {
+                const auto = parseFloat(e.target.value)
+                setLocalCfg((prev) => ({
+                  ...prev,
+                  auto_match_threshold: auto,
+                  // The backend rejects review > auto; pull review down with it.
+                  review_threshold: Math.min(prev.review_threshold ?? 0.7, auto),
+                }))
+              }}
               className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
             />
             <p className="text-[11px] text-slate-500 mt-1">Pairs scoring above this threshold are auto-approved.</p>
@@ -121,7 +149,13 @@ export function ConfigPanel() {
               max="0.90"
               step="0.01"
               value={localCfg.review_threshold || 0.70}
-              onChange={(e) => setLocalCfg({ ...localCfg, review_threshold: parseFloat(e.target.value) })}
+              onChange={(e) => {
+                const review = parseFloat(e.target.value)
+                setLocalCfg((prev) => ({
+                  ...prev,
+                  review_threshold: Math.min(review, prev.auto_match_threshold ?? 0.9),
+                }))
+              }}
               className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
             />
             <p className="text-[11px] text-slate-500 mt-1">Pairs scoring between Review & Auto-Match enter manual queue.</p>
@@ -141,10 +175,11 @@ export function ConfigPanel() {
                 Name: {Math.round((localCfg.weights?.name_weight || 0.85) * 100)}% | Date: {Math.round((localCfg.weights?.date_weight || 0.15) * 100)}%
               </span>
             </div>
+            {/* Capped at 0.95: the backend requires date_weight > 0. */}
             <input
               type="range"
               min="0.50"
-              max="1.00"
+              max="0.95"
               step="0.05"
               value={localCfg.weights?.name_weight || 0.85}
               onChange={(e) => {

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { Sliders, Plus, Trash2, CheckSquare, Square, Layers, Link2, Info } from 'lucide-react'
 
-export function FieldMapper({ availableSourceCols = [], availableDestCols = [], onMappingSaved }) {
+export function FieldMapper({ availableSourceCols = [], availableDestCols = [], onMappingSaved, onMappingChange }) {
   const { config, updateConfig } = useMatcherStore()
 
   // Default detected columns if none provided
@@ -24,6 +24,14 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
       setMapping(config.column_mapping)
     }
   }, [config.column_mapping])
+
+  // Publish every edit upward so ConfigPanel's "Save Configuration" writes the
+  // mapping the user is actually looking at, not the stale one it fetched.
+  // Intentionally keyed on `mapping` alone: onMappingChange is an inline arrow
+  // in the parent and would re-fire this effect on every render.
+  useEffect(() => {
+    if (onMappingChange) onMappingChange(mapping)
+  }, [mapping])
 
   const toggleSrcNameField = (col) => {
     setMapping((prev) => {
@@ -88,8 +96,9 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
   }
 
   const handleSave = async () => {
-    const updatedCfg = { ...config, column_mapping: mapping }
-    await updateConfig(updatedCfg)
+    // Send only column_mapping: the backend merges per-field, so scoping the
+    // write keeps this panel from overwriting settings it does not own.
+    await updateConfig({ column_mapping: mapping })
     if (onMappingSaved) onMappingSaved(mapping)
   }
 
