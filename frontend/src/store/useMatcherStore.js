@@ -42,7 +42,7 @@ export const useMatcherStore = create((set, get) => ({
     date_tolerance_days: 30,
     margin_threshold: 0.05,
     assignment_strategy: 'GREEDY_1_1',
-    emit_unmatched: false,
+    emit_unmatched: true,
     weights: {
       name_weight: 0.85,
       date_weight: 0.15,

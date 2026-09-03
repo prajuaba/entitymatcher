@@ -148,9 +148,12 @@ const introspectBothExcelSides = async () => {
   await screen.findByText(/Introspected 3 columns from dest\.xlsx/i)
 }
 
+const goToDataSources = () => fireEvent.click(screen.getByRole('tab', { name: /Data Sources/i }))
+
 describe('Excel introspection -> Schema Pairing persistence across remount', () => {
   it('TEST: introspected Excel columns reach the Schema Pairing section', async () => {
     render(<ConfigPanel />)
+    goToDataSources()
     await screen.findAllByRole('combobox')
 
     await introspectBothExcelSides()
@@ -166,6 +169,7 @@ describe('Excel introspection -> Schema Pairing persistence across remount', () 
 
   it('TEST: the pairing selection survives a menu switch', async () => {
     const { unmount } = render(<ConfigPanel />)
+    goToDataSources()
     await screen.findAllByRole('combobox')
 
     await introspectBothExcelSides()
@@ -191,6 +195,7 @@ describe('Excel introspection -> Schema Pairing persistence across remount', () 
 
     // Navigate back: fresh mount.
     render(<ConfigPanel />)
+    goToDataSources()
     await screen.findAllByRole('combobox')
 
     // (a) CustID must still be listed in the Schema Pairing section.
@@ -209,6 +214,7 @@ describe('Excel introspection -> Schema Pairing persistence across remount', () 
 
   it('TEST: Save Configuration persists the connector columns', async () => {
     render(<ConfigPanel />)
+    goToDataSources()
     await screen.findAllByRole('combobox')
 
     await introspectBothExcelSides()
@@ -236,6 +242,7 @@ describe('Excel introspection -> Schema Pairing persistence across remount', () 
 
   it('TEST: no password is ever sent to connector settings', async () => {
     render(<ConfigPanel />)
+    goToDataSources()
     await screen.findAllByRole('combobox')
 
     // Default source/destination types are database connectors (SQLSERVER /
