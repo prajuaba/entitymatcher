@@ -336,7 +336,7 @@ func TestPostgresGetResultsPagePaginationStable(t *testing.T) {
 
 	allIDs := []string{}
 	for offset := 0; offset < 10; offset += 3 {
-		page, _, err := store.GetResultsPage(batchID, "", "", 3, offset)
+		page, _, err := store.GetResultsPage(ResultsQuery{BatchID: batchID, Limit: 3, Offset: offset})
 		require.NoError(t, err)
 
 		for _, item := range page {

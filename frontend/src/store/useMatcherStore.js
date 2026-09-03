@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { apiFetch, getAccessToken, readErrorMessage } from '../lib/api.js'
 
 const BATCH_ID_STORAGE_KEY = 'entity_matcher_batch_id'
+let fetchSeq = 0
+let searchDebounceHandle = null
 
 function rememberBatchID(id) {
   try {
@@ -79,6 +81,11 @@ export const useMatcherStore = create((set, get) => ({
   page: 1,
   limit: 20,
   totalCount: 0,
+  sortBy: 'created_at',
+  sortDir: 'asc',
+  totalPages: 1,
+  statusCounts: {},
+  resultsLoading: false,
 
   // Modals
   isManualSearchOpen: false,
@@ -88,15 +95,46 @@ export const useMatcherStore = create((set, get) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
   setStatusFilter: (filter) => {
     set({ statusFilter: filter, page: 1 })
-    get().fetchResults()
+    get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
   },
   setSearchQuery: (query) => {
     set({ searchQuery: query, page: 1 })
-    get().fetchResults()
+    if (searchDebounceHandle) clearTimeout(searchDebounceHandle)
+    searchDebounceHandle = setTimeout(() => {
+      searchDebounceHandle = null
+      get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
+    }, 300)
+  },
+  flushSearch: () => {
+    if (searchDebounceHandle) {
+      clearTimeout(searchDebounceHandle)
+      searchDebounceHandle = null
+    }
+    return get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
   },
   setPage: (page) => {
-    set({ page })
-    get().fetchResults()
+    const { page: currentPage, totalPages } = get()
+    const maxPage = Math.max(1, totalPages)
+    const clamped = Math.min(Math.max(1, page), maxPage)
+    if (clamped === currentPage) return
+    set({ page: clamped })
+    get().fetchResults(undefined, { resetSelection: true })
+  },
+  setSort: (field) => {
+    const { sortBy, sortDir } = get()
+    if (field === sortBy) {
+      set({ sortDir: sortDir === 'asc' ? 'desc' : 'asc', page: 1 })
+    } else {
+      const descDefault = field === 'confidence_score' || field === 'name_score' || field === 'date_score'
+      set({ sortBy: field, sortDir: descDefault ? 'desc' : 'asc', page: 1 })
+    }
+    get().fetchResults(undefined, { resetSelection: true })
+  },
+  setLimit: (n) => {
+    const parsed = parseInt(n, 10)
+    const nextLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : get().limit
+    set({ limit: nextLimit, page: 1 })
+    get().fetchResults(undefined, { resetSelection: true })
   },
   setSelectedMatch: (match) => set({ selectedMatch: match }),
   setManualSearchOpen: (open) => set({ isManualSearchOpen: open }),
@@ -108,8 +146,8 @@ export const useMatcherStore = create((set, get) => ({
     } catch {
       // A browser that refuses storage still works for this session.
     }
-    set({ batchID: id, page: 1, selectedMatch: null })
-    return get().fetchResults(id)
+    set({ batchID: id, page: 1, selectedMatch: null, statusCounts: {} })
+    return get().fetchResults(id, { includeCounts: true, resetSelection: true })
   },
 
   // Authentication methods
@@ -391,30 +429,73 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
-  fetchResults: async (batchIdOverride) => {
+  fetchResults: async (batchIdOverride, opts = {}) => {
     const bId = batchIdOverride || get().batchID
-    const { statusFilter, searchQuery, page, limit } = get()
+    if (!bId) {
+      set({ results: [], totalCount: 0, totalPages: 1, statusCounts: {}, selectedMatch: null, resultsLoading: false })
+      return
+    }
+
+    const seq = ++fetchSeq
+    set({ resultsLoading: true })
+
+    const { statusFilter, searchQuery, page, limit, sortBy, sortDir } = get()
+    const queryParams = new URLSearchParams({
+      batch_id: bId,
+      status: statusFilter,
+      search: searchQuery,
+      page: page.toString(),
+      limit: limit.toString(),
+      sort_by: sortBy,
+      sort_dir: sortDir,
+    })
+    if (opts.includeCounts) {
+      queryParams.append('include_counts', '1')
+    }
 
     try {
-      const queryParams = new URLSearchParams({
-        batch_id: bId,
-        status: statusFilter,
-        search: searchQuery,
-        page: page.toString(),
-        limit: limit.toString(),
-      })
-
       const res = await apiFetch(`/api/match/results?${queryParams}`)
-      if (res.ok) {
-        const data = await res.json()
-        set({
-          results: data.results || [],
-          totalCount: data.total_count || 0,
-          selectedMatch: data.results && data.results.length > 0 ? data.results[0] : null,
-        })
+      if (seq !== fetchSeq) return
+      if (!res.ok) {
+        set({ resultsLoading: false })
+        return
       }
+      const data = await res.json()
+      const newResults = data.results || []
+      const newTotalCount = data.total_count || 0
+      const newTotalPages = data.total_pages && data.total_pages >= 1 ? data.total_pages : 1
+
+      if (newTotalPages >= 1 && page > newTotalPages && newTotalPages !== page) {
+        set({ page: newTotalPages, resultsLoading: false })
+        return get().fetchResults(bId, opts)
+      }
+
+      let newSelectedMatch = null
+      if (opts.resetSelection) {
+        newSelectedMatch = newResults.length > 0 ? newResults[0] : null
+      } else {
+        const currentSelected = get().selectedMatch
+        if (currentSelected) {
+          const found = newResults.find(r => r.id === currentSelected.id)
+          newSelectedMatch = found || newResults[0] || null
+        } else {
+          newSelectedMatch = newResults[0] || null
+        }
+      }
+
+      const newStatusCounts = opts.includeCounts ? (data.status_counts || {}) : get().statusCounts
+
+      set({
+        results: newResults,
+        totalCount: newTotalCount,
+        totalPages: newTotalPages,
+        statusCounts: newStatusCounts,
+        selectedMatch: newSelectedMatch,
+        resultsLoading: false
+      })
     } catch (e) {
       console.error('Failed to fetch results', e)
+      set({ resultsLoading: false })
     }
   },
 
@@ -434,7 +515,7 @@ export const useMatcherStore = create((set, get) => ({
       })
       if (res.ok) {
         // Refresh local list
-        await get().fetchResults()
+        await get().fetchResults(undefined, { includeCounts: true })
       }
     } catch (e) {
       console.error('Failed to update action', e)

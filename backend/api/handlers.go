@@ -1188,6 +1188,10 @@ func (s *Server) HandleSSEProgress(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleGetResults returns one page of match results for a batch. Filtering,
+// sorting and paging all happen in the store layer as a single bounded SQL
+// query (or the equivalent in-memory pass), so a page costs O(page size) work
+// instead of loading and slicing the entire batch in this handler.
 func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	if r.Method == "OPTIONS" {
@@ -1200,71 +1204,81 @@ func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	statusFilter := r.URL.Query().Get("status")
-	searchQuery := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	status := r.URL.Query().Get("status")
+	// Trimmed but not lowercased: the store layer now owns case-insensitivity
+	// (SQL ILIKE / Go strings.ToLower internally), so lowercasing here would
+	// just be a redundant second transform.
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	sortBy := r.URL.Query().Get("sort_by")
+	sortDir := r.URL.Query().Get("sort_dir")
+	includeCounts := r.URL.Query().Get("include_counts") == "1" || r.URL.Query().Get("include_counts") == "true"
 
+	// An absurd page number is clamped rather than rejected, matching how
+	// Normalized() below already silently corrects an invalid sort field or an
+	// oversized limit. The upper clamp specifically prevents (page-1)*q.Limit
+	// from overflowing into a negative offset, which Postgres rejects outright.
 	if page <= 0 {
 		page = 1
-	}
-	if limit <= 0 {
-		limit = 20
+	} else if page > store.MaxResultsPage {
+		page = store.MaxResultsPage
 	}
 
-	results, exists := s.store.GetResults(batchID)
-	if !exists {
+	// Normalized() clamps/defaults limit, sort field and sort direction, so the
+	// effective values it produces -- not the raw query params -- are what get
+	// echoed back in the response and used to compute the offset below.
+	q := store.ResultsQuery{
+		BatchID: batchID,
+		Status:  status,
+		Search:  search,
+		SortBy:  sortBy,
+		SortDir: sortDir,
+		Limit:   limit,
+	}.Normalized()
+	q.Offset = (page - 1) * q.Limit
+
+	results, totalCount, err := s.store.GetResultsPage(q)
+	if err != nil {
+		log.Printf("HandleGetResults: failed to load results for batch %s: %v", batchID, err)
+		http.Error(w, "failed to load results", http.StatusInternalServerError)
+		return
+	}
+	if results == nil {
 		results = []matcher.MatchResultItem{}
 	}
 
-	// Filter
-	var filtered []matcher.MatchResultItem
-	for _, item := range results {
-		if statusFilter != "" && statusFilter != "ALL" && item.MatchStatus != statusFilter {
-			continue
+	// Floored at 1 so an empty batch reports one (empty) page rather than zero
+	// pages, which would otherwise look like an out-of-range request to a client.
+	totalPages := (totalCount + q.Limit - 1) / q.Limit
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
+	response := map[string]interface{}{
+		"batch_id":    batchID,
+		"total_count": totalCount,
+		"total_pages": totalPages,
+		"page":        page,
+		"limit":       q.Limit,
+		"sort_by":     q.SortBy,
+		"sort_dir":    q.SortDir,
+		"results":     results,
+	}
+
+	if includeCounts {
+		// Status counts only label UI tabs, so a failure here must not fail the
+		// whole results request -- log it and omit the field instead.
+		statusCounts, countErr := s.store.CountResultsByStatus(batchID, q.Search)
+		if countErr != nil {
+			log.Printf("HandleGetResults: failed to count results by status for batch %s: %v", batchID, countErr)
+		} else {
+			response["status_counts"] = statusCounts
 		}
-		if searchQuery != "" {
-			// Source and Destination are pointers and are legitimately nil: a
-			// NO_MATCH row has no destination at all. Dereferencing them here
-			// panicked on any batch containing an unmatched source.
-			srcMatch := false
-			if item.Source != nil {
-				srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchQuery) ||
-					strings.Contains(strings.ToLower(item.Source.ReferenceID), searchQuery)
-			}
-			destMatch := false
-			if item.Destination != nil {
-				destMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchQuery) ||
-					strings.Contains(strings.ToLower(item.Destination.CustomerID), searchQuery)
-			}
-			if !srcMatch && !destMatch {
-				continue
-			}
-		}
-		filtered = append(filtered, item)
 	}
-
-	totalItems := len(filtered)
-	start := (page - 1) * limit
-	end := start + limit
-
-	if start > totalItems {
-		start = totalItems
-	}
-	if end > totalItems {
-		end = totalItems
-	}
-
-	paginated := filtered[start:end]
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"batch_id":    batchID,
-		"total_count": totalItems,
-		"page":        page,
-		"limit":       limit,
-		"results":     paginated,
-	})
+	json.NewEncoder(w).Encode(response)
 }
 
 // DefaultJobsPageSize is the page size used when the caller does not ask for one.

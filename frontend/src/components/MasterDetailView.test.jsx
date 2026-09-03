@@ -146,9 +146,12 @@ describe('MasterDetailView', () => {
 
     render(<MasterDetailView />)
     
-    await waitFor(() => screen.getByRole('combobox'))
-    
-    const select = screen.getByRole('combobox')
+    await waitFor(() => screen.getByTitle('Which match run to review'))
+
+    // The toolbar now also has sort-by and rows-per-page selects (per the
+    // paging/sorting spec), so a plain combobox role query is ambiguous;
+    // the batch picker keeps its distinguishing title attribute.
+    const select = screen.getByTitle('Which match run to review')
     expect(select.querySelector('option[value="batch-unlisted"]')).toBeInTheDocument()
     expect(useMatcherStore.getState().batchID).toBe('batch-unlisted')
   })

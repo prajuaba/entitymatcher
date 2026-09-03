@@ -380,29 +380,39 @@ func (s *Store) ListBatches() []BatchSummary {
 }
 
 // GetResultsPage returns a paginated, filtered set of match results for a batch.
-func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error) {
+func (s *Store) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, error) {
+	q = q.Normalized()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	results, ok := s.results[batchID]
+	results, ok := s.results[q.BatchID]
 	if !ok {
-		return nil, 0, fmt.Errorf("batch not found")
+		// An unknown batch is treated as an empty page, not an error.
+		// This matches the behavior of the Postgres-backed store and
+		// allows HTTP handlers to treat missing batches gracefully.
+		return nil, 0, nil
 	}
 
 	// Filter by status and search
 	var filtered []matcher.MatchResultItem
+	searchLower := strings.ToLower(q.Search)
 	for _, item := range results {
-		if status != "" && status != "ALL" && item.MatchStatus != status {
+		if q.Status != "" && q.Status != "ALL" && item.MatchStatus != q.Status {
 			continue
 		}
-		if search != "" {
-			searchLower := strings.ToLower(search)
-			srcMatch := (item.Source != nil && (strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
-				strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower))) ||
-				(item.Source == nil)
-			dstMatch := (item.Destination != nil && (strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
-				strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower))) ||
-				(item.Destination == nil)
+		if q.Search != "" {
+			// A nil Source/Destination must NOT be treated as an automatic match.
+			// This fixes a bug where NO_MATCH rows with nil Destination would
+			// always pass the search filter regardless of search term.
+			var srcMatch, dstMatch bool
+			if item.Source != nil {
+				srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
+					strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower)
+			}
+			if item.Destination != nil {
+				dstMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
+					strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower)
+			}
 			if !srcMatch && !dstMatch {
 				continue
 			}
@@ -412,16 +422,67 @@ func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int
 
 	totalCount := len(filtered)
 
-	// Apply pagination
-	if limit <= 0 {
-		limit = 20
-	}
-	if offset < 0 {
-		offset = 0
+	// Sort a copy of the filtered results
+	sortedCopy := make([]matcher.MatchResultItem, len(filtered))
+	copy(sortedCopy, filtered)
+
+	less := func(i, j int) bool {
+		var lt, gt bool
+		switch q.SortBy {
+		case SortByCreatedAt:
+			lt = sortedCopy[i].CreatedAt.Before(sortedCopy[j].CreatedAt)
+			gt = sortedCopy[i].CreatedAt.After(sortedCopy[j].CreatedAt)
+		case SortByConfidence:
+			lt = sortedCopy[i].ConfidenceScore < sortedCopy[j].ConfidenceScore
+			gt = sortedCopy[i].ConfidenceScore > sortedCopy[j].ConfidenceScore
+		case SortByNameScore:
+			lt = sortedCopy[i].NameScore < sortedCopy[j].NameScore
+			gt = sortedCopy[i].NameScore > sortedCopy[j].NameScore
+		case SortByDateScore:
+			lt = sortedCopy[i].DateScore < sortedCopy[j].DateScore
+			gt = sortedCopy[i].DateScore > sortedCopy[j].DateScore
+		case SortByStatus:
+			lt = sortedCopy[i].MatchStatus < sortedCopy[j].MatchStatus
+			gt = sortedCopy[i].MatchStatus > sortedCopy[j].MatchStatus
+		case SortBySourceName:
+			nameI := ""
+			nameJ := ""
+			if sortedCopy[i].Source != nil {
+				nameI = sortedCopy[i].Source.CustomerNameRaw
+			}
+			if sortedCopy[j].Source != nil {
+				nameJ = sortedCopy[j].Source.CustomerNameRaw
+			}
+			lt = strings.ToLower(nameI) < strings.ToLower(nameJ)
+			gt = strings.ToLower(nameI) > strings.ToLower(nameJ)
+		case SortByReferenceID:
+			refI := ""
+			refJ := ""
+			if sortedCopy[i].Source != nil {
+				refI = sortedCopy[i].Source.ReferenceID
+			}
+			if sortedCopy[j].Source != nil {
+				refJ = sortedCopy[j].Source.ReferenceID
+			}
+			lt = strings.ToLower(refI) < strings.ToLower(refJ)
+			gt = strings.ToLower(refI) > strings.ToLower(refJ)
+		}
+
+		if lt {
+			return q.SortDir != "desc"
+		}
+		if gt {
+			return q.SortDir == "desc"
+		}
+		// Break ties by ID ascending
+		return sortedCopy[i].ID < sortedCopy[j].ID
 	}
 
-	start := offset
-	end := offset + limit
+	sort.SliceStable(sortedCopy, less)
+
+	// Apply pagination (q.Limit/q.Offset are already validated by Normalized())
+	start := q.Offset
+	end := q.Offset + q.Limit
 	if start > totalCount {
 		start = totalCount
 	}
@@ -429,7 +490,39 @@ func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int
 		end = totalCount
 	}
 
-	return filtered[start:end], totalCount, nil
+	return sortedCopy[start:end], totalCount, nil
+}
+
+// CountResultsByStatus returns a map of match status counts for a batch,
+// filtered only by the search term (not by status).
+func (s *Store) CountResultsByStatus(batchID, search string) (map[string]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	results, ok := s.results[batchID]
+	if !ok {
+		return make(map[string]int), nil
+	}
+
+	counts := make(map[string]int)
+	searchLower := strings.ToLower(search)
+	for _, item := range results {
+		// Apply the same corrected search logic as in GetResultsPage.
+		var srcMatch, dstMatch bool
+		if item.Source != nil {
+			srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
+				strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower)
+		}
+		if item.Destination != nil {
+			dstMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
+				strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower)
+		}
+		if search == "" || srcMatch || dstMatch {
+			counts[item.MatchStatus]++
+		}
+	}
+
+	return counts, nil
 }
 
 // ListJobs returns job summaries with pagination, ordered by started_at descending.

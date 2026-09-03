@@ -87,6 +87,14 @@ CREATE INDEX IF NOT EXISTS idx_match_results_batch_status
 CREATE INDEX IF NOT EXISTS idx_match_results_batch_source
     ON match_results(batch_id, source_id);
 
+-- Paging indexes. The default review-queue order is (created_at, id) and the
+-- most common user-chosen order is confidence descending; without these,
+-- every LIMIT/OFFSET page sorts the whole batch before slicing it.
+CREATE INDEX IF NOT EXISTS idx_match_results_batch_created
+    ON match_results(batch_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_match_results_batch_confidence
+    ON match_results(batch_id, confidence_score DESC, id);
+
 -- Match audit logs: compliance-critical, append-only record of all match decisions
 -- Application role should NOT hold TRUNCATE privilege on this table.
 CREATE TABLE IF NOT EXISTS match_audit_logs (

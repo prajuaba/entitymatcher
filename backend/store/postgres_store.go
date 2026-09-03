@@ -624,8 +624,40 @@ func (s *PostgresStore) UpdateMatchStatus(batchID, matchID, newStatus string) er
 	return nil
 }
 
+// escapeLikePattern escapes the LIKE/ILIKE metacharacters in s so a caller's
+// search term is matched as literal text, keeping this SQL predicate's
+// semantics identical to the in-memory store's strings.Contains. Without this,
+// e.g. `'Alice Wonderland' ILIKE '%_%'` is TRUE, so a user searching for a
+// literal underscore would match every row instead of only rows containing
+// one. Postgres treats backslash as the default LIKE escape character, so no
+// ESCAPE clause is needed. The backslash replacement MUST happen first, or
+// escaping % and _ afterwards would double-escape the backslashes those
+// replacements just introduced.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
+// resultsSortExprs maps an API-visible sort field to its SQL expression.
+// ORDER BY cannot be parameterized, so only values from this map are ever
+// interpolated into the query -- caller input is used solely as a map key.
+// COALESCE keeps the JSON-extracted text sorts aligned with the in-memory
+// store, where an absent record sorts as the empty string rather than NULL.
+var resultsSortExprs = map[string]string{
+	SortByCreatedAt:   "created_at",
+	SortByConfidence:  "confidence_score",
+	SortByNameScore:   "name_score",
+	SortByDateScore:   "date_score",
+	SortByStatus:      "match_status",
+	SortBySourceName:  "COALESCE(source_snapshot->>'customer_name_raw', '')",
+	SortByReferenceID: "COALESCE(source_snapshot->>'reference_id', '')",
+}
+
 // GetResultsPage retrieves a paginated, filtered set of match results.
-func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error) {
+func (s *PostgresStore) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, error) {
+	q = q.Normalized()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -635,22 +667,32 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 	argCount := 1
 
 	whereConditions = append(whereConditions, fmt.Sprintf("batch_id = $%d", argCount))
-	args = append(args, batchID)
+	args = append(args, q.BatchID)
 	argCount++
 
-	if status != "" && status != "ALL" {
+	if q.Status != "" && q.Status != "ALL" {
 		whereConditions = append(whereConditions, fmt.Sprintf("match_status = $%d", argCount))
-		args = append(args, status)
+		args = append(args, q.Status)
 		argCount++
 	}
 
-	if search != "" {
-		searchLower := strings.ToLower(search)
+	if q.Search != "" {
+		// Search is narrowed to the four named keys the HTTP handler and the
+		// in-memory store have always searched (customer_name_raw / reference_id on
+		// the source, customer_name_raw / customer_id on the destination). This
+		// replaces a prior `LOWER(source_snapshot::text) LIKE ...` predicate that
+		// matched against the ENTIRE JSON blob, so it could hit on unrelated
+		// snapshot fields never intended to be searchable. ILIKE makes the match
+		// case-insensitive, so the LOWER() calls are no longer needed either.
+		// The search term is escaped before wrapping: an unescaped %, _ or \ in
+		// the caller's text would otherwise be interpreted as a LIKE pattern
+		// metacharacter rather than literal text (see escapeLikePattern).
+		searchArg := "%" + escapeLikePattern(q.Search) + "%"
 		whereConditions = append(whereConditions,
-			fmt.Sprintf("(LOWER(source_snapshot::text) LIKE $%d OR LOWER(destination_snapshot::text) LIKE $%d)",
-				argCount, argCount+1))
-		args = append(args, "%"+searchLower+"%", "%"+searchLower+"%")
-		argCount += 2
+			fmt.Sprintf("(source_snapshot->>'customer_name_raw' ILIKE $%d OR source_snapshot->>'reference_id' ILIKE $%d OR destination_snapshot->>'customer_name_raw' ILIKE $%d OR destination_snapshot->>'customer_id' ILIKE $%d)",
+				argCount, argCount, argCount, argCount))
+		args = append(args, searchArg)
+		argCount++
 	}
 
 	whereClause := strings.Join(whereConditions, " AND ")
@@ -663,27 +705,33 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 		return nil, 0, fmt.Errorf("count query failed: %w", err)
 	}
 
-	// Get paginated results
-	if limit <= 0 {
-		limit = 20
+	// Get paginated results. sortExpr/sortDir are already validated by
+	// q.Normalized() (SortBy is guaranteed to be a resultsSortExprs key, SortDir
+	// is "asc" or "desc"); the fallback below only guards against this map ever
+	// getting out of sync with the SortBy* constants.
+	sortExpr := resultsSortExprs[q.SortBy]
+	if sortExpr == "" {
+		sortExpr = "created_at"
 	}
-	if offset < 0 {
-		offset = 0
+	sortDir := "ASC"
+	if q.SortDir == "desc" {
+		sortDir = "DESC"
 	}
 
-	args = append(args, limit, offset)
-	// ORDER BY created_at ASC, id ASC: id is required as a tiebreaker because bulk-inserted
-	// rows frequently share a created_at microsecond; without it, Postgres does not guarantee
-	// a consistent row order between the queries fetching different LIMIT/OFFSET pages, which
-	// can cause a row to appear on two pages or on none. ASC matches the in-memory store's
-	// insertion-order semantics so both backends agree on order for the same data.
+	// `, id ASC` is a mandatory tiebreaker on every sort, not just the default one:
+	// bulk-inserted rows frequently share a value on any single column (created_at
+	// microsecond, confidence score, status, ...), and without a unique secondary
+	// key Postgres does not guarantee a consistent row order between the queries
+	// fetching different LIMIT/OFFSET pages, which can cause a row to appear on
+	// two pages or on none.
+	args = append(args, q.Limit, q.Offset)
 	query := fmt.Sprintf(`
 		SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		       match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
 		       destination_snapshot, created_at
 		FROM match_results WHERE %s
-		ORDER BY created_at ASC, id ASC LIMIT $%d OFFSET $%d`,
-		whereClause, argCount, argCount+1)
+		ORDER BY %s %s, id ASC LIMIT $%d OFFSET $%d`,
+		whereClause, sortExpr, sortDir, argCount, argCount+1)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -706,7 +754,6 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 			continue
 		}
 
-		// Unmarshal snapshots
 		if srcJSON != "" {
 			_ = json.Unmarshal([]byte(srcJSON), &result.Source)
 		}
@@ -721,6 +768,55 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 	}
 
 	return results, totalCount, nil
+}
+
+// CountResultsByStatus counts match results by status for a given batch and optional search term.
+func (s *PostgresStore) CountResultsByStatus(batchID, search string) (map[string]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Build WHERE clause
+	var whereConditions []string
+	var args []interface{}
+	argCount := 1
+
+	whereConditions = append(whereConditions, fmt.Sprintf("batch_id = $%d", argCount))
+	args = append(args, batchID)
+	argCount++
+
+	if search != "" {
+		// Escaped for the same reason as in GetResultsPage: an unescaped %, _ or
+		// \ would otherwise be interpreted as a LIKE pattern metacharacter.
+		searchArg := "%" + escapeLikePattern(search) + "%"
+		whereConditions = append(whereConditions,
+			fmt.Sprintf("(source_snapshot->>'customer_name_raw' ILIKE $%d OR source_snapshot->>'reference_id' ILIKE $%d OR destination_snapshot->>'customer_name_raw' ILIKE $%d OR destination_snapshot->>'customer_id' ILIKE $%d)",
+				argCount, argCount, argCount, argCount))
+		args = append(args, searchArg)
+		argCount++
+	}
+
+	whereClause := strings.Join(whereConditions, " AND ")
+
+	query := fmt.Sprintf("SELECT match_status, COUNT(*) FROM match_results WHERE %s GROUP BY match_status", whereClause)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count by status query failed: %w", err)
+	}
+	defer rows.Close()
+
+	statusCounts := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		err := rows.Scan(&status, &count)
+		if err != nil {
+			continue
+		}
+		statusCounts[status] = count
+	}
+
+	return statusCounts, nil
 }
 
 // UpdateProgress updates or creates a batch progress record.

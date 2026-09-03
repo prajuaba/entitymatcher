@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"strings"
+
 	"entitymatcher/matcher"
 )
 
@@ -41,6 +43,81 @@ type JobSummary struct {
 	CompletedAt         string `json:"completed_at"` // RFC3339
 }
 
+// Sortable result fields. These are the only values a caller may sort by; the
+// SQL layer maps them to column expressions rather than interpolating caller
+// input into an ORDER BY, which cannot be parameterized.
+const (
+	SortByCreatedAt   = "created_at"
+	SortByConfidence  = "confidence_score"
+	SortByNameScore   = "name_score"
+	SortByDateScore   = "date_score"
+	SortByStatus      = "match_status"
+	SortBySourceName  = "source_name"
+	SortByReferenceID = "reference_id"
+)
+
+// DefaultResultsPageSize / MaxResultsPageSize bound what one request may pull,
+// so a caller cannot ask the store for an unbounded scan.
+const (
+	DefaultResultsPageSize = 20
+	MaxResultsPageSize     = 200
+)
+
+// MaxResultsPage bounds the page NUMBER a caller may request (as opposed to
+// MaxResultsPageSize, which bounds the page's row count). A UI paging through
+// 20-200 rows at a time will never legitimately reach page 1,000,000. Clamping
+// the page number to this constant belongs in the HTTP handler rather than in
+// Normalized() above, since ResultsQuery has no concept of a "page number" --
+// only a Limit/Offset already-computed by the caller -- and clamping there
+// keeps an absurd page value from overflowing the handler's
+// (page-1)*limit offset multiplication into a negative number.
+const MaxResultsPage = 1_000_000
+
+// ResultsQuery describes one page of match results. Passing a struct rather
+// than a widening parameter list keeps the signature stable as filters grow.
+type ResultsQuery struct {
+	BatchID string
+	Status  string // "" or "ALL" means every status
+	Search  string
+	SortBy  string
+	SortDir string // "asc" or "desc"
+	Limit   int
+	Offset  int
+}
+
+// Normalized returns a copy of q with defaults applied and invalid sort/paging
+// values silently corrected, so a caller (e.g. an HTTP handler) never needs to
+// validate a ResultsQuery itself before handing it to the store.
+func (q ResultsQuery) Normalized() ResultsQuery {
+	n := q
+	n.Search = strings.TrimSpace(n.Search)
+
+	switch n.SortBy {
+	case SortByCreatedAt, SortByConfidence, SortByNameScore, SortByDateScore,
+		SortByStatus, SortBySourceName, SortByReferenceID:
+		// already a valid sort field
+	default:
+		n.SortBy = SortByCreatedAt
+	}
+
+	n.SortDir = strings.ToLower(n.SortDir)
+	if n.SortDir != "desc" {
+		n.SortDir = "asc"
+	}
+
+	if n.Limit <= 0 {
+		n.Limit = DefaultResultsPageSize
+	} else if n.Limit > MaxResultsPageSize {
+		n.Limit = MaxResultsPageSize
+	}
+
+	if n.Offset < 0 {
+		n.Offset = 0
+	}
+
+	return n
+}
+
 // Repository defines the storage interface for the entity matcher.
 // Implementations must be thread-safe for concurrent access.
 type Repository interface {
@@ -65,7 +142,16 @@ type Repository interface {
 	UpdateMatchStatus(batchID, matchID, newStatus string) error
 
 	// Pagination support for results
-	GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error)
+	// GetResultsPage returns one page of results plus the total number of rows
+	// matching the query's filters (ignoring Limit/Offset). A batch that does
+	// not exist is an empty page, not an error -- only a genuine store failure
+	// returns one.
+	GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, error)
+
+	// CountResultsByStatus returns row counts per match_status for a batch,
+	// honouring the same search filter but ignoring any status filter, so a UI
+	// can label its status tabs without issuing one request per tab.
+	CountResultsByStatus(batchID, search string) (map[string]int, error)
 
 	// Progress tracking
 	UpdateProgress(p matcher.BatchProgress)

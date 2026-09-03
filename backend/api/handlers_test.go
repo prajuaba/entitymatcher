@@ -355,8 +355,12 @@ func (m *mockRepository) UpdateMatchStatus(batchID, matchID, newStatus string) e
 	return nil
 }
 
-func (m *mockRepository) GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error) {
+func (m *mockRepository) GetResultsPage(q store.ResultsQuery) ([]matcher.MatchResultItem, int, error) {
 	return nil, 0, nil
+}
+
+func (m *mockRepository) CountResultsByStatus(batchID, search string) (map[string]int, error) {
+	return map[string]int{}, nil
 }
 
 func (m *mockRepository) UpdateProgress(p matcher.BatchProgress) {
