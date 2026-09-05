@@ -18,6 +18,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+collect_descendants() {
+  local parent="$1"
+  local child
+  for child in $(pgrep -P "$parent" 2>/dev/null); do
+    collect_descendants "$child"
+    echo "$child"
+  done
+}
+
 get_docker_compose() {
   if command -v docker-compose >/dev/null 2>&1; then
     echo "docker-compose"
@@ -49,11 +58,36 @@ stop_local_process() {
     pid=$(cat "$pid_file")
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       echo -e "${BLUE}==>${NC} Stopping ${name} (PID: ${pid})..."
+
+      # Collect descendants only if pgrep is available
+      local descendants=()
+      if command -v pgrep >/dev/null 2>&1; then
+        mapfile -t descendants < <(collect_descendants "$pid")
+      fi
+
+      # Send TERM signal to all descendants first
+      local descendant
+      for descendant in "${descendants[@]}"; do
+        kill "$descendant" 2>/dev/null || true
+      done
+
+      # Send TERM signal to parent
       kill "$pid" 2>/dev/null || true
+
       sleep 1
+
+      # Check and send KILL to descendants if still alive
+      for descendant in "${descendants[@]}"; do
+        if kill -0 "$descendant" 2>/dev/null; then
+          kill -9 "$descendant" 2>/dev/null || true
+        fi
+      done
+
+      # Check and send KILL to parent if still alive
       if kill -0 "$pid" 2>/dev/null; then
         kill -9 "$pid" 2>/dev/null || true
       fi
+
       echo -e "${GREEN}✓ ${name} stopped.${NC}"
     else
       echo -e "${YELLOW}${name} (PID: ${pid}) is not running.${NC}"
@@ -66,9 +100,6 @@ stop_local() {
   echo -e "${BLUE}==>${NC} Stopping local processes..."
   stop_local_process "backend"
   stop_local_process "frontend"
-
-  # Also terminate any stray go or vite processes running in this directory if any
-  pkill -f "go run ." 2>/dev/null || true
 
   echo -e "${GREEN}✓ Local processes stopped.${NC}"
 }
