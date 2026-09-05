@@ -257,7 +257,7 @@ export function ConfigPanel() {
       </div>
 
       {/* Tab Content */}
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Data Sources Tab */}
         {activeTab === 'Data Sources' && (
           <div
@@ -641,7 +641,7 @@ export function ConfigPanel() {
       </div>
 
       {/* Sticky Action Bar */}
-      <div className="sticky bottom-0 -mx-8 -mb-8 px-8 py-4 bg-slate-950/95 border-t border-slate-800 backdrop-blur flex flex-col md:flex-row items-center justify-between gap-4">
+      <div className="sticky bottom-0 z-10 -mx-8 -mb-8 px-8 py-4 bg-slate-950/95 border-t border-slate-800 backdrop-blur flex flex-col md:flex-row items-center justify-between gap-4">
         {/* Error/Success Banner Area */}
         {savedMessage && (
           <div className="w-full md:w-auto px-4 py-3 bg-emerald-950/80 border border-emerald-700/50 text-emerald-300 rounded-lg text-xs font-medium text-center md:text-left">
