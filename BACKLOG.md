@@ -351,6 +351,7 @@ Severity: **C**ritical / **H**igh / **M**edium.
 | `fedcd1b` | Review-queue chip claimed a confidence band it does not filter on. **47,110 of 171,402 review rows score ≥90%**, up to 100% |
 | `15e1412` | One Re-run click now starts a visible run — see the note below |
 | `145881e` | Manual pairing wrote no audit row, leaving the MANUAL OVERRIDES filter empty by construction (O1) |
+| `b82fc48` | Custom aliases lived only in memory and were lost on every restart, silently changing match outcomes (Q1) |
 
 **The Re-run defect is worth stating plainly.** The progress endpoint replays the last known
 progress on connect; for a batch that had run before, that first frame carries the *previous*
@@ -381,15 +382,15 @@ than the UI implies. Neither is a scoring bug; both are evidentiary.
 | P2 | Dashboard tiles must stop naming a confidence band | `ProgressDashboard.jsx:77,83` still hardcode `Confidence ≥ 90%` and `Confidence 70% - 89%`. **`fedcd1b` missed this component.** Two faults, as before: review status is not a confidence band, and the numbers ignore the configurable `auto_match_threshold` / `review_threshold` — set auto to 0.95 and both labels are simply wrong |
 | P3 | Refresh status counts after a manual pairing | The pair is written and the modal closes, but the filter chips keep their old totals until something else forces a refetch: `All Pairs 58 · Confirmed 1` immediately after, `59 · 2` once a filter is touched |
 
-## EPIC Q — Dictionary durability (H)
+## EPIC Q — Dictionary durability (H) — Q1 ✅ closed; **Q2** open
 
-The alias map feeds the pre-normalizer, so its contents change match outcomes. It is
-currently the least durable state in the system.
+The alias map feeds the pre-normalizer, so its contents change match outcomes. Q1 made it
+durable; what remains is that an entry, once added, cannot be taken back.
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| Q1 | Persist custom aliases | `GetGlobalDictionary()` is an in-process map. There is **no dictionary table and no store persistence**, so every operator-added alias is lost on restart and the seeded defaults (`scb`, `ไทยพาณิชย์`, `bbl`) return. Results therefore change between runs for reasons nothing records. Persist alongside `config` / `connector_settings` |
-| Q2 | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Until Q1 lands the only way to clear a typo is a restart, which takes every other alias with it |
+| ~~Q1~~ ✅ | Persist custom aliases | `GetGlobalDictionary()` is an in-process map. There is **no dictionary table and no store persistence**, so every operator-added alias is lost on restart and the seeded defaults (`scb`, `ไทยพาณิชย์`, `bbl`) return. Results therefore change between runs for reasons nothing records. Persist alongside `config` / `connector_settings`. **Shipped** `b82fc48`: a `dictionary_entries` table **keyed by alias**, not the single-row JSONB `config` and `connector_settings` use — the dictionary is keyed data, so upsert is natural, concurrent saves cannot clobber each other through a read-modify-write, and it makes Q2 a single statement rather than a rewrite. `SaveDictionaryEntry` returns an error and the handler answers **500** on failure, following the precedent `SaveDataset` sets: reporting success for a write that did not land leaves exactly this defect. `main.go` hydrates the global dictionary at startup beside the calibration-model load; built-in defaults still seed it and persisted entries apply on top, so an operator alias overrides a default of the same name. **Removing a default remains unexpressible — that needs Q2.** Verified end to end: an alias added through the API landed lowercased, survived a container restart, and the backend logged `Loaded 1 custom alias(es) from the dictionary`. Mutation-checked by removing the persistence call, which fails `TestHandleDictionaryPostPersistsEntry` |
+| Q2 | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Before Q1 the only way to clear a typo was a restart, which took every other alias with it; now that aliases persist (`b82fc48`) a typo survives restarts too, so deletion is the only way to remove one. The keyed `dictionary_entries` table added by Q1 makes the store side a single `DELETE ... WHERE alias = $1` |
 
 ## EPIC R — Input handling and interface polish (M)
 
