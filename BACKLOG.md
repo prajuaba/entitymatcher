@@ -350,6 +350,7 @@ Severity: **C**ritical / **H**igh / **M**edium.
 | `db07832` | `withDefaults` rebuilt `column_mapping` as a whitelist, dropping `date_calendar_src/dest` on every save. Same class as the above; fixed by spreading before defaulting so unknown keys survive |
 | `fedcd1b` | Review-queue chip claimed a confidence band it does not filter on. **47,110 of 171,402 review rows score ≥90%**, up to 100% |
 | `15e1412` | One Re-run click now starts a visible run — see the note below |
+| `145881e` | Manual pairing wrote no audit row, leaving the MANUAL OVERRIDES filter empty by construction (O1) |
 
 **The Re-run defect is worth stating plainly.** The progress endpoint replays the last known
 progress on connect; for a batch that had run before, that first frame carries the *previous*
@@ -362,14 +363,14 @@ clock, which is subject to skew against server timestamps. This also un-stuck th
 bar and processed counter, which read `0%` / `0 / N` for the same reason — nothing was
 listening to the stream.
 
-## EPIC O — Audit and attribution integrity (C)
+## EPIC O — Audit and attribution integrity (C) — O1 ✅ closed; **O2** open
 
 The product's compliance surface has two holes, both in the direction of recording *less*
 than the UI implies. Neither is a scoring bug; both are evidentiary.
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| O1 | Manual pairing must write an audit record | Pairing by hand creates a `CONFIRMED` result at 1.000 confidence with **no row in `match_audit_logs`**. Approve and Reject both log correctly; only the override that bypasses the engine entirely does not. The Audit Trail ships a **MANUAL OVERRIDES** filter that therefore returns 0 by construction — verified live. Write an entry with the source/destination ids, the acting user from JWT claims, and `previous_status → CONFIRMED`, so the filter has something to select |
+| ~~O1~~ ✅ | Manual pairing must write an audit record | Pairing by hand creates a `CONFIRMED` result at 1.000 confidence with **no row in `match_audit_logs`**. Approve and Reject both log correctly; only the override that bypasses the engine entirely does not. The Audit Trail ships a **MANUAL OVERRIDES** filter that therefore returns 0 by construction — verified live. Write an entry with the source/destination ids, the acting user from JWT claims, and `previous_status → CONFIRMED`, so the filter has something to select. **Shipped** `145881e`: `HandleManualLink` records `Action: "OVERRIDE"` with `NewStatus`/`ConfidenceScore` taken from the returned item rather than hardcoded. Attribution comes from `ClaimsFrom(r.Context())`, as it does for the other two actions. **`previous_status` is deliberately left empty**, not "NONE" or "NO_MATCH" — a manual link creates a pairing that did not exist, and inventing a prior status would put a false statement in an audit record; the UI renders it as `(none)`. An optional `review_comments` was added, defaulting to "Manually linked by reviewer"; the existing caller sends only the three ids and is unaffected. Verified live: the MANUAL OVERRIDES filter went 0 → 1 and All Review Actions 2 → 3. Mutation-checked three ways — deleting the call fails the build, sourcing the user from the body fails the `UserID` assertion, and flipping the action to `CONFIRM` fails with `expected: "OVERRIDE"`, which is the regression that would silently re-empty the filter |
 | O2 | Remove or bind the "Reviewer User ID" input | The field accepts text and the client sends it as `user_id`, but `HandleMatchAction` takes the reviewer from `ClaimsFrom(r.Context())` and discards the payload value — typing `qa_regression` produced a row attributed to `usr-01`. **The backend is right**: a client must not be able to attribute a decision to another person. The defect is a UI control implying otherwise, in the one screen where attribution is the point. Delete it, or render the signed-in user read-only |
 
 ## EPIC P — Execution visibility (H)
