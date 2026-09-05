@@ -329,3 +329,88 @@ exposure; see its row below.
 | ~~N3~~ ✅ | SQL Server schema-qualified tables | `validateIdentifier` rejects `.`, so `dbo.Customers` and `sales.Orders` are refused and only the login's default schema is reachable — in SQL Server, `dbo.`-qualification is the norm. The PostgreSQL connector already splits and validates both halves (`:205-217`); give SQL Server the same treatment |
 | ~~N4~~ ✅ | SQL Server introspection must filter by schema | The query filters `WHERE TABLE_NAME = @TableName` with no `TABLE_SCHEMA` predicate (`:309`). Two schemas holding a same-named table return both column sets, merged and interleaved by `ORDINAL_POSITION` — wrong, and silent. Filter by schema once N3 supplies one |
 | ~~N5~~ ✅ | Bound the PostgreSQL raw-SQL passthrough | **The premise of this entry was wrong.** It recorded a live hole — arbitrary SQL as the configured DB user. In both `IntrospectSchema` and `FetchRecords`, `validateIdentifier` runs *before* the `SELECT` branch, and its `^[A-Za-z_][A-Za-z0-9_]*$` rejects any query on its spaces, so the branch had never executed. Proven by running the passthrough tests against the committed code: all three failed with `invalid identifier: SELECT ...`. Dead code, not an exposure. Removed in `82c68ff` — free, since nothing can depend on a path that never ran; making it work would have *added* surface instead. A query datasource is now refused explicitly, before connecting |
+
+---
+
+# Round 3 — UI regression sweep, 2026-09-05
+
+Derived from exercising **every interactive control** in the SPA against live data at
+`15e1412` — 37 checks asserted on observable state (DOM, API response, or a row in
+Postgres), not click-throughs. Same pattern as Round 2: every defect below was found by
+operating the system, none by reading it.
+
+Severity: **C**ritical / **H**igh / **M**edium.
+
+## Closed during the sweep
+
+| Commit | What it fixed |
+| :-- | :-- |
+| `697d941` | Config action bar overlapped the form — the tab pane was `flex-1 min-h-0` with no `overflow-y-auto`, so content spilled under a `sticky` bar that also had `z-index: auto` |
+| `30ed58c` | **`fetchConfig` was never called anywhere.** The store served hardcoded defaults all session; those carry no `column_mapping`, so FieldMapper fell through to its own blank literal and saving wrote `date_field_src/dest: ""` over the real mapping. This is what silently disabled date scoring |
+| `db07832` | `withDefaults` rebuilt `column_mapping` as a whitelist, dropping `date_calendar_src/dest` on every save. Same class as the above; fixed by spreading before defaulting so unknown keys survive |
+| `fedcd1b` | Review-queue chip claimed a confidence band it does not filter on. **47,110 of 171,402 review rows score ≥90%**, up to 100% |
+| `15e1412` | One Re-run click now starts a visible run — see the note below |
+
+**The Re-run defect is worth stating plainly.** The progress endpoint replays the last known
+progress on connect; for a batch that had run before, that first frame carries the *previous*
+run's `COMPLETED`, and `runMatching` took it as its own job finishing — closing the stream,
+clearing `loading` and refetching stale results. The user saw a no-op and clicked again.
+**Every click had in fact launched another full 62,451-source run**, which is why clicking
+repeatedly eventually "worked": by then an earlier job was still going, so the replayed
+snapshot said `RUNNING`. Fixed by discriminating on `started_at` rather than the browser
+clock, which is subject to skew against server timestamps. This also un-stuck the progress
+bar and processed counter, which read `0%` / `0 / N` for the same reason — nothing was
+listening to the stream.
+
+## EPIC O — Audit and attribution integrity (C)
+
+The product's compliance surface has two holes, both in the direction of recording *less*
+than the UI implies. Neither is a scoring bug; both are evidentiary.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| O1 | Manual pairing must write an audit record | Pairing by hand creates a `CONFIRMED` result at 1.000 confidence with **no row in `match_audit_logs`**. Approve and Reject both log correctly; only the override that bypasses the engine entirely does not. The Audit Trail ships a **MANUAL OVERRIDES** filter that therefore returns 0 by construction — verified live. Write an entry with the source/destination ids, the acting user from JWT claims, and `previous_status → CONFIRMED`, so the filter has something to select |
+| O2 | Remove or bind the "Reviewer User ID" input | The field accepts text and the client sends it as `user_id`, but `HandleMatchAction` takes the reviewer from `ClaimsFrom(r.Context())` and discards the payload value — typing `qa_regression` produced a row attributed to `usr-01`. **The backend is right**: a client must not be able to attribute a decision to another person. The defect is a UI control implying otherwise, in the one screen where attribution is the point. Delete it, or render the signed-in user read-only |
+
+## EPIC P — Execution visibility (H)
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| P1 | Dashboard must load a batch's stored state | Progress is only ever populated by the SSE stream a re-run opens, so selecting an existing batch shows `Status: IDLE` with every tile at 0 — verified against `batch-dates-mapped` with **191,425 stored results** — and **"View Pair Results" is hidden**, gated on `status === 'COMPLETED'` (`ProgressDashboard.jsx:30`). The real state is already in `match_jobs`; nothing reads it. This is the remaining half of the Re-run confusion fixed in `15e1412`: clicking Re-run was the only way to make a finished job render |
+| P2 | Dashboard tiles must stop naming a confidence band | `ProgressDashboard.jsx:77,83` still hardcode `Confidence ≥ 90%` and `Confidence 70% - 89%`. **`fedcd1b` missed this component.** Two faults, as before: review status is not a confidence band, and the numbers ignore the configurable `auto_match_threshold` / `review_threshold` — set auto to 0.95 and both labels are simply wrong |
+| P3 | Refresh status counts after a manual pairing | The pair is written and the modal closes, but the filter chips keep their old totals until something else forces a refetch: `All Pairs 58 · Confirmed 1` immediately after, `59 · 2` once a filter is touched |
+
+## EPIC Q — Dictionary durability (H)
+
+The alias map feeds the pre-normalizer, so its contents change match outcomes. It is
+currently the least durable state in the system.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| Q1 | Persist custom aliases | `GetGlobalDictionary()` is an in-process map. There is **no dictionary table and no store persistence**, so every operator-added alias is lost on restart and the seeded defaults (`scb`, `ไทยพาณิชย์`, `bbl`) return. Results therefore change between runs for reasons nothing records. Persist alongside `config` / `connector_settings` |
+| Q2 | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Until Q1 lands the only way to clear a typo is a restart, which takes every other alias with it |
+
+## EPIC R — Input handling and interface polish (M)
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| R1 | Replace the blocking `alert()` on invalid JSON | `FileUpload.jsx:89,101` call `alert()`, which blocks the renderer until dismissed — during the sweep the page stopped responding entirely and only recovered on navigation. Every other validation error in this app renders inline (Test Connection's *"server-side file paths are disabled…"* is the model). Use the same treatment |
+| R2 | Disable Sign In on empty credentials | Submitting an empty form is possible; the server answers `Unauthorized`. Correct outcome, avoidable round trip |
+| R3 | Clear "New Column Name" after adding | The pairing-column field keeps its text after Add, unlike the Alias form beside it which clears both inputs — easy to add the same column twice |
+
+## EPIC S — Matching quality decisions (M) — open by decision, not defect
+
+These are calls for the operator, recorded so they are not rediscovered. Nothing here is
+misbehaving.
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| S1 | Decide the date tolerance for non-comparable date fields | `date_field_src` is `VALUATION_DATE` (when collateral was appraised); `date_field_dest` is `SubmitDateTime` (when the application was submitted). **These are different business events.** With the ±30-day cliff, **113,661 review rows score `date_score = 0`** purely on that gap. Among strong-name pairs with real dates on both sides, 63,475 fall within 30 days but **23,834 are more than a year apart with equally strong names** (avg 0.997) — consistent with the same customers across genuinely different transactions. Widening to 90 days recovers only ~2,564. Either pick genuinely comparable columns, or lower `date_weight` so the date informs ranking without vetoing |
+| S2 | Decide whether rank 2-5 alternates belong in the review queue | Of the review rows, **16,169 are "Alternative candidate (rank N) for review"** and **21,858 are "Destination already assigned"** — 1:1 contention, not low confidence. Together roughly a fifth of the queue is runner-ups a reviewer may never want to see. Product call, not a bug |
+| S3 | Guard config saves that silently disable scoring | Clearing a date column while `date_weight > 0` drops the date term for every pair with no warning — the exact failure that `30ed58c` traced. A validation notice at save time would have surfaced it immediately |
+
+## EPIC T — Coverage gaps from this sweep (M)
+
+| ID | Story | AC |
+| :-- | :-- | :-- |
+| T1 | Cover the five controls this sweep could not reach | **File pickers** ("Choose File", Upload & Run Matching) need a real file through the browser dialog. **Load Data & Start Batch** was clicked and surfaced an error box that could not be captured before reload; it created no batch and logged nothing server-side. **The 4,000-record stress test** was skipped to avoid loading the box mid-sweep. **Connector success paths** — Test Connection and Introspect only ever reached their failure branch, since `CONNECTOR_FILE_ROOT` is unset and no live database is configured. **Export CSV** was verified at the endpoint (191,425 rows) but not clicked through to a browser download. None are known-broken; all are untested |
