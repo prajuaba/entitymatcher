@@ -23,17 +23,22 @@ type ColumnMapping struct {
 	DateFieldSrc    string                  `json:"date_field_src"`   // Source date column
 	DateFieldDest   string                  `json:"date_field_dest"`  // Destination date column
 	SecondaryFields []SecondaryFieldMapping `json:"secondary_fields"` // Additional pairing columns
+
+	DateCalendarSrc  string `json:"date_calendar_src"`  // "", "AUTO", "CE" or "BE"
+	DateCalendarDest string `json:"date_calendar_dest"` // "", "AUTO", "CE" or "BE"
 }
 
 func DefaultColumnMapping() ColumnMapping {
 	return ColumnMapping{
-		NameFieldsSrc:   []string{"customer_name", "name", "raw_name", "company_name"},
-		NameFieldsDest:  []string{"customer_name", "name", "raw_name", "company_name"},
-		RefIDSrc:        "reference_id",
-		RefIDDest:       "customer_id",
-		DateFieldSrc:    "transaction_date",
-		DateFieldDest:   "transaction_date",
-		SecondaryFields: []SecondaryFieldMapping{},
+		NameFieldsSrc:    []string{"customer_name", "name", "raw_name", "company_name"},
+		NameFieldsDest:   []string{"customer_name", "name", "raw_name", "company_name"},
+		RefIDSrc:         "reference_id",
+		RefIDDest:        "customer_id",
+		DateFieldSrc:     "transaction_date",
+		DateFieldDest:    "transaction_date",
+		SecondaryFields:  []SecondaryFieldMapping{},
+		DateCalendarSrc:  "AUTO",
+		DateCalendarDest: "AUTO",
 	}
 }
 

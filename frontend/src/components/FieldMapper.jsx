@@ -16,6 +16,8 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
     ref_id_dest: 'customer_id',
     date_field_src: '',
     date_field_dest: '',
+    date_calendar_src: 'AUTO',
+    date_calendar_dest: 'AUTO',
     secondary_fields: [],
   })
 
@@ -227,6 +229,19 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             {columnOptions(srcCols, mapping.date_field_src, '— none (no date column) —')}
           </select>
           <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
+          <div className="mt-2">
+            <label className="text-xs font-medium text-slate-300 block mb-1">Calendar</label>
+            <select
+              value={mapping.date_calendar_src || 'AUTO'}
+              onChange={(e) => setMapping({ ...mapping, date_calendar_src: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
+            >
+              <option value="AUTO">Auto-detect</option>
+              <option value="CE">Gregorian (CE)</option>
+              <option value="BE">Thai Buddhist (BE)</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">Controls how a 2-digit year is read: 68 = 2068 (CE) or 2568 BE = 2025.</p>
+          </div>
         </div>
 
         <div>
@@ -239,6 +254,19 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             {columnOptions(destCols, mapping.date_field_dest, '— none (no date column) —')}
           </select>
           <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
+          <div className="mt-2">
+            <label className="text-xs font-medium text-slate-300 block mb-1">Calendar</label>
+            <select
+              value={mapping.date_calendar_dest || 'AUTO'}
+              onChange={(e) => setMapping({ ...mapping, date_calendar_dest: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
+            >
+              <option value="AUTO">Auto-detect</option>
+              <option value="CE">Gregorian (CE)</option>
+              <option value="BE">Thai Buddhist (BE)</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">Controls how a 2-digit year is read: 68 = 2068 (CE) or 2568 BE = 2025.</p>
+          </div>
         </div>
       </div>
 

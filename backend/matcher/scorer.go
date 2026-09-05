@@ -252,11 +252,23 @@ func extractTrigrams(s string) []string {
 // for callers that do not distinguish an absent date from a close one;
 // CalculateCompositeScoreWithCorpus checks IsZero itself and drops the date term
 // entirely rather than scoring an absent date as a perfect match.
+//
+// The comparison is calendar-day based: both dates are truncated to UTC midnight
+// before computing the difference, so that two timestamps on the same UTC calendar
+// day will score exactly 1.0.
 func CalculateDateScore(srcDate, destDate time.Time, maxToleranceDays int) float64 {
 	if srcDate.IsZero() || destDate.IsZero() {
 		return 1.0
 	}
-	diffDays := math.Abs(srcDate.Sub(destDate).Hours() / 24)
+
+	// Truncate both dates to UTC midnight
+	srcYear, srcMonth, srcDay := srcDate.UTC().Date()
+	destYear, destMonth, destDay := destDate.UTC().Date()
+
+	truncatedSrc := time.Date(srcYear, srcMonth, srcDay, 0, 0, 0, 0, time.UTC)
+	truncatedDest := time.Date(destYear, destMonth, destDay, 0, 0, 0, 0, time.UTC)
+
+	diffDays := math.Abs(truncatedSrc.Sub(truncatedDest).Hours() / 24)
 
 	if maxToleranceDays > 0 && diffDays > float64(maxToleranceDays) {
 		return 0.0

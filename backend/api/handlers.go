@@ -556,7 +556,7 @@ func buildSourceRecords(raw []map[string]interface{}, batchID string, cfg matche
 		// Leave the zero value when there is no parseable date: the scorer needs
 		// to tell "no date supplied" apart from a real one, and a fabricated
 		// time.Now() is indistinguishable from a genuine same-day transaction.
-		txDate, _ := matcher.ParseFlexibleDate(dateStr)
+		txDate, _ := matcher.ParseFlexibleDateInCalendar(dateStr, cfg.ColumnMapping.DateCalendarSrc)
 
 		txType := matcher.ExtractFieldValue(rawMap, "transaction_type")
 
@@ -596,7 +596,7 @@ func buildDestinationRecords(raw []map[string]interface{}, batchID string, cfg m
 		// Leave the zero value when there is no parseable date: the scorer needs
 		// to tell "no date supplied" apart from a real one, and a fabricated
 		// time.Now() is indistinguishable from a genuine same-day transaction.
-		txDate, _ := matcher.ParseFlexibleDate(dateStr)
+		txDate, _ := matcher.ParseFlexibleDateInCalendar(dateStr, cfg.ColumnMapping.DateCalendarDest)
 
 		destinations = append(destinations, matcher.DestinationRecord{
 			ID:              fmt.Sprintf("dest-%d", i+1),
