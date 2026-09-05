@@ -1948,6 +1948,20 @@ func (s *Server) HandleDictionary(w http.ResponseWriter, r *http.Request) {
 		}
 		if entry.Alias != "" && entry.Canonical != "" {
 			dict.Set(entry.Alias, entry.Canonical)
+
+			// Persist through the store so the alias survives a restart. The alias is
+			// normalized (lowercased and trimmed) to match dict.Set's own normalization,
+			// keeping the persisted row keyed the same way it will be looked up on
+			// hydration. An operator alias that appears saved but silently vanishes on
+			// restart is exactly the defect this closes, so a persistence failure must
+			// be reported as a failure rather than as success.
+			persistEntry := entry
+			persistEntry.Alias = strings.ToLower(strings.TrimSpace(entry.Alias))
+			persistEntry.Canonical = strings.TrimSpace(entry.Canonical)
+			if err := s.store.SaveDictionaryEntry(persistEntry); err != nil {
+				http.Error(w, "Failed to persist dictionary entry: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

@@ -205,3 +205,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_calibration_models_one_active
 
 CREATE INDEX IF NOT EXISTS idx_calibration_models_created_at_desc
     ON calibration_models(created_at DESC);
+
+-- Dictionary entries: operator-added aliases that feed the pre-normalizer
+-- (matcher.ReplaceSynonymsInText), so they must survive a backend restart --
+-- previously this data lived only in the in-process matcher.CustomDictionary
+-- and was lost every time the process restarted. Keyed by alias (rather than
+-- a single settings blob) since the dictionary is keyed data and this makes
+-- upsert-by-alias natural. `alias` is stored already-lowercased and trimmed,
+-- because matcher.CustomDictionary.Set lowercases and trims before writing.
+CREATE TABLE IF NOT EXISTS dictionary_entries (
+    alias VARCHAR(255) PRIMARY KEY,
+    canonical VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

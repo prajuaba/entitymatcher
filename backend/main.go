@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"entitymatcher/api"
+	"entitymatcher/matcher"
 	"entitymatcher/store"
 )
 
@@ -43,6 +44,19 @@ func main() {
 			log.Printf("Loaded active calibration model %s (fitted %s, %d observations)",
 				activeModel.ID, activeModel.CreatedAt.Format(time.RFC3339), activeModel.ObservationCount)
 		}
+	}
+
+	// Load persisted custom alias dictionary entries so operator-added aliases survive a
+	// restart. The built-in defaults seeded by matcher.NewCustomDictionary() stay; persisted
+	// entries are applied on top, so an operator alias overrides a default of the same name.
+	if entries, err := repo.ListDictionaryEntries(); err != nil {
+		log.Printf("Failed to load custom alias dictionary: %v", err)
+	} else if len(entries) > 0 {
+		dict := matcher.GetGlobalDictionary()
+		for _, e := range entries {
+			dict.Set(e.Alias, e.Canonical)
+		}
+		log.Printf("Loaded %d custom alias(es) from the dictionary", len(entries))
 	}
 
 	mux := http.NewServeMux()

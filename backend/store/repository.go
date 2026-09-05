@@ -218,4 +218,10 @@ type Repository interface {
 
 	// ListCalibrationModels returns calibration model fit history, most recent first.
 	ListCalibrationModels(limit, offset int) ([]CalibrationModel, error)
+
+	// Custom alias dictionary (feeds the pre-normalizer, so it must survive restarts)
+	// Callers MUST check and surface the returned error; silent write failure is
+	// indistinguishable from success to the caller.
+	SaveDictionaryEntry(entry matcher.SynonymEntry) error
+	ListDictionaryEntries() ([]matcher.SynonymEntry, error)
 }

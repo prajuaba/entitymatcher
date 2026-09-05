@@ -33,6 +33,10 @@ type Store struct {
 	auditStore        *AuditStore
 
 	calibrationModels []CalibrationModel
+
+	// dictionaryEntries persists custom aliases keyed by alias so a repeat save
+	// overwrites rather than duplicates, mirroring the PostgreSQL upsert.
+	dictionaryEntries map[string]matcher.SynonymEntry
 }
 
 func NewStore() *Store {
@@ -46,6 +50,7 @@ func NewStore() *Store {
 		progresses:        make(map[string]matcher.BatchProgress),
 		sseClients:        make(map[string][]chan matcher.BatchProgress),
 		auditStore:        NewAuditStore(),
+		dictionaryEntries: make(map[string]matcher.SynonymEntry),
 	}
 }
 
@@ -710,6 +715,32 @@ func (s *Store) ListCalibrationModels(limit, offset int) ([]CalibrationModel, er
 	}
 
 	return models[start:end], nil
+}
+
+// SaveDictionaryEntry saves a custom alias into the in-memory store, keyed by
+// alias so a repeat save overwrites rather than duplicates.
+func (s *Store) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.dictionaryEntries[entry.Alias] = entry
+	return nil
+}
+
+// ListDictionaryEntries returns all persisted custom aliases, ordered by alias.
+func (s *Store) ListDictionaryEntries() ([]matcher.SynonymEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries := make([]matcher.SynonymEntry, 0, len(s.dictionaryEntries))
+	for _, entry := range s.dictionaryEntries {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Alias < entries[j].Alias
+	})
+
+	return entries, nil
 }
 
 // Compile-time assertion that Store implements Repository

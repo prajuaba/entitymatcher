@@ -1324,5 +1324,56 @@ func (s *PostgresStore) ListCalibrationModels(limit, offset int) ([]CalibrationM
 	return models, nil
 }
 
+// SaveDictionaryEntry upserts a custom alias into the dictionary_entries table.
+// The error is returned (not just logged) deliberately: this is the persistence
+// boundary for the pre-normalizer's alias dictionary, and a write failure that
+// only got logged would leave an operator believing an alias was saved when it
+// will actually vanish on restart.
+func (s *PostgresStore) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO dictionary_entries (alias, canonical, description, updated_at)
+		 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+		 ON CONFLICT (alias) DO UPDATE SET
+		    canonical = EXCLUDED.canonical,
+		    description = EXCLUDED.description,
+		    updated_at = CURRENT_TIMESTAMP`,
+		entry.Alias, entry.Canonical, entry.Description); err != nil {
+		return fmt.Errorf("save dictionary entry %q: %w", entry.Alias, err)
+	}
+
+	return nil
+}
+
+// ListDictionaryEntries returns all persisted custom aliases, ordered by alias.
+// A table with no rows is a normal empty result, not an error.
+func (s *PostgresStore) ListDictionaryEntries() ([]matcher.SynonymEntry, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx,
+		"SELECT alias, canonical, description FROM dictionary_entries ORDER BY alias")
+	if err != nil {
+		return nil, fmt.Errorf("list dictionary entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []matcher.SynonymEntry
+	for rows.Next() {
+		var entry matcher.SynonymEntry
+		if err := rows.Scan(&entry.Alias, &entry.Canonical, &entry.Description); err != nil {
+			return nil, fmt.Errorf("list dictionary entries: scan row: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list dictionary entries: iterate rows: %w", err)
+	}
+
+	return entries, nil
+}
+
 // Compile-time assertion that PostgresStore implements Repository
 var _ Repository = (*PostgresStore)(nil)
