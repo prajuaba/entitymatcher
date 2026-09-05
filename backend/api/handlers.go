@@ -1477,9 +1477,10 @@ func (s *Server) HandleSearchDestinations(w http.ResponseWriter, r *http.Request
 }
 
 type ManualLinkPayload struct {
-	BatchID       string `json:"batch_id"`
-	SourceID      string `json:"source_id"`
-	DestinationID string `json:"destination_id"`
+	BatchID        string `json:"batch_id"`
+	SourceID       string `json:"source_id"`
+	DestinationID  string `json:"destination_id"`
+	ReviewComments string `json:"review_comments"`
 }
 
 func (s *Server) HandleManualLink(w http.ResponseWriter, r *http.Request) {
@@ -1503,6 +1504,33 @@ func (s *Server) HandleManualLink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Determine the comment
+	comments := payload.ReviewComments
+	if comments == "" {
+		comments = "Manually linked by reviewer"
+	}
+
+	// Get user ID from JWT claims
+	claims := ClaimsFrom(r.Context())
+	userID := ""
+	if claims != nil {
+		userID = claims.UserID
+	}
+
+	// Record compliance audit log entry
+	s.store.RecordAuditLog(store.AuditLogEntry{
+		BatchID:         payload.BatchID,
+		SourceID:        payload.SourceID,
+		DestinationID:   payload.DestinationID,
+		UserID:          userID,
+		Action:          "OVERRIDE",
+		PreviousStatus:  "", // A manual link creates a pairing that did not previously exist, so there is no prior status to report
+		NewStatus:       newItem.MatchStatus,
+		ConfidenceScore: newItem.ConfidenceScore,
+		ReviewComments:  comments,
+		Timestamp:       time.Now(),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(newItem)
