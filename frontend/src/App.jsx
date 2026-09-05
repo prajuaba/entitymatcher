@@ -12,7 +12,7 @@ import { Cpu, Sliders, Activity, Database, FileCheck, ShieldCheck, LogOut } from
 import { can } from './lib/rbac'
 
 export function App() {
-  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth } = useMatcherStore()
+  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth, batchID } = useMatcherStore()
 
   useEffect(() => {
     // Initialize auth on mount
@@ -20,7 +20,11 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    if (authChecked && user) {
+    // Only seed when there is no batch to return to. The store deliberately
+    // rehydrates batchID from localStorage so a reload keeps the batch the user
+    // was reviewing; seeding unconditionally overwrote that remembered id with
+    // the demo batch on every page load.
+    if (authChecked && user && !batchID) {
       // Load benchmark dataset on boot for out-of-the-box demonstration
       loadSeedDataset()
     }
