@@ -12,7 +12,7 @@ import { Cpu, Sliders, Activity, Database, FileCheck, ShieldCheck, LogOut } from
 import { can } from './lib/rbac'
 
 export function App() {
-  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth, batchID } = useMatcherStore()
+  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth, batchID, fetchConfig } = useMatcherStore()
 
   useEffect(() => {
     // Initialize auth on mount
@@ -24,6 +24,13 @@ export function App() {
     // rehydrates batchID from localStorage so a reload keeps the batch the user
     // was reviewing; seeding unconditionally overwrote that remembered id with
     // the demo batch on every page load.
+    // Pull the server's saved config into the store. Without this the store keeps
+    // its hardcoded defaults, which carry no column_mapping at all -- so FieldMapper
+    // fell back to its own blank defaults and saving from that screen overwrote the
+    // real mapping (this is how date_field_src/date_field_dest got silently cleared).
+    if (authChecked && user) {
+      fetchConfig()
+    }
     if (authChecked && user && !batchID) {
       // Load benchmark dataset on boot for out-of-the-box demonstration
       loadSeedDataset()
