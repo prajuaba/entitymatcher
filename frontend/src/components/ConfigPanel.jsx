@@ -36,6 +36,12 @@ const withDefaults = (cfg) => ({
     use_romanized_match: cfg.algorithms?.use_romanized_match ?? true,
   },
   column_mapping: {
+    // Spread first so fields this whitelist does not know about survive a save.
+    // Rebuilding column_mapping key-by-key silently dropped date_calendar_src/dest
+    // (and previously blanked date_field_src/dest), wiping config on every save.
+    ...(cfg.column_mapping ?? {}),
+    date_calendar_src: cfg.column_mapping?.date_calendar_src || 'AUTO',
+    date_calendar_dest: cfg.column_mapping?.date_calendar_dest || 'AUTO',
     name_fields_src: cfg.column_mapping?.name_fields_src ?? [],
     name_fields_dest: cfg.column_mapping?.name_fields_dest ?? [],
     ref_id_src: cfg.column_mapping?.ref_id_src ?? '',
