@@ -407,11 +407,28 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch(`/api/match/run?batch_id=${bId}`, { method: 'POST' })
       if (!res.ok) throw new Error('Failed to start matching job')
 
-      // Listen to SSE progress updates
       const token = getAccessToken()
       const eventSource = new EventSource(`/api/match/progress?batch_id=${bId}&access_token=${token || ''}`)
+      let staleStartedAt = null
+      let firstMessage = true
+
+      // Server replays the last known progress on connect, so a terminal status
+      // in the very first frame belongs to the PREVIOUS run and must not be
+      // mistaken for this run finishing, otherwise every Re-run click would
+      // silently no-op from the user's perspective
       eventSource.onmessage = (event) => {
         const p = JSON.parse(event.data)
+        if (firstMessage) {
+          firstMessage = false
+          if (staleStartedAt === null && (p.status === 'COMPLETED' || p.status === 'FAILED')) {
+            staleStartedAt = p.started_at
+            return
+          }
+        }
+        if (staleStartedAt !== null && p.started_at === staleStartedAt) {
+          // This is the same stale snapshot being repeated, ignore it
+          return
+        }
         set({ progress: p })
         if (p.status === 'COMPLETED' || p.status === 'FAILED') {
           eventSource.close()
