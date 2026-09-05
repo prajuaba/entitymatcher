@@ -378,11 +378,82 @@ func (s *PostgresStore) GetDataset(batchID string) ([]matcher.SourceRecord, []ma
 	return sources, dests, true
 }
 
+// resultsSaveBaseTimeout, resultsSaveTimeoutPerRow and resultsSaveTimeoutCap size the
+// transaction budget used by SaveResultsCtx. A flat 30s budget previously covered the ENTIRE
+// transaction and was blown through by a real 280,049-row batch: production logs measured an
+// average of ~2,222 bytes of combined source_snapshot + destination_snapshot JSON marshaled
+// per row and streamed via CopyFrom inside the transaction, so a fixed deadline fires mid-copy
+// on large batches. That failure tore down the connection with "use of closed network
+// connection" / "incomplete message from client", rolled back the transaction, and persisted
+// zero rows while the job was marked FAILED. The budget below scales with row count instead.
+const (
+	// resultsSaveBaseTimeout is the minimum transaction budget for SaveResultsCtx, even
+	// for a tiny batch, so small requests are never starved by the per-row term below.
+	resultsSaveBaseTimeout = 2 * time.Minute
+
+	// resultsSaveTimeoutPerRow is added to the base budget once per result row. Measured
+	// in production: ~2,222 bytes/row of combined source_snapshot + destination_snapshot
+	// JSON is marshaled and streamed via CopyFrom inside the transaction, so the budget
+	// must scale with row count or large batches hit the same deadline that previously
+	// truncated a 280,049-row CopyFrom mid-stream and rolled back the whole batch.
+	resultsSaveTimeoutPerRow = time.Millisecond
+
+	// resultsSaveTimeoutCap bounds the scaled budget so a pathological row count cannot
+	// hold a transaction (and its locks) open indefinitely.
+	resultsSaveTimeoutCap = 30 * time.Minute
+)
+
+// resultsSaveTimeout returns the transaction time budget for persisting n result rows,
+// scaling linearly from resultsSaveBaseTimeout by resultsSaveTimeoutPerRow per row and
+// capped at resultsSaveTimeoutCap.
+func resultsSaveTimeout(n int) time.Duration {
+	timeout := resultsSaveBaseTimeout + time.Duration(n)*resultsSaveTimeoutPerRow
+	if timeout > resultsSaveTimeoutCap {
+		timeout = resultsSaveTimeoutCap
+	}
+	return timeout
+}
+
 // SaveResultsCtx stores match results for a batch with proper transaction handling.
 // Uses CopyFrom for bulk inserts. DEFECT 1: wraps DELETE + INSERT in ONE transaction.
 // DEFECT 2: returns errors instead of discarding. DEFECT 4: uses CopyFrom + validates row count.
 func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// The snapshot is deliberately point-in-time evidence of what the reviewer saw, and it
+	// also backs server-side search (GetResultsPage greps source_snapshot/destination_snapshot),
+	// so it is written here at save time from the batch's dataset rather than dropped: the
+	// pipeline no longer embeds Source/Destination on each result item, so result.Source and
+	// result.Destination are nil and cannot be marshaled directly anymore.
+	//
+	// This load is hoisted OUT of the write transaction (and out from under any timeout applied
+	// to it) below: GetDataset applies its own internal timeout, and running it before Begin
+	// means the ~135,000-row dataset read for a large batch no longer eats into the write
+	// transaction's budget while holding the transaction open. As before, a missing dataset is
+	// tolerated -- the third GetDataset return value is ignored and unmatched rows below fall
+	// back to the "null" snapshot string.
+	// Skipped entirely for an empty result set: that path commits without building any
+	// snapshots, so loading the dataset would be a pointless ~135,000-row read. Lookups
+	// on the resulting nil maps are safe.
+	var sourceMap map[string]matcher.SourceRecord
+	var destMap map[string]matcher.DestinationRecord
+	if len(results) > 0 {
+		sources, dests, _ := s.GetDataset(batchID)
+
+		sourceMap = make(map[string]matcher.SourceRecord, len(sources))
+		for _, src := range sources {
+			sourceMap[src.ID] = src
+		}
+
+		destMap = make(map[string]matcher.DestinationRecord, len(dests))
+		for _, dst := range dests {
+			destMap[dst.ID] = dst
+		}
+	}
+
+	// Budget is computed AFTER the dataset load above, so it covers only the transaction
+	// (upsert + delete + CopyFrom + commit) and scales with the number of rows being written --
+	// see resultsSaveTimeout's doc comment for the measured justification.
+	timeout := resultsSaveTimeout(len(results))
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// DEFECT 1: Wrap DELETE + INSERT in explicit transaction
@@ -414,23 +485,6 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 
 	if len(results) == 0 {
 		return tx.Commit(ctx)
-	}
-
-	// The snapshot is deliberately point-in-time evidence of what the reviewer saw, and it
-	// also backs server-side search (GetResultsPage greps source_snapshot/destination_snapshot),
-	// so it is written here at save time from the batch's dataset rather than dropped: the
-	// pipeline no longer embeds Source/Destination on each result item, so result.Source and
-	// result.Destination are nil and cannot be marshaled directly anymore.
-	sources, dests, _ := s.GetDataset(batchID)
-
-	sourceMap := make(map[string]matcher.SourceRecord)
-	for _, src := range sources {
-		sourceMap[src.ID] = src
-	}
-
-	destMap := make(map[string]matcher.DestinationRecord)
-	for _, dst := range dests {
-		destMap[dst.ID] = dst
 	}
 
 	// DEFECT 4: Use CopyFrom for bulk inserts and verify row count
@@ -489,7 +543,7 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		return fmt.Errorf("copy from failed: %w", err)
+		return fmt.Errorf("copy from failed: batch %q, %d rows: %w", batchID, len(results), err)
 	}
 
 	if rowCount != int64(len(results)) {
