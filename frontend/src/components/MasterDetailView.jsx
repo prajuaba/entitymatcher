@@ -11,6 +11,7 @@ export function MasterDetailView() {
     totalPages,
     statusCounts,
     resultsLoading,
+    config,
     page,
     limit,
     selectedMatch,
@@ -65,8 +66,12 @@ export function MasterDetailView() {
 
   const filterTabs = [
     { key: 'ALL', label: 'All Pairs' },
-    { key: 'AUTO_MATCHED', label: 'Auto Matched (≥90%)' },
-    { key: 'REVIEW_NEEDED', label: 'Review Queue (70-89%)' },
+    { key: 'AUTO_MATCHED', label: config?.auto_match_threshold && Number.isFinite(config.auto_match_threshold) ? `Auto Matched (≥${Math.round(config.auto_match_threshold * 100)}%)` : 'Auto Matched' },
+    // REVIEW_NEEDED is not a confidence band: pairs land here due to 1:1 destination
+    // contention ("Destination already assigned"), runner-up/alternative-candidate rows,
+    // and ambiguous-margin rows, and can score anywhere from very low up to 100%.
+    // Do NOT restore a percentage range on this label.
+    { key: 'REVIEW_NEEDED', label: 'Review Queue' },
     { key: 'CONFIRMED', label: 'Confirmed' },
     { key: 'REJECTED', label: 'Rejected' },
     { key: 'NO_MATCH', label: 'Unmatched', icon: 'unmatched' },

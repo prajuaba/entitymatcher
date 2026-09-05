@@ -5,7 +5,7 @@ import { useMatcherStore } from '../store/useMatcherStore'
 import { can } from '../lib/rbac'
 
 export function CandidateCard({ matchItem }) {
-  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user } = useMatcherStore()
+  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user, config } = useMatcherStore()
   const [reviewerId, setReviewerId] = useState('reviewer_john')
   const [commentText, setCommentText] = useState('')
 
@@ -24,11 +24,15 @@ export function CandidateCard({ matchItem }) {
   const getStatusBadge = (status) => {
     switch (status) {
       case 'AUTO_MATCHED':
-        return <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-semibold">AUTO MATCHED (≥90%)</span>
+        return <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-semibold">{Number.isFinite(config?.auto_match_threshold) ? `AUTO MATCHED (≥${Math.round(config.auto_match_threshold * 100)}%)` : 'AUTO MATCHED'}</span>
       case 'CONFIRMED':
         return <span className="px-3 py-1 bg-blue-500/10 text-blue-400 border border-blue-500/30 rounded-full text-xs font-semibold">MANUALLY CONFIRMED</span>
       case 'REVIEW_NEEDED':
-        return <span className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full text-xs font-semibold">REVIEW NEEDED (70-89%)</span>
+        // REVIEW_NEEDED is not a confidence band: pairs land here due to 1:1 destination
+        // contention ("Destination already assigned"), runner-up/alternative-candidate rows,
+        // and ambiguous-margin rows, and can score anywhere from very low up to 100%.
+        // Do NOT restore a percentage range on this badge.
+        return <span className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full text-xs font-semibold">REVIEW NEEDED</span>
       case 'REJECTED':
         return <span className="px-3 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/30 rounded-full text-xs font-semibold">REJECTED</span>
       case 'NO_MATCH':
