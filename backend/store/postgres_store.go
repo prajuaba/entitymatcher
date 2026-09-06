@@ -928,15 +928,27 @@ func (s *PostgresStore) GetProgress(batchID string) (matcher.BatchProgress, bool
 	defer cancel()
 
 	var p matcher.BatchProgress
+	// completed_at is NULL until a run finishes, and a NULL cannot scan into a
+	// non-pointer time.Time. Scanning it directly made this function report "not
+	// found" for every batch that was uploaded-but-never-matched OR currently
+	// RUNNING -- the scan failed and the error was flattened into `false`, so the
+	// caller could not tell a missing batch from a live one.
+	var completedAt *time.Time
 	err := s.pool.QueryRow(ctx,
 		`SELECT batch_id, total_sources, auto_matched, review_needed, no_match_count,
 		        total_candidate_pairs, elapsed_ms, status, started_at, completed_at
 		 FROM match_jobs WHERE batch_id = $1`,
 		batchID).
 		Scan(&p.BatchID, &p.TotalSources, &p.AutoMatched, &p.ReviewNeeded, &p.NoMatchCount,
-			&p.TotalMatches, &p.ElapsedMs, &p.Status, &p.StartedAt, &p.CompletedAt)
+			&p.TotalMatches, &p.ElapsedMs, &p.Status, &p.StartedAt, &completedAt)
+	if err != nil {
+		return p, false
+	}
+	if completedAt != nil {
+		p.CompletedAt = *completedAt
+	}
 
-	return p, err == nil
+	return p, true
 }
 
 // RegisterSSEClient registers a new SSE client for progress updates.

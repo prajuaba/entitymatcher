@@ -117,8 +117,22 @@ func TestFetchAllRecordsExactCapIsNotTruncated(t *testing.T) {
 
 // NOTE: This endpoint must never become an arbitrary server-side file read;
 // CSV/Excel connector types must always be rejected here to prevent LFI.
-func TestConnectorIngestRejectsFileTypes(t *testing.T) {
+// This test used to assert that CSV/Excel were refused outright and that the
+// caller was redirected to /api/upload/file. That contract changed once M1's
+// CONNECTOR_FILE_ROOT confinement landed and the file_path half of K1 was
+// opened: file-backed types are now accepted, but only through
+// resolveConnectorFilePath.
+//
+// The ORIGINAL INTENT is unchanged and is what this still asserts -- an
+// arbitrary server path must never be readable through this endpoint. Only the
+// mechanism that refuses it moved, from a type check to a containment check.
+func TestConnectorIngestRefusesArbitraryServerPath(t *testing.T) {
 	server := NewServer(store.NewStore())
+
+	// Root unset means deny, so /etc/passwd is refused here for the strongest
+	// reason available. TestConnectorIngestRefusesFilePathOutsideRoot covers the
+	// case where a root IS configured and the path escapes it.
+	t.Setenv(ConnectorFileRootEnv, "")
 
 	body := map[string]interface{}{
 		"source": matcher.ConnectionConfig{
@@ -138,7 +152,10 @@ func TestConnectorIngestRejectsFileTypes(t *testing.T) {
 	server.HandleConnectorIngest(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
-	require.Contains(t, w.Body.String(), "/api/upload/file")
+	require.Contains(t, w.Body.String(), ConnectorFileRootEnv,
+		"the refusal must name the control that produced it")
+	require.NotContains(t, w.Body.String(), "root:",
+		"no file content may ever appear in the response")
 }
 
 func TestConnectorIngestRejectsUnknownType(t *testing.T) {

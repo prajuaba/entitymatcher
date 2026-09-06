@@ -993,13 +993,13 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // ingestableSourceTypes are the connector types this endpoint will read from.
-// CSV and Excel are excluded on purpose -- see HandleConnectorIngest.
+// File-backed types are permitted only through resolveConnectorFilePath -- see
+// HandleConnectorIngest.
 func validateIngestableType(t matcher.SourceType) error {
 	switch t {
-	case matcher.SourceTypePostgres, matcher.SourceTypeSQLServer, matcher.SourceTypeMongoDB:
+	case matcher.SourceTypePostgres, matcher.SourceTypeSQLServer, matcher.SourceTypeMongoDB,
+		matcher.SourceTypeCSV, matcher.SourceTypeExcel:
 		return nil
-	case matcher.SourceTypeCSV, matcher.SourceTypeExcel:
-		return fmt.Errorf("connector type %s cannot be ingested here; upload the file to /api/upload/file instead", t)
 	default:
 		return fmt.Errorf("unsupported connector type for ingestion: %q", t)
 	}
@@ -1009,12 +1009,17 @@ func validateIngestableType(t matcher.SourceType) error {
 // database connectors, paging each to exhaustion, and writes them as a batch a
 // match run can then use.
 //
-// File-backed connector types are deliberately refused here. A .csv/.xlsx is
-// ingested through POST /api/upload/file, which takes the bytes from the
-// request; accepting a server-side file_path on this endpoint would let any
-// ADMIN or ENGINEER read an arbitrary file off the server in full. Confining
-// server-side reads to a configured directory is backlog item M1, and this
-// endpoint should accept file paths only once that lands.
+// File-backed connector types were refused here until M1 landed, because
+// accepting a server-side file_path would otherwise let any ADMIN or ENGINEER
+// read an arbitrary file off the server in full. M1 shipped
+// resolveConnectorFilePath, which confines such reads to CONNECTOR_FILE_ROOT
+// (unset denies), so this endpoint now accepts them -- the file_path half of
+// backlog K1, which M1 was the stated precondition for.
+//
+// The path is resolved through that SAME helper, never re-implemented: it
+// resolves symlinks before the containment check and requires root or
+// root+separator, so a bare HasPrefix cannot accept /data/private under a root
+// of /data/priv. Both sides are checked, because a caller controls both.
 func (s *Server) HandleConnectorIngest(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	if r.Method == "OPTIONS" {
@@ -1043,6 +1048,25 @@ func (s *Server) HandleConnectorIngest(w http.ResponseWriter, r *http.Request) {
 	if err := validateIngestableType(req.Destination.Type); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Confine any caller-supplied file path BEFORE a connector is constructed, so
+	// a rejected path never reaches an open(). The resolved absolute path is
+	// written back, so the connector opens exactly what was validated rather than
+	// re-deriving it from the raw input (a TOCTOU gap if it re-resolved).
+	for _, side := range []struct {
+		name string
+		conn *matcher.ConnectionConfig
+	}{{"source", &req.Source}, {"destination", &req.Destination}} {
+		if side.conn.Type != matcher.SourceTypeCSV && side.conn.Type != matcher.SourceTypeExcel {
+			continue
+		}
+		resolved, err := resolveConnectorFilePath(side.conn.FilePath)
+		if err != nil {
+			http.Error(w, side.name+": "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		side.conn.FilePath = resolved
 	}
 
 	batchID := req.BatchID

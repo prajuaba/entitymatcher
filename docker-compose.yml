@@ -36,6 +36,16 @@ services:
       DATABASE_URL: postgres://postgres:postgrespassword@postgres:5432/entity_matcher?sslmode=disable
       # JWT_SECRET MUST be overridden outside of dev
       JWT_SECRET: dev-secret-change-me-in-production
+      # Confines server-side `file_path` values the connector endpoints may open
+      # (backlog M1). Unset denies every one of them, which is the safe default but
+      # also leaves Test Connection, Introspect Schema and "Load Data & Start Batch"
+      # with no reachable success path at all -- backlog T1 could not exercise them
+      # for exactly this reason. Point it at a directory that is mounted read-only
+      # below, so the blast radius is that directory and nothing else.
+      CONNECTOR_FILE_ROOT: /data/connector
+    volumes:
+      # Read-only on purpose: these endpoints only ever read.
+      - ./connector-data:/data/connector:ro
     depends_on:
       postgres:
         condition: service_healthy
