@@ -10,19 +10,27 @@ Severity: **C**ritical / **H**igh / **M**edium.
 
 ## Status — 2026-09-06
 
-**67 of 74 items closed.** Six of the seven that remain are open by decision; **Q3** is a live
-defect, found while closing Q2 and recorded rather than fixed in the same pass.
+**67 of 75 items closed.** Six of the eight that remain are open by decision. **Q3** and **O3**
+are live defects, both found while closing this round and recorded rather than fixed in the same
+pass; **O3** was found only by running the composed stack, which no test had covered.
 
 | Round | Epics | Items | State |
 | :-- | :-- | --: | :-- |
 | Round 1 | A–J | 41 | 39 closed; **A5** and **C5** deliberately left — see below |
 | Round 2 | K, L, M, N | 18 | ✅ all closed |
-| Round 3 | O, P, Q, R | 11 | 10 closed — **R3**'s premise was wrong, pinned by test; **Q3** newly found, open |
+| Round 3 | O, P, Q, R | 12 | 10 closed — **R3**'s premise was wrong, pinned by test; **Q3** and **O3** newly found, open |
 | Round 3 | S, T | 4 | Open by decision: **S1–S3** are operator calls, **T1** is untested surface, not known-broken |
 
 Every defect any round *set out* to fix is now closed. What remains is three product decisions
-(S), one coverage gap (T), A5 and C5 — each of which the code argues against on measured
-grounds — and **Q3**, the one genuinely open defect, surfaced by Q2's own work.
+(S), one coverage gap (T), A5 and C5 — each of which the code argues against on measured grounds
+— and two defects this round surfaced rather than inherited: **Q3** and **O3**.
+
+**O3 is the round's lesson, and it repeats M5's.** Round 3 shipped with 61 frontend tests, a
+green Go suite and eight mutation checks, and none of them touched `manual-link`'s input
+validation. Ten minutes against `docker compose up` found it. Every round so far has found at
+least one defect that only running the system exposes — a live nil-deref in Round 1, `GET
+/api/jobs` reporting 0/0 in Round 2, and now an endpoint that will write a confirmed, audited
+pairing between two records that do not exist.
 
 ### Round 1's two open items, and why they stay open
 
@@ -378,7 +386,7 @@ clock, which is subject to skew against server timestamps. This also un-stuck th
 bar and processed counter, which read `0%` / `0 / N` for the same reason — nothing was
 listening to the stream.
 
-## EPIC O — Audit and attribution integrity (C) — ✅ complete
+## EPIC O — Audit and attribution integrity (C) — O1, O2 ✅ closed; **O3** open
 
 The product's compliance surface has two holes, both in the direction of recording *less*
 than the UI implies. Neither is a scoring bug; both are evidentiary.
@@ -387,6 +395,7 @@ than the UI implies. Neither is a scoring bug; both are evidentiary.
 | :-- | :-- | :-- |
 | ~~O1~~ ✅ | Manual pairing must write an audit record | Pairing by hand creates a `CONFIRMED` result at 1.000 confidence with **no row in `match_audit_logs`**. Approve and Reject both log correctly; only the override that bypasses the engine entirely does not. The Audit Trail ships a **MANUAL OVERRIDES** filter that therefore returns 0 by construction — verified live. Write an entry with the source/destination ids, the acting user from JWT claims, and `previous_status → CONFIRMED`, so the filter has something to select. **Shipped** `145881e`: `HandleManualLink` records `Action: "OVERRIDE"` with `NewStatus`/`ConfidenceScore` taken from the returned item rather than hardcoded. Attribution comes from `ClaimsFrom(r.Context())`, as it does for the other two actions. **`previous_status` is deliberately left empty**, not "NONE" or "NO_MATCH" — a manual link creates a pairing that did not exist, and inventing a prior status would put a false statement in an audit record; the UI renders it as `(none)`. An optional `review_comments` was added, defaulting to "Manually linked by reviewer"; the existing caller sends only the three ids and is unaffected. Verified live: the MANUAL OVERRIDES filter went 0 → 1 and All Review Actions 2 → 3. Mutation-checked three ways — deleting the call fails the build, sourcing the user from the body fails the `UserID` assertion, and flipping the action to `CONFIRM` fails with `expected: "OVERRIDE"`, which is the regression that would silently re-empty the filter |
 | ~~O2~~ ✅ | Remove or bind the "Reviewer User ID" input | The field accepts text and the client sends it as `user_id`, but `HandleMatchAction` takes the reviewer from `ClaimsFrom(r.Context())` and discards the payload value — typing `qa_regression` produced a row attributed to `usr-01`. **The backend is right**: a client must not be able to attribute a decision to another person. The defect is a UI control implying otherwise, in the one screen where attribution is the point. Delete it, or render the signed-in user read-only. **Shipped:** the input and its `reviewerId` state are gone from `CandidateCard.jsx`, replaced by a read-only `Signed in as <username>` panel in the same slot — the reviewer still sees who the decision will be attributed to, but cannot change it. `updateMatchAction` dropped its `userID` parameter and no longer sends `user_id` at all; the server's `ActionPayload` never had the field, so nothing on the wire changes except that the client stops implying a control it does not have. `AuditDashboard`'s `user_id` is a *read* filter over the audit log and was deliberately left alone. Mutation-checked: re-adding `user_id` to the request body fails `updateMatchAction` |
+| O3 | Validate the ids `manual-link` is given | **Found on 2026-09-06 by running the composed stack, not by any test.** `POST /api/match/manual-link` does not check that `source_id` and `destination_id` name records that exist in the batch. Verified live: `{"source_id":"","destination_id":"dest-2"}` returned **200** and wrote `benchmark-batch-001--dest-2-manual` as `CONFIRMED` at confidence **1.000**; so did `{"source_id":"totally-made-up-src","destination_id":"also-made-up-dest"}`. Two consequences, and the second is the serious one: the results set gains a confirmed pairing whose source cannot be rendered, and — **because O1 now writes an audit record for manual pairings** — `match_audit_logs` gains an `OVERRIDE` entry attesting that a named reviewer confirmed a pairing between records that do not exist. O1 made manual pairing auditable; this makes the audit trail capable of carrying a false statement, which is the one thing an evidentiary record must not do. Reject unknown ids with 400 before writing either row. Note the id is built by concatenation (`<batch>-<src>-<dest>-manual`), so an empty id also yields a malformed key |
 
 ## EPIC P — Execution visibility (H) — ✅ complete
 
