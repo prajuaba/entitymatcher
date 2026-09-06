@@ -8,7 +8,7 @@ import (
 // It is immutable after construction and safe for concurrent reads.
 type CorpusStats struct {
 	df map[string]int // token -> document frequency count
-	n  int             // total document count
+	n  int            // total document count
 }
 
 // BuildCorpusStats computes token document frequencies over sources and destinations.

@@ -12,13 +12,15 @@ const demoAccounts = [
 export function LoginScreen() {
   const { login, loading } = useMatcherStore()
   const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('password')
+  const [password, setPassword] = useState('password123')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const canSubmit = username.trim() !== '' && password !== ''
 
   const handleLogin = async (e) => {
     e.preventDefault()
+    if (!canSubmit) return
     setError('')
     setIsSubmitting(true)
 
@@ -32,7 +34,7 @@ export function LoginScreen() {
 
   const handleDemoAccountClick = (account) => {
     setUsername(account.username)
-    setPassword('password')
+    setPassword('password123')
     setError('')
   }
 
@@ -103,7 +105,7 @@ export function LoginScreen() {
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={isSubmitting || loading}
+              disabled={isSubmitting || loading || !canSubmit}
               className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {isSubmitting || loading ? (

@@ -12,12 +12,12 @@ type AuditLogEntry struct {
 	BatchID         string    `json:"batch_id"`
 	SourceID        string    `json:"source_id"`
 	DestinationID   string    `json:"destination_id"`
-	UserID          string    `json:"user_id"`          // Reviewer username or ID
-	Action          string    `json:"action"`           // "CONFIRM", "REJECT", "OVERRIDE"
-	PreviousStatus  string    `json:"previous_status"`  // "REVIEW_NEEDED", "AUTO_MATCHED", etc.
-	NewStatus       string    `json:"new_status"`       // "CONFIRMED", "REJECTED"
+	UserID          string    `json:"user_id"`         // Reviewer username or ID
+	Action          string    `json:"action"`          // "CONFIRM", "REJECT", "OVERRIDE"
+	PreviousStatus  string    `json:"previous_status"` // "REVIEW_NEEDED", "AUTO_MATCHED", etc.
+	NewStatus       string    `json:"new_status"`      // "CONFIRMED", "REJECTED"
 	ConfidenceScore float64   `json:"confidence_score"`
-	ReviewComments  string    `json:"review_comments"`  // Rationale for compliance audit
+	ReviewComments  string    `json:"review_comments"` // Rationale for compliance audit
 	Timestamp       time.Time `json:"timestamp"`
 }
 

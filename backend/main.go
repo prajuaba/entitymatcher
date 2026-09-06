@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"entitymatcher/api"
+	"entitymatcher/matcher"
 	"entitymatcher/store"
 )
 
@@ -21,8 +22,58 @@ func main() {
 		port = "8085"
 	}
 
-	memStore := store.NewStore()
-	server := api.NewServer(memStore)
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	repo, closeStore, err := selectStore(startupCtx)
+	startupCancel()
+	if err != nil {
+		log.Fatalf("Startup failed: %v", err)
+	}
+	server := api.NewServer(repo)
+
+	// Load a previously-fitted, active calibration model (if any) so it's ready the moment
+	// CalibrationEnabled is turned on -- fitting/persisting a model and enabling calibration for
+	// matching runs are separate, independent operator decisions.
+	if activeModel, ok, err := repo.GetActiveCalibrationModel(); err != nil {
+		log.Printf("Failed to check for an active calibration model: %v", err)
+	} else if ok {
+		cal, err := store.UnmarshalCalibrator([]byte(activeModel.ModelJSON))
+		if err != nil {
+			log.Printf("Failed to load active calibration model %s: %v", activeModel.ID, err)
+		} else {
+			server.SetCalibrator(cal)
+			log.Printf("Loaded active calibration model %s (fitted %s, %d observations)",
+				activeModel.ID, activeModel.CreatedAt.Format(time.RFC3339), activeModel.ObservationCount)
+		}
+	}
+
+	// Load persisted custom alias dictionary entries so operator-added aliases survive a
+	// restart. The built-in defaults seeded by matcher.NewCustomDictionary() stay; persisted
+	// entries are applied on top, so an operator alias overrides a default of the same name.
+	if entries, err := repo.ListDictionaryEntries(); err != nil {
+		log.Printf("Failed to load custom alias dictionary: %v", err)
+	} else if len(entries) > 0 {
+		dict := matcher.GetGlobalDictionary()
+		for _, e := range entries {
+			// SetEntry (not Set) so a persisted description survives a restart, not just
+			// the alias/canonical pair.
+			dict.SetEntry(e)
+		}
+		log.Printf("Loaded %d custom alias(es) from the dictionary", len(entries))
+	}
+
+	// Remove any tombstoned aliases that were deleted since the last boot; this MUST run
+	// after the custom alias hydration step above, because this is what lets an operator
+	// permanently remove a built-in default that matcher.NewCustomDictionary() would
+	// otherwise reseed on this same boot.
+	if deleted, err := repo.ListDeletedDictionaryAliases(); err != nil {
+		log.Printf("Failed to load deleted dictionary aliases: %v", err)
+	} else if len(deleted) > 0 {
+		dict := matcher.GetGlobalDictionary()
+		for _, a := range deleted {
+			dict.Delete(a)
+		}
+		log.Printf("Removed %d tombstoned alias(es) from the dictionary", len(deleted))
+	}
 
 	mux := http.NewServeMux()
 
@@ -69,6 +120,14 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
+	// Upload from real CSV/Excel files (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/upload/file",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleUploadFile),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
 	// Match run (ADMIN, ENGINEER)
 	mux.HandleFunc("/api/match/run",
 		corsHandler(chainMiddleware(
@@ -84,6 +143,14 @@ func main() {
 	// Match results (authenticated)
 	mux.HandleFunc("/api/match/results",
 		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleGetResults))).ServeHTTP)
+
+	// Match status (authenticated)
+	mux.HandleFunc("/api/match/status",
+		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleMatchStatus))).ServeHTTP)
+
+	// Job history (authenticated)
+	mux.HandleFunc("/api/jobs",
+		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleListJobs))).ServeHTTP)
 
 	// Match action (ADMIN, REVIEWER)
 	mux.HandleFunc("/api/match/action",
@@ -133,11 +200,35 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
-	// Dictionary: GET for any authenticated, POST for ADMIN,ENGINEER
+	// Connector introspect from an uploaded file (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/connector/introspect/upload",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleIntrospectUploadedFile),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Connector ingest (ADMIN, ENGINEER)
+	mux.HandleFunc("/api/connector/ingest",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleConnectorIngest),
+			api.RequireRole(api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Connector settings: GET for any authenticated, PUT/POST for ADMIN,ENGINEER
+	mux.HandleFunc("/api/connector/settings",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleConnectorSettings),
+			newMethodRoleMiddleware([]string{"PUT", "POST"}, api.RoleAdmin, api.RoleEngineer),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Dictionary: GET for any authenticated, POST/DELETE for ADMIN,ENGINEER
 	mux.HandleFunc("/api/dictionary",
 		corsHandler(chainMiddleware(
 			http.HandlerFunc(server.HandleDictionary),
-			newMethodRoleMiddleware([]string{"POST"}, api.RoleAdmin, api.RoleEngineer),
+			newMethodRoleMiddleware([]string{"POST", "DELETE"}, api.RoleAdmin, api.RoleEngineer),
 			api.RequireAuth,
 		)).ServeHTTP)
 
@@ -177,6 +268,22 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
+	// Calibration fit (ADMIN only)
+	mux.HandleFunc("/api/calibration/fit",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleCalibrationFit),
+			api.RequireRole(api.RoleAdmin),
+			api.RequireAuth,
+		)).ServeHTTP)
+
+	// Calibration status (ADMIN only)
+	mux.HandleFunc("/api/calibration/status",
+		corsHandler(chainMiddleware(
+			http.HandlerFunc(server.HandleCalibrationStatus),
+			api.RequireRole(api.RoleAdmin),
+			api.RequireAuth,
+		)).ServeHTTP)
+
 	// Serve Frontend Static Files
 	fs := http.FileServer(http.Dir("../frontend/dist"))
 	mux.Handle("/", fs)
@@ -213,7 +320,36 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
+	closeStore()
 	log.Println("Server shutdown complete")
+}
+
+// selectStore chooses the repository backing this process.
+//
+// When DATABASE_URL is empty the process runs on the in-memory store and says so,
+// because that data does not survive a restart.
+//
+// When DATABASE_URL is set, Postgres is REQUIRED: an unreachable database is a fatal
+// startup error, never a silent fall back to memory. Degrading quietly would leave an
+// operator who asked for persistence running an audit trail that evaporates on restart,
+// which is worse than failing to boot.
+//
+// The returned closer releases the pool; it is a no-op for the in-memory store.
+func selectStore(ctx context.Context) (store.Repository, func(), error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		s := store.NewStore()
+		log.Println("Using in-memory store; data will be lost on restart.")
+		return s, func() {}, nil
+	}
+
+	pg, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("DATABASE_URL is set, PostgreSQL is required, but connecting failed: %w", err)
+	}
+
+	log.Println("Using PostgreSQL persistence.")
+	return pg, pg.Close, nil
 }
 
 // newCORSMiddleware creates a CORS middleware that reads allowed origins from env.

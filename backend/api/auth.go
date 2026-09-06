@@ -128,7 +128,6 @@ type JWTClaims struct {
 	Exp      int64  `json:"exp"`
 }
 
-
 func generateToken(user User) (string, error) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	claimsObj := JWTClaims{

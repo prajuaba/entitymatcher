@@ -5,8 +5,11 @@ review queue, a compliance audit trail, and pluggable data connectors.
 
 **Scope note:** the engine handles Thai-vs-Thai and English-vs-English matching well, including Thai
 homophone spelling variants. Cross-script matching (the same entity in Thai script and Latin script)
-retrieves candidates via RTGS romanization but does not yet auto-match them — see *Cross-script
-matching* under Known limitations for the measurement and why.
+retrieves candidates via RTGS romanization and auto-matches them at a deliberately lower bar
+(`cross_script_auto_threshold`, default 0.84), because a correct cross-script pair scores
+systematically lower than a correct same-script one. Recall there remains the weakest part of the
+engine — see *Cross-script matching* under Known limitations for the measurement and where the
+technique stops.
 
 Every number and capability below is measured or exercised by a test in this repo. Where something
 is partial, it says so.
@@ -33,37 +36,72 @@ either:
   runner-up does not. Two candidates that both normalize identically are a genuine tie and go to
   review.
 
-A global greedy pass then enforces **one-to-one**: a destination is claimed by at most one source
-per batch. A source that loses a contested destination is demoted to review with a note naming the
-winning source and its score.
+When **either side has no usable date**, the date term is dropped and the score is the name
+similarity alone, rather than the date scoring a free 1.0 and still drawing its full weight. A
+dataset with no date column — a customer master, for instance — is therefore scored honestly on
+what was actually compared instead of every pair receiving a `date_weight` bonus for a comparison
+that never ran.
+
+A pair that shares **no distinctive token** is capped at `no_distinctive_overlap_cap` (default 0.85)
+and sent to review, however similar its boilerplate makes it look. "บริษัท สาน ทรานสปอร์ต จำกัด" and
+"บริษัท สุทิน ทรานสปอร์ต จำกัด" agree only on the word for *transport*, and that is not evidence of
+identity. Distinctiveness comes from the corpus IDF already computed for scoring, not a hardcoded
+stopword list, so it adapts to whatever vocabulary a corpus overuses. Cross-script pairs are exempt
+— a Thai name and its romanization share no literal token by construction — as are identical names
+and pairs where either side has no distinctive token to require.
+
+**Assignment is strategy-dependent.** Under the default `GREEDY_1_1`, a global greedy pass enforces
+**one-to-one**: a destination is claimed by at most one source per batch, and a source that loses a
+contested destination is demoted to review with a note naming the winning source and its score.
+
+Under `ALL_CANDIDATES` the data is treated as genuinely **many-to-many** — one record may name
+several co-borrowers, and one customer may hold several applications over time. Every candidate is
+then judged on its own score, not just the rank-1 one, and the margin rule does not apply: a
+sibling scoring equally well is a second real link, not evidence that the first is uncertain. The
+auto-match threshold still applies. Note that `auto_matched` then counts **links, not records**,
+because one record legitimately has several.
 
 ---
 
 ## Measured performance
 
-From `go test ./internal/mockdata/` (4,400 × 4,400 synthetic bilingual records, 19.4M candidate
+From `go test ./internal/mockdata/` (4,720 × 4,720 synthetic bilingual records, 22.3M candidate
 pair space, fixed seed). Scale figures are from the opt-in harness
-(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleSweep`) at 220,000 × 220,000:
+(`SCALE_TEST=1 go test ./internal/mockdata/ -run TestScaleMatching` for the point measurement,
+`-run TestScaleSweep` for the scaling fit) at 230,120 × 230,120, re-measured 2026-08-31 on
+20 cores / 121 GiB:
 
 | Metric | Value |
 | :-- | :-- |
-| Throughput | ~8,100 sources/sec at 220k × 220k |
-| Verified scale | 220,000 × 220,000 per side in 28.3s (20 cores), 2.5 GiB peak heap |
-| Scaling | time ~ O(N^1.05) over 22k → 220k |
+| Throughput | ~8,590 sources/sec at 230k × 230k |
+| Verified scale | 230,120 × 230,120 per side in 26.8s (20 cores), 1.46 GiB peak heap |
+| Scaling | time ~ O(N^1.09) over 23k → 230k |
 | Decision precision | 100.00% |
-| Decision recall (auto-match) | 57.6% |
-| F1 | 73.1% |
-| Top-1 ranking accuracy | 99.19% |
-| Candidate rows per source | 3.15 |
+| Decision recall (auto-match) | 59.2% |
+| F1 | 74.4% |
+| Top-1 ranking accuracy | 98.84% |
+| Candidate rows per source | 2.76 |
 | Max destinations auto-matched per source | 1 |
 | Max sources claiming one destination | 1 |
 
-**Read these two numbers together.** Top-1 ranking accuracy (99.19%) is how often the correct
-partner is ranked first — that is the quality of the *scorer*. Recall (57.6%) is how often the
+The last two rows are properties of the default `GREEDY_1_1` strategy, which the benchmark runs.
+Under `ALL_CANDIDATES` both are unbounded by design, and `auto_matched` counts links rather than
+records — see *Decision rules*.
+
+**Read these two numbers together.** Top-1 ranking accuracy (98.84%) is how often the correct
+partner is ranked first — that is the quality of the *scorer*. Recall (59.2%) is how often the
 engine is confident enough to decide *without a human* — that is the calibration of the
 *thresholds*. The gap is deliberate: the remainder goes to the review queue rather than being
 auto-matched on thin evidence. Lower `margin_threshold` or `auto_match_threshold` to trade
 precision for recall.
+
+**Cross-script pairs use a lower auto bar.** RTGS romanization and the English spelling of the
+same Thai name never align perfectly, so a correct cross-script pair scores systematically lower
+than a correct same-script one. `cross_script_auto_threshold` (default **0.84**, against 0.90 for
+same-script) is applied to pairs where exactly one side is Thai. Measured on the built-in
+benchmark: cross-script auto-matches rise from 5 to 13 with **no** cross-script false positives
+and no same-script effect — precision stays 100.00%. Set it to 0 to disable the distinction and
+fall back to `auto_match_threshold`.
 
 The benchmark scores **decisions, not pairs**, and the negative set includes hard cases
 (same-surname/different-person, same-corporate-prefix/different-entity, generic-token overlap,
@@ -87,9 +125,10 @@ printing metrics.
 
 | Capability | Status |
 | :-- | :-- |
-| **Bilingual normalizer** | Token-boundary title/honorific stripping (Thai + English), Thai prefix-glued title handling, NFC normalization, tone-mark stripping, consonant-skeleton key |
+| **Bilingual normalizer** | Token-boundary title/honorific stripping (Thai + English), Thai prefix-glued title handling, NFC normalization, tone-mark stripping, consonant-skeleton key. Dotted abbreviations are expanded before punctuation is stripped, so `น.ส.` and `นางสาว` normalize alike; prefix lists are longest-first, guarded by a test, so a shorter title cannot shadow a longer one. Trailing reference codes (`...ชูชีพ PL64000306`) are removed before scoring and before number extraction |
+| **Multi-party names** | One field may name several parties — a former name, or co-borrowers — inside parentheses or separated by commas/`และ`. Each is scored pairwise and the best pairing wins, with the winning party named in the match reasons. A parenthetical is only treated as a party if it identifies something: `(มหาชน)`, `(ประเทศไทย)` and `(สาขาที่ 3)` are qualifiers, not identities. Thai comma-lists share a trailing surname, which is propagated to the earlier parties |
 | **Multi-metric scoring** | Rune-safe Jaro-Winkler, Levenshtein, token-sort, trigram Jaccard, phonetic key; max-dominant blend |
-| **Decision layer** | Top-1 + margin rule + decisive-exact-match rule + greedy 1:1 assignment + `NO_MATCH` reporting |
+| **Decision layer** | Top-1 + margin rule + decisive-exact-match rule + distinctive-token requirement + greedy 1:1 *or* many-to-many assignment + `NO_MATCH` reporting |
 | **Blocking index** | Trigram + token + phonetic inverted index, with frequency cutoffs so ultra-common keys don't degrade retrieval toward O(N) |
 | **Data connectors** | Real drivers: PostgreSQL (`pgx/v5`), SQL Server (`go-mssqldb`), MongoDB (`mongo-driver`), Excel (`excelize`), CSV, manual entry |
 | **Dynamic schema mapping** | Multi-field name composition, reference/date column mapping, secondary pairing rules (exact / fuzzy / numeric delta / mandatory) |
@@ -152,12 +191,22 @@ deployment.
 | `JWT_SECRET` | random per start | Token signing key. **Set this** — otherwise tokens do not survive a restart, and the server logs a warning |
 | `DATABASE_URL` | unset | Enables PostgreSQL persistence; in-memory when unset |
 | `CORS_ORIGINS` | unset | Comma-separated allowlist; same-origin only when unset |
+| `CONNECTOR_FILE_ROOT` | unset | Directory the connector endpoints may read server-side `file_path` values from. **Unset denies all of them**, which is the safe default — the alternative is the whole filesystem. Uploads via `/api/upload/file` are unaffected: that path is server-generated, not caller-supplied |
+| `MAX_INGEST_RECORDS` | `500000` | Rows one ingest will read per side. A file hitting it is reported as `truncated`, never silently short. Trades RAM for completeness |
 | `GEMINI_API_KEY` | unset | Enables the LLM resolver; falls back to the local rule-based analyzer when unset |
 
 Engine tuning (`PUT /api/config`, merge-on-write and validated): `auto_match_threshold`,
-`review_threshold`, `margin_threshold`, `exact_match_floor`, `assignment_strategy`
-(`GREEDY_1_1` / `TOP_1` / `ALL_CANDIDATES`), `max_alternatives_per_source`, `emit_unmatched`,
-`date_tolerance_days`, `weights`, `algorithms`, `worker_count`, `max_candidates_per_src`.
+`review_threshold`, `margin_threshold`, `exact_match_floor`, `cross_script_auto_threshold`,
+`assignment_strategy` (`GREEDY_1_1` / `TOP_1` / `ALL_CANDIDATES`), `max_alternatives_per_source`,
+`emit_unmatched`, `date_tolerance_days`, `weights`, `algorithms`, `worker_count`,
+`max_candidates_per_src`, `no_distinctive_overlap_cap`, `distinctive_overlap_min_weight`,
+`calibration_enabled`.
+
+`no_distinctive_overlap_cap` (default 0.85) and `distinctive_overlap_min_weight` (default 0.30)
+control the distinctive-token rule above; the floor decides what counts as distinctive, so tuning
+the cap alone gives only half the control. Zero means "use the default". A cap at or above
+`auto_match_threshold` is rejected rather than accepted, because it could never demote anything —
+the rule would look configured while doing nothing.
 
 ---
 
@@ -188,12 +237,75 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
 
 **Auth** — `POST /api/auth/login`, `GET /api/auth/me`
 
-**Engine** — `GET|PUT /api/config`, `POST /api/upload`, `POST /api/match/run`,
+**Engine** — `GET|PUT /api/config`, `POST /api/upload` (JSON records),
+`POST /api/upload/file` (multipart `.csv`/`.xlsx`/`.xls`), `POST /api/match/run`,
 `GET /api/match/progress` (SSE), `GET /api/match/results`, `POST /api/match/action`,
 `POST /api/match/manual-link`, `GET /api/destinations/search`, `GET /api/export/csv`,
-`POST /api/llm/evaluate`
+`POST /api/llm/evaluate`, `GET /api/jobs`
 
-**Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`
+`GET /api/jobs` lists historical runs with their counters and duration, most recent first.
+`limit` defaults to 20 and is clamped to 200; a negative or unparseable value falls back to the
+default rather than erroring. Note the two stores disagree about what a job is: PostgreSQL
+records one when a dataset is saved, so a batch uploaded but never matched is listed, while the
+in-memory store derives them from run progress and does not list it.
+
+`POST /api/upload/file` takes `source_file` and `destination_file`, plus optional
+`batch_id`, `column_mapping` (JSON) and `source_sheet`/`destination_sheet` for Excel.
+Files are read through the same connectors used elsewhere. Requests are capped at 50 MiB
+and at `MAX_INGEST_RECORDS` rows per file (default **500,000**); hitting the row cap sets
+`truncated` and a warning in the response rather than silently returning a short dataset.
+The cap is a memory ceiling — every row is held in memory and persisted as JSONB — so raise
+it deliberately.
+
+**Connectors** — `POST /api/connector/test`, `POST /api/connector/introspect`,
+`POST /api/connector/introspect/upload`, `POST /api/connector/ingest`,
+`GET|PUT /api/connector/settings` (writes ADMIN, ENGINEER; `GET` any authenticated role)
+
+`POST /api/connector/introspect/upload` returns the header row of a `.csv`/`.xlsx` submitted as
+multipart. It exists because the JSON `introspect` endpoint only accepts a server-side path
+confined to `CONNECTOR_FILE_ROOT`, and a browser only ever knows a file's name, never a path the
+server can open. Reading request bytes needs no confinement: the caller can only read back a file
+it already had.
+
+`GET|PUT /api/connector/settings` persists the connector configuration the UI shows — type, host,
+port, database, username, table and the introspected column lists — which otherwise lived only in
+browser state and reset on every reload. **Passwords are never stored**, and that is structural
+rather than a stripping step: the persisted struct has no password field, so one sent by a client
+is discarded at decode time. They are re-entered each session.
+
+`POST /api/connector/ingest` reads a source and destination connector into a batch a match run
+can use, paging each to exhaustion under the same `MAX_INGEST_RECORDS` cap. Pages are 5,000 rows,
+so the connectors' own per-page ceiling is not the total. Truncation is decided by asking
+for one more row, not inferred from a full final page, so a source holding exactly the cap is not
+mislabelled. It accepts `POSTGRES`, `SQLSERVER` and `MONGODB` only: a `.csv`/`.xlsx` is ingested
+through `/api/upload/file`, which takes the bytes from the request, and accepting a server-side
+`file_path` here would let any ADMIN or ENGINEER read an arbitrary file off the server in full.
+
+
+Database connectors page their reads, and a page is only meaningful over a total order, so
+each resolves one before fetching: `extra_params.order_by` if the operator supplied it,
+otherwise the table's primary key, otherwise every orderable column. MongoDB sorts on `_id`
+by default. A table with no primary key and no orderable column cannot be paged safely, and
+the connector says so instead of returning pages that quietly duplicate and drop rows — set
+`extra_params.order_by` to resolve it. SQL Server tables may be schema-qualified
+(`dbo.Customers`); an unqualified name is read as `dbo`. `table_or_query` must name a
+table — a raw `SELECT` is refused, so no connector executes operator-supplied SQL.
+
+**Calibration** (ADMIN) — `POST /api/calibration/fit`, `GET /api/calibration/status`
+
+Fit trains on reviewer decisions in the audit log and reports Brier and ECE before and
+after against a holdout. It requires at least 20 labelled observations: below that the
+holdout is too small for those metrics to mean anything, and an empty holdout scores 0.0,
+which is indistinguishable from a perfect calibrator. Both responses carry a caveat that
+the training data comes almost entirely from the review queue, so any fitted calibrator is
+well-calibrated for the review band and extrapolating outside it.
+
+Both are driven from an ADMIN-only **Score Calibration** panel in the configuration tab. It
+shows progress toward the 20-observation minimum as `14 / 20` with the number of further
+reviewer decisions required, so the floor is visible before it is hit rather than arriving as
+a bare 400. It renders the server's selection-bias caveat verbatim, reports Brier and ECE
+before and after a fit (lower is better for both), and warns when `calibration_enabled` is
+false — a fitted model changes no scoring until that is turned on.
 
 **Governance** — `GET /api/audit/logs`, `GET /api/audit/export`
 
@@ -204,20 +316,33 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
 
 ## Known limitations
 
+- **A parenthetical is usually a qualifier, not an identity.** Multi-party splitting produced two
+  distinct classes of false positive before the guard was general enough: branch annotations
+  (`(สาขาที่ 1)` matching `(สาขาที่ 99)`) and legal-form/country qualifiers (`(มหาชน)`,
+  `(ประเทศไทย)`), the latter making every public company match every other at 1.000. A fragment is
+  now a party only if it retains a distinctive token, and `CheckNumberMismatch` is re-applied to the
+  original whole strings so splitting can never launder a numeric difference. Treat any new
+  parenthetical convention in your data as suspect until spot-checked.
 - **Thai word segmentation.** Tokenization is whitespace-based. Thai is frequently written without
   inter-word spaces, so unspaced company names lean on the trigram metric rather than token
   comparison. A dictionary-based segmenter would improve this.
-- **Recall is threshold-bound.** 57.6% of true pairs are auto-matched at the default thresholds;
+- **Recall is threshold-bound.** 59.2% of true pairs are auto-matched at the default thresholds;
   the rest reach a human. This is a deliberate operating point, not a ceiling.
-- **Peak heap is ~2 GiB at 220k × 220k**, and `docker-compose.yml` sets no memory limit. That is
-  2% of a 121 GiB host but would OOM a typical 2 GiB container, so size the container for the
-  corpus. Results accumulate in memory during a run and every row embeds full copies of both
-  records (~630–960 bytes/row); profiling showed this costs memory and API payload size but *not*
-  runtime, since GC CPU fraction falls with scale.
+- **Peak heap is ~1.46 GiB at 230k × 230k**, and `docker-compose.yml` sets no memory limit. That is
+  1% of a 121 GiB host but would still OOM a typical 2 GiB container, so size the container for the
+  corpus. Results accumulate in memory during a run, but they no longer embed record copies: rows
+  carry IDs, and the stores attach the records at save time as pointers into the dataset they
+  already hold. Removing that embedding cut peak heap from 2.43 GiB to 1.46 GiB — 932 MiB, 38% —
+  and raised throughput about 1%.
 - **Cross-script retrieval costs ~9% throughput.** Measured by an interleaved A/B in one process
   (alternating `use_romanized_match` on/off, median of three pairs, 57,620 records per side):
   9,389 vs 10,326 sources/sec. The feature is behind that flag — both the scoring signal and the
   index construction — so a deployment that never mixes scripts can turn it off.
+
+  **This figure has not been re-measured since the cross-script work in EPIC L**, which added a
+  `PhoneticComparisonForm` fold inside `CrossScriptPartsScore` — extra work on exactly the path
+  being measured. Treat 9% as a lower bound until an interleaved A/B is re-run. There is no
+  automated harness for it; the measurement was manual.
 
   **Methodology note, because this was got wrong once.** An earlier revision of this file claimed a
   42% cost. That came from comparing scale-sweep runs taken hours apart under different machine
@@ -226,8 +351,15 @@ Authentication: `Authorization: Bearer <token>` on every route except `/api/heal
   runs are byte-identical — so comparing code versions requires an interleaved A/B in one load
   window, not two timestamps.
 
-- **Scaling is O(N^1.05), not linear.** The residual comes from the candidate set growing with
-  corpus size; bounded top-K selection caps its sort cost but does not eliminate it.
+- **Scaling is O(N^1.09), not linear.** The residual comes from the candidate set growing with
+  corpus size; bounded top-K selection caps its sort cost but does not eliminate it. Re-measured
+  2026-08-31 across the sweep's four sizes, a least-squares fit gives 1.09 (endpoint-to-endpoint
+  1.10). It measured 1.12 before the result rows stopped embedding record copies, which is
+  consistent with a third less heap pressure. An earlier revision of this file claimed 1.05, which
+  no pair of measured points supports.
+
+  Run-to-run spread is about 1% at this size — the dedicated run measured 8,593 sources/sec and the
+  sweep 8,501 in the same window — so treat differences below a few percent as noise, not signal.
 - **Cross-script matching retrieves but does not decide.** Thai-script records and Latin-script
   records are now matched through RTGS romanization: a Thai syllable segmenter determines consonant
   position, `RomanizeThai` produces the romanization, and a shared phonetic skeleton puts both

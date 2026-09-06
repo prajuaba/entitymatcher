@@ -48,46 +48,73 @@ type MatchResultItem struct {
 	TrigramScore    float64            `json:"trigram_score"`
 	MatchStatus     string             `json:"match_status"` // AUTO_MATCHED, REVIEW_NEEDED, CONFIRMED, REJECTED, NO_MATCH
 	MatchReasons    []string           `json:"match_reasons"`
-	Rank            int                `json:"rank"`          // 1 = best candidate for this source
-	ScoreMargin     float64            `json:"score_margin"`  // best - runner_up, 0 when no runner-up
-	DecisionNote    string             `json:"decision_note"` // why this row got its status
-	CreatedAt       time.Time          `json:"created_at"`
+	Rank            int                `json:"rank"`         // 1 = best candidate for this source
+	ScoreMargin     float64            `json:"score_margin"` // best - runner_up, 0 when no runner-up
+	// CrossScript is deliberately NOT persisted to match_results (JWScore, LevScore, TrigramScore, RomanizedScore are likewise not persisted); it is decision-time only and recomputed on every run.
+	CrossScript  bool      `json:"cross_script"`
+	DecisionNote string    `json:"decision_note"` // why this row got its status
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type Config struct {
-	AutoMatchThreshold       float64          `json:"auto_match_threshold"` // Default: 0.90
-	ReviewThreshold          float64          `json:"review_threshold"`     // Default: 0.70
-	DateToleranceDays        int              `json:"date_tolerance_days"`  // Default: 30
-	Weights                  MatchWeights     `json:"weights"`
-	Algorithms               AlgorithmToggles `json:"algorithms"`
-	ColumnMapping            ColumnMapping    `json:"column_mapping"`
-	WorkerCount              int              `json:"worker_count"`
-	MaxCandidatesPerSrc      int              `json:"max_candidates_per_src"`
-	MarginThreshold          float64          `json:"margin_threshold"`            // Default: 0.05
-	ExactMatchFloor          float64          `json:"exact_match_floor"`           // Default: 0.99
-	AssignmentStrategy       string           `json:"assignment_strategy"`         // Default: "GREEDY_1_1"
-	EmitUnmatched            bool             `json:"emit_unmatched"`              // Default: true
-	MaxAlternativesPerSource int              `json:"max_alternatives_per_source"` // Default: 5. Use negative to keep all alternatives.
-	CalibrationEnabled       bool             `json:"calibration_enabled"`         // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
+	AutoMatchThreshold          float64          `json:"auto_match_threshold"` // Default: 0.90
+	ReviewThreshold             float64          `json:"review_threshold"`     // Default: 0.70
+	DateToleranceDays           int              `json:"date_tolerance_days"`  // Default: 30
+	Weights                     MatchWeights     `json:"weights"`
+	Algorithms                  AlgorithmToggles `json:"algorithms"`
+	ColumnMapping               ColumnMapping    `json:"column_mapping"`
+	WorkerCount                 int              `json:"worker_count"`
+	MaxCandidatesPerSrc         int              `json:"max_candidates_per_src"`
+	MarginThreshold             float64          `json:"margin_threshold"`               // Default: 0.05
+	ExactMatchFloor             float64          `json:"exact_match_floor"`              // Default: 0.99
+	AssignmentStrategy          string           `json:"assignment_strategy"`            // Default: "GREEDY_1_1"
+	EmitUnmatched               bool             `json:"emit_unmatched"`                 // Default: true
+	MaxAlternativesPerSource    int              `json:"max_alternatives_per_source"`    // Default: 5. Use negative to keep all alternatives.
+	CalibrationEnabled          bool             `json:"calibration_enabled"`            // Default: false. IMPORTANT: Only enable after fitting a calibrator on reviewed data from this deployment. A calibrator fitted on synthetic data encodes generator quirks, not production data patterns. See SetCalibrator().
+	CrossScriptAutoThreshold    float64          `json:"cross_script_auto_threshold"`    // Default: 0.84; 0 means "unset, use AutoMatchThreshold"
+	NoDistinctiveOverlapCap     float64          `json:"no_distinctive_overlap_cap"`     // Default: 0.85. Ceiling for a pair sharing no distinctive token. Must sit below AutoMatchThreshold or the rule cannot bite.
+	DistinctiveOverlapMinWeight float64          `json:"distinctive_overlap_min_weight"` // Default: 0.30. Corpus-IDF floor above which a shared token counts as identity evidence.
 }
 
 func DefaultConfig() Config {
 	return Config{
-		AutoMatchThreshold:       0.90,
-		ReviewThreshold:          0.70,
-		DateToleranceDays:        30,
-		Weights:                  DefaultWeights,
-		Algorithms:               DefaultAlgorithms,
-		ColumnMapping:            DefaultColumnMapping(),
-		WorkerCount:              runtime.NumCPU() * 2,
-		MaxCandidatesPerSrc:      50,
-		MarginThreshold:          0.05,
-		ExactMatchFloor:          0.99,
-		AssignmentStrategy:       "GREEDY_1_1",
-		EmitUnmatched:            true,
-		MaxAlternativesPerSource: 5,
-		CalibrationEnabled:       false,
+		AutoMatchThreshold:          0.90,
+		ReviewThreshold:             0.70,
+		DateToleranceDays:           30,
+		Weights:                     DefaultWeights,
+		Algorithms:                  DefaultAlgorithms,
+		ColumnMapping:               DefaultColumnMapping(),
+		WorkerCount:                 runtime.NumCPU() * 2,
+		MaxCandidatesPerSrc:         50,
+		MarginThreshold:             0.05,
+		ExactMatchFloor:             0.99,
+		AssignmentStrategy:          "GREEDY_1_1",
+		EmitUnmatched:               true,
+		MaxAlternativesPerSource:    5,
+		CalibrationEnabled:          false,
+		CrossScriptAutoThreshold:    0.84,
+		NoDistinctiveOverlapCap:     0.85,
+		DistinctiveOverlapMinWeight: 0.30,
 	}
+}
+
+// AutoThresholdFor returns the auto-match threshold to apply to a pair.
+//
+// Cross-script pairs use a lower bar because RTGS romanization and English
+// spelling of the same Thai name never align perfectly, so a correct
+// cross-script pair scores systematically lower than a correct same-script one.
+// Measured on internal/mockdata: at 0.84 cross-script true positives rise from
+// 5 to 13 with no cross-script false positives.
+//
+// A zero CrossScriptAutoThreshold means "unset" and falls back to
+// AutoMatchThreshold. This matters because Config is persisted and deserialized:
+// a config stored before this field existed unmarshals it as 0, and treating 0
+// as a real threshold would auto-match every cross-script pair.
+func (c Config) AutoThresholdFor(crossScript bool) float64 {
+	if crossScript && c.CrossScriptAutoThreshold > 0 {
+		return c.CrossScriptAutoThreshold
+	}
+	return c.AutoMatchThreshold
 }
 
 type BatchProgress struct {
@@ -167,6 +194,18 @@ func IsAutoMatchable(topScore, runnerUpScore, autoMatchThreshold, marginThreshol
 	return false, "Below auto-match threshold — needs review"
 }
 
+// isManyToMany reports whether the configured assignment strategy allows a
+// source and a destination to participate in more than one link.
+//
+// Under ALL_CANDIDATES the data is genuinely many-to-many: one application can
+// name several co-borrowers and one customer can hold several applications. A
+// second candidate scoring as well as the first is then a second real link, not
+// evidence that the first is uncertain -- so neither the rank-1 restriction nor
+// the runner-up margin rule applies.
+func isManyToMany(strategy string) bool {
+	return strategy == "ALL_CANDIDATES"
+}
+
 type matchTask struct {
 	source SourceRecord
 }
@@ -242,7 +281,7 @@ func (e *MatchEngine) ExecuteJob(
 					var ScoredCandidates []ScoredCandidate
 
 					for _, cand := range candidates {
-						scoreRes := CalculateCompositeScoreWithCorpus(
+						scoreRes := CalculateCompositeScoreWithCorpusTuned(
 							task.source.NormalizedName,
 							cand.NormalizedName,
 							task.source.TransactionDate,
@@ -251,6 +290,10 @@ func (e *MatchEngine) ExecuteJob(
 							e.Config.Algorithms,
 							e.Config.DateToleranceDays,
 							corpusStats,
+							ScoreTuning{
+								NoDistinctiveOverlapCap:     e.Config.NoDistinctiveOverlapCap,
+								DistinctiveOverlapMinWeight: e.Config.DistinctiveOverlapMinWeight,
+							},
 						)
 
 						// Evaluate dynamic secondary field mappings if configured
@@ -317,13 +360,11 @@ func (e *MatchEngine) ExecuteJob(
 							calibratedRunnerUpScore = e.calibrator.Calibrate(runnerUpScore)
 						}
 
-						// Propose decision for rank-1 only
 						status := "REVIEW_NEEDED"
 						note := ""
 
-						if rankNum == 1 {
-							// First-ranked candidate: apply decision rules via helper
-							// Use calibrated score for decisions if calibration is enabled, else use raw score
+						manyToMany := isManyToMany(e.Config.AssignmentStrategy)
+						if rankNum == 1 || manyToMany {
 							decisionScore := scoreRes.TotalScore
 							decisionRunnerUp := runnerUpScore
 							if e.Config.CalibrationEnabled && e.calibrator != nil {
@@ -331,10 +372,19 @@ func (e *MatchEngine) ExecuteJob(
 								decisionRunnerUp = calibratedRunnerUpScore
 							}
 
+							// Under many-to-many a tied sibling is another real link, so the
+							// margin rule must not downgrade it. Passing a zero runner-up
+							// makes the margin unconditionally satisfied, leaving the
+							// auto-match threshold as the only bar -- which is the intended
+							// rule: judge every candidate on its own score.
+							if manyToMany {
+								decisionRunnerUp = 0
+							}
+
 							canAutoMatch, decisionNote := IsAutoMatchable(
 								decisionScore,
 								decisionRunnerUp,
-								e.Config.AutoMatchThreshold,
+								e.Config.AutoThresholdFor(scoreRes.CrossScript),
 								e.Config.MarginThreshold,
 								e.Config.ExactMatchFloor,
 							)
@@ -345,22 +395,23 @@ func (e *MatchEngine) ExecuteJob(
 								atomic.AddInt64(&reviewNeededCount, 1)
 							}
 							note = decisionNote
+							if manyToMany && rankNum > 1 {
+								note = fmt.Sprintf("%s (rank %d of several valid links)", decisionNote, rankNum)
+							}
 						} else {
-							// Rank >= 2: alternative for human review
 							atomic.AddInt64(&reviewNeededCount, 1)
 							note = fmt.Sprintf("Alternative candidate (rank %d) for review", rankNum)
 						}
 
-						srcCopy := task.source
-						candCopy := cand
+						// Result rows carry IDs only; the stores attach the records at save time from the
+						// dataset they already hold, because embedding a copy per row cost 933 MiB of peak
+						// heap at benchmark scale.
 
 						matchedItems = append(matchedItems, MatchResultItem{
 							ID:              batchID + "-" + task.source.ID + "-" + cand.ID,
 							BatchID:         batchID,
 							SourceID:        task.source.ID,
-							Source:          &srcCopy,
 							DestinationID:   cand.ID,
-							Destination:     &candCopy,
 							ConfidenceScore: scoreRes.TotalScore,
 							CalibratedScore: calibratedScore,
 							NameScore:       scoreRes.NameScore,
@@ -373,6 +424,7 @@ func (e *MatchEngine) ExecuteJob(
 							MatchReasons:    scoreRes.MatchReasons,
 							Rank:            rankNum,
 							ScoreMargin:     margin,
+							CrossScript:     scoreRes.CrossScript,
 							DecisionNote:    note,
 							CreatedAt:       time.Now(),
 						})
@@ -389,13 +441,10 @@ func (e *MatchEngine) ExecuteJob(
 							note = "All blocking candidates scored below review threshold"
 						}
 
-						srcCopy := task.source
-
 						matchedItems = append(matchedItems, MatchResultItem{
 							ID:            batchID + "-" + task.source.ID + "-NO_MATCH",
 							BatchID:       batchID,
 							SourceID:      task.source.ID,
-							Source:        &srcCopy,
 							DestinationID: "",
 							Destination:   nil,
 							MatchStatus:   "NO_MATCH",

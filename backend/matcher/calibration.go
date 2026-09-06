@@ -11,8 +11,8 @@ const FitThresholdObservations = 500
 
 // LabelledScore represents a scored match with its known true label.
 type LabelledScore struct {
-	Score  float64 `json:"score"`  // Raw confidence score (0.0–1.0)
-	IsMatch bool   `json:"is_match"` // True if the pair is a true match (ground truth)
+	Score   float64 `json:"score"`    // Raw confidence score (0.0–1.0)
+	IsMatch bool    `json:"is_match"` // True if the pair is a true match (ground truth)
 }
 
 // Calibrator transforms raw scores into calibrated probabilities.
@@ -108,8 +108,8 @@ func (c *PlattCalibrator) UnmarshalJSON(data []byte) error {
 // IsotonicCalibrator implements non-parametric isotonic regression via PAV.
 // It maps sorted unique raw scores to increasing calibrated probabilities.
 type IsotonicCalibrator struct {
-	Scores   []float64 `json:"scores"`  // Monotonically increasing raw scores
-	Probs    []float64 `json:"probs"`   // Monotonically increasing calibrated probabilities
+	Scores   []float64 `json:"scores"` // Monotonically increasing raw scores
+	Probs    []float64 `json:"probs"`  // Monotonically increasing calibrated probabilities
 	minScore float64   // min(Scores)
 	maxScore float64   // max(Scores)
 }
@@ -311,7 +311,7 @@ func fitPlatt(labels []LabelledScore) *PlattCalibrator {
 				if ls.IsMatch {
 					newLoss -= math.Log(p + 1e-15)
 				} else {
-					newLoss -= math.Log(1.0-p + 1e-15)
+					newLoss -= math.Log(1.0 - p + 1e-15)
 				}
 			}
 
@@ -331,7 +331,7 @@ func fitPlatt(labels []LabelledScore) *PlattCalibrator {
 				if ls.IsMatch {
 					oldLoss -= math.Log(p + 1e-15)
 				} else {
-					oldLoss -= math.Log(1.0-p + 1e-15)
+					oldLoss -= math.Log(1.0 - p + 1e-15)
 				}
 			}
 

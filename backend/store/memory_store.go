@@ -21,27 +21,42 @@ type BatchSummary struct {
 }
 
 type Store struct {
-	mu           sync.RWMutex
-	config       matcher.Config
-	sources      map[string][]matcher.SourceRecord      // batch_id -> sources
-	destinations map[string][]matcher.DestinationRecord // batch_id -> dests
-	results      map[string][]matcher.MatchResultItem   // batch_id -> results
-	resultIndex  map[string]map[string]int              // batch_id -> matchID -> slice position
-	progresses   map[string]matcher.BatchProgress       // batch_id -> progress
-	sseClients   map[string][]chan matcher.BatchProgress
-	auditStore   *AuditStore
+	mu                sync.RWMutex
+	config            matcher.Config
+	connectorSettings ConnectorSettings
+	sources           map[string][]matcher.SourceRecord      // batch_id -> sources
+	destinations      map[string][]matcher.DestinationRecord // batch_id -> dests
+	results           map[string][]matcher.MatchResultItem   // batch_id -> results
+	resultIndex       map[string]map[string]int              // batch_id -> matchID -> slice position
+	progresses        map[string]matcher.BatchProgress       // batch_id -> progress
+	sseClients        map[string][]chan matcher.BatchProgress
+	auditStore        *AuditStore
+
+	calibrationModels []CalibrationModel
+
+	// dictionaryEntries persists custom aliases keyed by alias so a repeat save
+	// overwrites rather than duplicates, mirroring the PostgreSQL upsert.
+	dictionaryEntries map[string]matcher.SynonymEntry
+
+	// deletedAliases tombstones aliases the operator explicitly deleted, mirroring the
+	// PostgreSQL `deleted` column, so a built-in default re-seeded by
+	// matcher.NewCustomDictionary() at boot can be un-seeded again on the next hydration.
+	deletedAliases map[string]bool
 }
 
 func NewStore() *Store {
 	return &Store{
-		config:       matcher.DefaultConfig(),
-		sources:      make(map[string][]matcher.SourceRecord),
-		destinations: make(map[string][]matcher.DestinationRecord),
-		results:      make(map[string][]matcher.MatchResultItem),
-		resultIndex:  make(map[string]map[string]int),
-		progresses:   make(map[string]matcher.BatchProgress),
-		sseClients:   make(map[string][]chan matcher.BatchProgress),
-		auditStore:   NewAuditStore(),
+		config:            matcher.DefaultConfig(),
+		calibrationModels: make([]CalibrationModel, 0),
+		sources:           make(map[string][]matcher.SourceRecord),
+		destinations:      make(map[string][]matcher.DestinationRecord),
+		results:           make(map[string][]matcher.MatchResultItem),
+		resultIndex:       make(map[string]map[string]int),
+		progresses:        make(map[string]matcher.BatchProgress),
+		sseClients:        make(map[string][]chan matcher.BatchProgress),
+		auditStore:        NewAuditStore(),
+		dictionaryEntries: make(map[string]matcher.SynonymEntry),
+		deletedAliases:    make(map[string]bool),
 	}
 }
 
@@ -57,11 +72,27 @@ func (s *Store) UpdateConfig(cfg matcher.Config) {
 	s.config = cfg
 }
 
-func (s *Store) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
+func (s *Store) GetConnectorSettings() ConnectorSettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connectorSettings
+}
+
+func (s *Store) UpdateConnectorSettings(cs ConnectorSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connectorSettings = cs
+}
+
+// SaveDataset saves the source and destination datasets for a batch.
+// The in-memory store cannot fail, but the signature is shared with the Repository interface
+// so it can report the failures the PostgreSQL-backed store genuinely has.
+func (s *Store) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sources[batchID] = sources
 	s.destinations[batchID] = dests
+	return nil
 }
 
 func (s *Store) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {
@@ -75,6 +106,41 @@ func (s *Store) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.De
 func (s *Store) SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Hydrate Source/Destination with pointers into this store's own dataset slices
+	// (s.sources[batchID], s.destinations[batchID]) rather than copies. The pipeline no
+	// longer embeds per-row struct copies (that cost 933 MiB of peak heap at benchmark
+	// scale), so the store attaches the records here, and hydration costs a pointer per
+	// row instead of a struct copy.
+
+	// Build lookup maps once
+	sourceMap := make(map[string]*matcher.SourceRecord, len(s.sources[batchID]))
+	for i := range s.sources[batchID] {
+		sourceMap[s.sources[batchID][i].ID] = &s.sources[batchID][i]
+	}
+
+	destMap := make(map[string]*matcher.DestinationRecord, len(s.destinations[batchID]))
+	for i := range s.destinations[batchID] {
+		destMap[s.destinations[batchID][i].ID] = &s.destinations[batchID][i]
+	}
+
+	// Hydrate results
+	for i := range results {
+		item := results[i]
+
+		if src, exists := sourceMap[item.SourceID]; exists {
+			item.Source = src
+		}
+
+		if item.DestinationID != "" {
+			if dst, exists := destMap[item.DestinationID]; exists {
+				item.Destination = dst
+			}
+		}
+
+		results[i] = item
+	}
+
 	s.results[batchID] = results
 
 	// Rebuild resultIndex from scratch. Reusing the previous map would leave stale
@@ -325,29 +391,44 @@ func (s *Store) ListBatches() []BatchSummary {
 }
 
 // GetResultsPage returns a paginated, filtered set of match results for a batch.
-func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error) {
+func (s *Store) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, error) {
+	q = q.Normalized()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	results, ok := s.results[batchID]
+	results, ok := s.results[q.BatchID]
 	if !ok {
-		return nil, 0, fmt.Errorf("batch not found")
+		// An unknown batch is treated as an empty page, not an error.
+		// This matches the behavior of the Postgres-backed store and
+		// allows HTTP handlers to treat missing batches gracefully.
+		return nil, 0, nil
 	}
 
 	// Filter by status and search
 	var filtered []matcher.MatchResultItem
+	searchLower := strings.ToLower(q.Search)
 	for _, item := range results {
-		if status != "" && status != "ALL" && item.MatchStatus != status {
+		if q.Status != "" && q.Status != "ALL" && item.MatchStatus != q.Status {
 			continue
 		}
-		if search != "" {
-			searchLower := strings.ToLower(search)
-			srcMatch := (item.Source != nil && (strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
-				strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower))) ||
-				(item.Source == nil)
-			dstMatch := (item.Destination != nil && (strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
-				strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower))) ||
-				(item.Destination == nil)
+		// Mirrors the Postgres store's `rank = 1` predicate. totalCount is derived
+		// from this same filtered slice, so the count and the page cannot diverge.
+		if q.Rank1Only && item.Rank > 1 {
+			continue
+		}
+		if q.Search != "" {
+			// A nil Source/Destination must NOT be treated as an automatic match.
+			// This fixes a bug where NO_MATCH rows with nil Destination would
+			// always pass the search filter regardless of search term.
+			var srcMatch, dstMatch bool
+			if item.Source != nil {
+				srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
+					strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower)
+			}
+			if item.Destination != nil {
+				dstMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
+					strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower)
+			}
 			if !srcMatch && !dstMatch {
 				continue
 			}
@@ -357,16 +438,67 @@ func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int
 
 	totalCount := len(filtered)
 
-	// Apply pagination
-	if limit <= 0 {
-		limit = 20
-	}
-	if offset < 0 {
-		offset = 0
+	// Sort a copy of the filtered results
+	sortedCopy := make([]matcher.MatchResultItem, len(filtered))
+	copy(sortedCopy, filtered)
+
+	less := func(i, j int) bool {
+		var lt, gt bool
+		switch q.SortBy {
+		case SortByCreatedAt:
+			lt = sortedCopy[i].CreatedAt.Before(sortedCopy[j].CreatedAt)
+			gt = sortedCopy[i].CreatedAt.After(sortedCopy[j].CreatedAt)
+		case SortByConfidence:
+			lt = sortedCopy[i].ConfidenceScore < sortedCopy[j].ConfidenceScore
+			gt = sortedCopy[i].ConfidenceScore > sortedCopy[j].ConfidenceScore
+		case SortByNameScore:
+			lt = sortedCopy[i].NameScore < sortedCopy[j].NameScore
+			gt = sortedCopy[i].NameScore > sortedCopy[j].NameScore
+		case SortByDateScore:
+			lt = sortedCopy[i].DateScore < sortedCopy[j].DateScore
+			gt = sortedCopy[i].DateScore > sortedCopy[j].DateScore
+		case SortByStatus:
+			lt = sortedCopy[i].MatchStatus < sortedCopy[j].MatchStatus
+			gt = sortedCopy[i].MatchStatus > sortedCopy[j].MatchStatus
+		case SortBySourceName:
+			nameI := ""
+			nameJ := ""
+			if sortedCopy[i].Source != nil {
+				nameI = sortedCopy[i].Source.CustomerNameRaw
+			}
+			if sortedCopy[j].Source != nil {
+				nameJ = sortedCopy[j].Source.CustomerNameRaw
+			}
+			lt = strings.ToLower(nameI) < strings.ToLower(nameJ)
+			gt = strings.ToLower(nameI) > strings.ToLower(nameJ)
+		case SortByReferenceID:
+			refI := ""
+			refJ := ""
+			if sortedCopy[i].Source != nil {
+				refI = sortedCopy[i].Source.ReferenceID
+			}
+			if sortedCopy[j].Source != nil {
+				refJ = sortedCopy[j].Source.ReferenceID
+			}
+			lt = strings.ToLower(refI) < strings.ToLower(refJ)
+			gt = strings.ToLower(refI) > strings.ToLower(refJ)
+		}
+
+		if lt {
+			return q.SortDir != "desc"
+		}
+		if gt {
+			return q.SortDir == "desc"
+		}
+		// Break ties by ID ascending
+		return sortedCopy[i].ID < sortedCopy[j].ID
 	}
 
-	start := offset
-	end := offset + limit
+	sort.SliceStable(sortedCopy, less)
+
+	// Apply pagination (q.Limit/q.Offset are already validated by Normalized())
+	start := q.Offset
+	end := q.Offset + q.Limit
 	if start > totalCount {
 		start = totalCount
 	}
@@ -374,7 +506,39 @@ func (s *Store) GetResultsPage(batchID, status, search string, limit, offset int
 		end = totalCount
 	}
 
-	return filtered[start:end], totalCount, nil
+	return sortedCopy[start:end], totalCount, nil
+}
+
+// CountResultsByStatus returns a map of match status counts for a batch,
+// filtered only by the search term (not by status).
+func (s *Store) CountResultsByStatus(batchID, search string) (map[string]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	results, ok := s.results[batchID]
+	if !ok {
+		return make(map[string]int), nil
+	}
+
+	counts := make(map[string]int)
+	searchLower := strings.ToLower(search)
+	for _, item := range results {
+		// Apply the same corrected search logic as in GetResultsPage.
+		var srcMatch, dstMatch bool
+		if item.Source != nil {
+			srcMatch = strings.Contains(strings.ToLower(item.Source.CustomerNameRaw), searchLower) ||
+				strings.Contains(strings.ToLower(item.Source.ReferenceID), searchLower)
+		}
+		if item.Destination != nil {
+			dstMatch = strings.Contains(strings.ToLower(item.Destination.CustomerNameRaw), searchLower) ||
+				strings.Contains(strings.ToLower(item.Destination.CustomerID), searchLower)
+		}
+		if search == "" || srcMatch || dstMatch {
+			counts[item.MatchStatus]++
+		}
+	}
+
+	return counts, nil
 }
 
 // ListJobs returns job summaries with pagination, ordered by started_at descending.
@@ -435,6 +599,188 @@ func (s *Store) ListJobs(limit, offset int) ([]JobSummary, error) {
 	}
 
 	return summaries[start:end], nil
+}
+
+// CalibrationObservations extracts a deduplicated, labelled training set from
+// reviewer decisions recorded in the audit log, suitable for matcher.FitCalibrator.
+// Pass batchID == "" to include observations from all batches.
+//
+// Mapping: Action=="CONFIRM" -> IsMatch=true; Action=="REJECT" -> IsMatch=false;
+// Action=="OVERRIDE" is ambiguous on its own and is resolved from NewStatus
+// (CONFIRMED -> true, REJECTED -> false; any other NewStatus is skipped as
+// unusable). Any other Action value is skipped.
+//
+// Deduplication: entries are grouped by (batch_id, source_id, destination_id) and
+// only the LATEST decision (by Timestamp) for each pair contributes an observation,
+// so a pair reviewed multiple times counts once and a later reversal wins.
+//
+// SELECTION BIAS WARNING: auto-matched pairs are typically never reviewed and so
+// generate no audit entry and no label. This training set is therefore drawn almost
+// entirely from the human review queue — a biased sample that over-represents
+// ambiguous mid-range scores and under-represents confident correct matches. A
+// calibrator fitted on it will be well-calibrated for the review band and is
+// extrapolating everywhere else. This method does not correct that bias, it only
+// supplies the raw labelled data; see CalibrationObservationStats for a way to
+// surface the skew, and GET /api/calibration/status for where operators see it.
+func (s *Store) CalibrationObservations(batchID string) ([]matcher.LabelledScore, error) {
+	entries := s.auditStore.GetAuditLogs(batchID, "", "")
+	labels, _ := computeCalibrationObservations(entries)
+	return labels, nil
+}
+
+// CalibrationObservationStats reports the composition of the CalibrationObservations
+// training set (after the same mapping and dedup rules) broken down by the
+// PreviousStatus of the winning audit entries, so an operator can see the
+// review-queue selection-bias skew directly instead of just being told about it.
+// Pass batchID == "" to include observations from all batches.
+func (s *Store) CalibrationObservationStats(batchID string) (CalibrationObservationStats, error) {
+	entries := s.auditStore.GetAuditLogs(batchID, "", "")
+	_, stats := computeCalibrationObservations(entries)
+	return stats, nil
+}
+
+// SaveCalibrationModel persists a newly-fitted calibrator as a new, append-only row.
+// If model.Active is true, any previously active model is deactivated first so at
+// most one model is ever active at a time. Returns the saved model with ID and
+// CreatedAt populated (generated by the store if the caller left them zero-valued).
+func (s *Store) SaveCalibrationModel(model CalibrationModel) (CalibrationModel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if model.ID == "" {
+		model.ID = fmt.Sprintf("calib-%d", time.Now().UnixNano())
+	}
+
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = time.Now()
+	}
+
+	if model.Active {
+		for i := range s.calibrationModels {
+			s.calibrationModels[i].Active = false
+		}
+	}
+
+	s.calibrationModels = append(s.calibrationModels, model)
+
+	return model, nil
+}
+
+// GetActiveCalibrationModel returns the currently active calibration model, if any.
+// The bool return is false (with a zero-value CalibrationModel and nil error) when
+// no model has ever been activated.
+func (s *Store) GetActiveCalibrationModel() (CalibrationModel, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var activeModel CalibrationModel
+	found := false
+
+	for _, model := range s.calibrationModels {
+		if model.Active {
+			if !found {
+				activeModel = model
+				found = true
+			} else if model.CreatedAt.After(activeModel.CreatedAt) {
+				activeModel = model
+			}
+		}
+	}
+
+	if !found {
+		return CalibrationModel{}, false, nil
+	}
+
+	return activeModel, true, nil
+}
+
+// ListCalibrationModels returns calibration model fit history, most recent first.
+func (s *Store) ListCalibrationModels(limit, offset int) ([]CalibrationModel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create a copy to avoid exposing internal state
+	models := make([]CalibrationModel, len(s.calibrationModels))
+	copy(models, s.calibrationModels)
+
+	// Sort by CreatedAt descending (most recent first)
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].CreatedAt.After(models[j].CreatedAt)
+	})
+
+	// Apply pagination
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	start := offset
+	end := offset + limit
+	if start > len(models) {
+		start = len(models)
+	}
+	if end > len(models) {
+		end = len(models)
+	}
+
+	return models[start:end], nil
+}
+
+// SaveDictionaryEntry saves a custom alias into the in-memory store, keyed by
+// alias so a repeat save overwrites rather than duplicates. If the alias was
+// previously deleted (tombstoned), this clears the tombstone.
+func (s *Store) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.deletedAliases, entry.Alias)
+	s.dictionaryEntries[entry.Alias] = entry
+	return nil
+}
+
+// ListDictionaryEntries returns all persisted custom aliases, ordered by alias.
+func (s *Store) ListDictionaryEntries() ([]matcher.SynonymEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries := make([]matcher.SynonymEntry, 0, len(s.dictionaryEntries))
+	for _, entry := range s.dictionaryEntries {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Alias < entries[j].Alias
+	})
+
+	return entries, nil
+}
+
+// DeleteDictionaryEntry tombstones the alias rather than only removing it, since
+// matcher.NewCustomDictionary() would otherwise re-seed a removed built-in default
+// on the next restart.
+func (s *Store) DeleteDictionaryEntry(alias string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.dictionaryEntries, alias)
+	s.deletedAliases[alias] = true
+	return nil
+}
+
+// ListDeletedDictionaryAliases returns the aliases that have been tombstoned via
+// DeleteDictionaryEntry, so boot-time hydration can un-seed a built-in default
+// the operator removed.
+func (s *Store) ListDeletedDictionaryAliases() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	aliases := make([]string, 0, len(s.deletedAliases))
+	for alias := range s.deletedAliases {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	return aliases, nil
 }
 
 // Compile-time assertion that Store implements Repository

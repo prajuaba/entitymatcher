@@ -89,12 +89,12 @@ func TestSchedulerConfigValidCronExpressions(t *testing.T) {
 	server := NewServer(memStore)
 
 	validExpressions := []string{
-		"0 2 * * *",     // Daily at 2 AM
-		"*/5 * * * *",   // Every 5 minutes
-		"0 0 * * 0",     // Weekly on Sunday at midnight
-		"0 0 1 * *",     // Monthly on the 1st
-		"@hourly",       // Hourly
-		"@daily",        // Daily
+		"0 2 * * *",   // Daily at 2 AM
+		"*/5 * * * *", // Every 5 minutes
+		"0 0 * * 0",   // Weekly on Sunday at midnight
+		"0 0 1 * *",   // Monthly on the 1st
+		"@hourly",     // Hourly
+		"@daily",      // Daily
 	}
 
 	for _, expr := range validExpressions {

@@ -18,11 +18,11 @@ type LLMRequestCandidate struct {
 }
 
 type LLMRequestPayload struct {
-	SourceRefID       string                `json:"source_reference_id"`
-	SourceCustomerName string               `json:"source_customer_name"`
-	SourceTxDate      string                `json:"source_transaction_date"`
-	SourceTxType      string                `json:"source_transaction_type"`
-	Candidates        []LLMRequestCandidate `json:"candidates"`
+	SourceRefID        string                `json:"source_reference_id"`
+	SourceCustomerName string                `json:"source_customer_name"`
+	SourceTxDate       string                `json:"source_transaction_date"`
+	SourceTxType       string                `json:"source_transaction_type"`
+	Candidates         []LLMRequestCandidate `json:"candidates"`
 }
 
 type LLMMatchDetail struct {

@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"regexp"
 	"strings"
 	"time"
 )
@@ -9,6 +10,18 @@ import (
 // It returns (time.Time{}, false) for empty or unparseable input.
 // Supports Buddhist Era (B.E.) conversion: if year >= 2400, subtracts 543.
 func ParseFlexibleDate(s string) (time.Time, bool) {
+	return ParseFlexibleDateInCalendar(s, "AUTO")
+}
+
+// ParseFlexibleDateInCalendar is the main parsing function with explicit calendar control.
+// calendar is case-insensitive and accepts "", "AUTO", "CE", "BE".
+//   - "" or "AUTO": 2-digit year pivots CE-style (yy <= 69 -> 2000+yy, else 1900+yy);
+//     a 4-digit year >= 2400 gets 543 subtracted.
+//   - "CE": never subtract 543; 2-digit year still pivots CE-style as above.
+//   - "BE": the year token is Buddhist. A 2-digit yy maps to 2500+yy, then 543 is
+//     subtracted. A 4-digit year >= 2400 has 543 subtracted as today. A 4-digit
+//     year < 2400 is left alone.
+func ParseFlexibleDateInCalendar(s string, calendar string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, false
@@ -16,6 +29,9 @@ func ParseFlexibleDate(s string) (time.Time, bool) {
 
 	// Replace Thai digits with ASCII digits
 	s = replaceThaiDigits(s)
+
+	// Make calendar case-insensitive for every downstream comparison.
+	calendar = strings.ToUpper(calendar)
 
 	// Direct layouts
 	directLayouts := []string{
@@ -30,27 +46,44 @@ func ParseFlexibleDate(s string) (time.Time, bool) {
 
 	for _, layout := range directLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
-			return applyBuddhistEra(t), true
+			return applyBuddhistEra(t, calendar), true
 		}
 	}
 
-	// Handle ambiguous formats like "02/01/2006" or "02-01-2006"
-	parts := strings.Split(s, "/")
+	// Handle ambiguous formats like "02/01/2006" or "02-01-2006". A trailing time
+	// component (e.g. "16/08/2026 11:00:00") is stripped only here, after the
+	// directLayouts loop above has already had its chance to match the full
+	// string with its time intact.
+	stripped := stripTrailingTime(s)
+
+	parts := strings.Split(stripped, "/")
 	if len(parts) == 3 {
-		if t, ok := parseAmbiguousDate(parts[0], parts[1], parts[2]); ok {
-			return applyBuddhistEra(t), true
+		if t, ok := parseAmbiguousDate(parts[0], parts[1], parts[2], calendar); ok {
+			return applyBuddhistEra(t, calendar), true
 		}
 	}
 
 	// Try with dashes
-	parts = strings.Split(s, "-")
+	parts = strings.Split(stripped, "-")
 	if len(parts) == 3 {
-		if t, ok := parseAmbiguousDate(parts[0], parts[1], parts[2]); ok {
-			return applyBuddhistEra(t), true
+		if t, ok := parseAmbiguousDate(parts[0], parts[1], parts[2], calendar); ok {
+			return applyBuddhistEra(t, calendar), true
 		}
 	}
 
 	return time.Time{}, false
+}
+
+// trailingTimeRegex matches a genuine trailing time-of-day component (e.g.
+// " 11:00:00", " 11:00:00.000", " 11:00:00Z", " 11:00:00+07:00") so it can be
+// stripped before an ambiguous date split is attempted. Compiled once at
+// package level since ParseFlexibleDateInCalendar runs per row over ~130k
+// rows per batch.
+var trailingTimeRegex = regexp.MustCompile(`\s+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?$`)
+
+// stripTrailingTime removes a trailing time-of-day component from s, if present.
+func stripTrailingTime(s string) string {
+	return trailingTimeRegex.ReplaceAllString(s, "")
 }
 
 // replaceThaiDigits replaces Thai digits (๐-๙) with ASCII digits (0-9)
@@ -66,10 +99,38 @@ func replaceThaiDigits(s string) string {
 
 // parseAmbiguousDate handles date strings like "02/01/2006" with day-first preference (EU/Thai convention)
 // When ambiguous (both day-first and month-first valid), prefers day-first.
-func parseAmbiguousDate(part1, part2, part3 string) (time.Time, bool) {
-	// Parse year (part3)
-	year, err := parseAsInteger(part3)
-	if err != nil || year < 1 || year > 9999 {
+// calendar (already upper-cased by the caller) controls how a 2-digit year token is pivoted:
+// "BE" maps yy to 2500+yy (a Buddhist-era year), anything else pivots CE-style.
+func parseAmbiguousDate(part1, part2, part3 string, calendar string) (time.Time, bool) {
+	// Trim and apply 2-digit year pivot rule
+	trimmedPart3 := strings.TrimSpace(part3)
+	year, err := parseAsInteger(trimmedPart3)
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	// Apply 2-digit year pivot for real-world Thai dates (DD/MM/YY format)
+	// If part3 is 2 digits or less, treat as YY and pivot to 19XX/20XX (CE) or
+	// 25XX (BE, per calendar).
+	// A 4-digit year like "2024" or "0024" must stay as-is to preserve explicit intent.
+	// This runs before the range check so "00" pivots to 2000 rather than being
+	// rejected as year 0.
+	if len(trimmedPart3) <= 2 {
+		switch calendar {
+		case "BE":
+			// Modern BE years are 25xx; the 543 conversion happens afterwards
+			// in applyBuddhistEra.
+			year = 2500 + year
+		default: // AUTO, CE, or empty
+			if year <= 69 {
+				year = 2000 + year
+			} else {
+				year = 1900 + year
+			}
+		}
+	}
+
+	if year < 1 || year > 9999 {
 		return time.Time{}, false
 	}
 
@@ -118,8 +179,15 @@ func parseAsInteger(s string) (int, error) {
 	return val, nil
 }
 
-// applyBuddhistEra converts Buddhist Era year to Common Era if needed (B.E. >= 2400)
-func applyBuddhistEra(t time.Time) time.Time {
+// applyBuddhistEra converts a Buddhist Era year to Common Era according to calendar
+// (already upper-cased by the caller): "CE" never subtracts; "AUTO"/"BE" (and any
+// other value) subtract 543 when the year is >= 2400, which is a no-op for years
+// below that threshold.
+func applyBuddhistEra(t time.Time, calendar string) time.Time {
+	calendar = strings.ToUpper(calendar)
+	if calendar == "CE" {
+		return t // Never subtract 543 for CE
+	}
 	if t.Year() >= 2400 {
 		newYear := t.Year() - 543
 		// Validate the new year is reasonable

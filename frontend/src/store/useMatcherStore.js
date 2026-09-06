@@ -1,9 +1,47 @@
 import { create } from 'zustand'
-import { apiFetch, getAccessToken } from '../lib/api.js'
+import { apiFetch, getAccessToken, readErrorMessage } from '../lib/api.js'
+
+const BATCH_ID_STORAGE_KEY = 'entity_matcher_batch_id'
+let fetchSeq = 0
+let searchDebounceHandle = null
+
+function rememberBatchID(id) {
+  try {
+    if (id) localStorage.setItem(BATCH_ID_STORAGE_KEY, id)
+  } catch {
+    // ignore
+  }
+  return id
+}
+
+function idleProgress(batchId = '') {
+  return {
+    batch_id: batchId,
+    total_sources: 0,
+    processed_sources: 0,
+    total_candidate_pairs: 0,
+    no_match_count: 0,
+    total_decisions: 0,
+    auto_matched: 0,
+    review_needed: 0,
+    status: 'IDLE',
+    elapsed_ms: 0,
+  }
+}
 
 export const useMatcherStore = create((set, get) => ({
   activeTab: 'results',
-  batchID: 'benchmark-batch-001',
+  // Seeded from localStorage so a reload keeps the batch the user was reviewing.
+  // Falls back to '' rather than the demo batch: showing seeded example data as
+  // if it were the user's results is worse than showing nothing.
+  batchID: (() => {
+    try {
+      return localStorage.getItem(BATCH_ID_STORAGE_KEY) || ''
+    } catch {
+      return ''
+    }
+  })(),
+  jobs: [],
   loading: false,
   error: null,
 
@@ -17,9 +55,9 @@ export const useMatcherStore = create((set, get) => ({
     auto_match_threshold: 0.90,
     review_threshold: 0.70,
     date_tolerance_days: 30,
-    margin_threshold: 0.10,
+    margin_threshold: 0.05,
     assignment_strategy: 'GREEDY_1_1',
-    emit_unmatched: false,
+    emit_unmatched: true,
     weights: {
       name_weight: 0.85,
       date_weight: 0.15,
@@ -30,22 +68,14 @@ export const useMatcherStore = create((set, get) => ({
       use_token_sort: true,
       use_phonetic: true,
       use_trigram: true,
+      use_thai_phonetic: true,
+      use_corpus_idf: true,
+      use_romanized_match: true,
     },
   },
 
   // Job Progress
-  progress: {
-    batch_id: '',
-    total_sources: 0,
-    processed_sources: 0,
-    total_candidate_pairs: 0,
-    no_match_count: 0,
-    total_decisions: 0,
-    auto_matched: 0,
-    review_needed: 0,
-    status: 'IDLE',
-    elapsed_ms: 0,
-  },
+  progress: idleProgress(),
 
   // Results & Selection
   results: [],
@@ -55,6 +85,15 @@ export const useMatcherStore = create((set, get) => ({
   page: 1,
   limit: 20,
   totalCount: 0,
+  sortBy: 'created_at',
+  sortDir: 'asc',
+  // Excludes rank>1 alternative candidates from the list. Off by default: it
+  // changes what the reviewer sees, so it is opt-in and the toggle stays visible
+  // whenever it is on (see MasterDetailView) -- rows are never hidden silently.
+  rank1Only: false,
+  totalPages: 1,
+  statusCounts: {},
+  resultsLoading: false,
 
   // Modals
   isManualSearchOpen: false,
@@ -64,19 +103,67 @@ export const useMatcherStore = create((set, get) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
   setStatusFilter: (filter) => {
     set({ statusFilter: filter, page: 1 })
-    get().fetchResults()
+    get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
+  },
+  setRank1Only: (value) => {
+    set({ rank1Only: !!value, page: 1 })
+    get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
   },
   setSearchQuery: (query) => {
     set({ searchQuery: query, page: 1 })
-    get().fetchResults()
+    if (searchDebounceHandle) clearTimeout(searchDebounceHandle)
+    searchDebounceHandle = setTimeout(() => {
+      searchDebounceHandle = null
+      get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
+    }, 300)
+  },
+  flushSearch: () => {
+    if (searchDebounceHandle) {
+      clearTimeout(searchDebounceHandle)
+      searchDebounceHandle = null
+    }
+    return get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
   },
   setPage: (page) => {
-    set({ page })
-    get().fetchResults()
+    const { page: currentPage, totalPages } = get()
+    const maxPage = Math.max(1, totalPages)
+    const clamped = Math.min(Math.max(1, page), maxPage)
+    if (clamped === currentPage) return
+    set({ page: clamped })
+    get().fetchResults(undefined, { resetSelection: true })
+  },
+  setSort: (field) => {
+    const { sortBy, sortDir } = get()
+    if (field === sortBy) {
+      set({ sortDir: sortDir === 'asc' ? 'desc' : 'asc', page: 1 })
+    } else {
+      const descDefault = field === 'confidence_score' || field === 'name_score' || field === 'date_score'
+      set({ sortBy: field, sortDir: descDefault ? 'desc' : 'asc', page: 1 })
+    }
+    get().fetchResults(undefined, { resetSelection: true })
+  },
+  setLimit: (n) => {
+    const parsed = parseInt(n, 10)
+    const nextLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : get().limit
+    set({ limit: nextLimit, page: 1 })
+    get().fetchResults(undefined, { resetSelection: true })
   },
   setSelectedMatch: (match) => set({ selectedMatch: match }),
   setManualSearchOpen: (open) => set({ isManualSearchOpen: open }),
   setLLMModalOpen: (open) => set({ isLLMModalOpen: open }),
+  setBatchID: (id) => {
+    try {
+      if (id) localStorage.setItem(BATCH_ID_STORAGE_KEY, id)
+      else localStorage.removeItem(BATCH_ID_STORAGE_KEY)
+    } catch {
+      // A browser that refuses storage still works for this session.
+    }
+    set({ batchID: id, page: 1, selectedMatch: null, statusCounts: {} })
+    return Promise.all([
+      get().fetchResults(id, { includeCounts: true, resetSelection: true }),
+      get().loadProgress(id),
+    ])
+  },
 
   // Authentication methods
   initAuth: async () => {
@@ -139,30 +226,76 @@ export const useMatcherStore = create((set, get) => ({
   fetchConfig: async () => {
     try {
       const res = await apiFetch('/api/config')
-      if (res.ok) {
-        const cfg = await res.json()
-        set({ config: cfg })
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to load configuration'))
       }
+      set({ config: await res.json(), error: null })
     } catch (e) {
-      console.error('Failed to fetch config', e)
+      set({ error: `Could not load saved configuration: ${e.message}` })
     }
   },
 
   updateConfig: async (newCfg) => {
-    set({ loading: true })
+    set({ loading: true, error: null })
     try {
       const res = await apiFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCfg),
       })
-      if (res.ok) {
-        const updated = await res.json()
-        set({ config: updated, loading: false })
+      // A rejected save used to fall through this branch silently, leaving
+      // loading stuck true while the caller reported success.
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to save configuration'))
       }
+      const updated = await res.json()
+      set({ config: updated, loading: false })
+      return updated
     } catch (e) {
       set({ error: e.message, loading: false })
+      throw e
     }
+  },
+
+  fetchJobs: async () => {
+    try {
+      const res = await apiFetch('/api/jobs')
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to load job history'))
+      }
+      const data = await res.json()
+      const jobs = data.jobs || []
+      set({ jobs })
+      // Nothing selected yet (first visit, or storage cleared): fall back to the
+      // most recent real run instead of the seeded demo batch.
+      if (!get().batchID && jobs.length > 0) {
+        get().setBatchID(jobs[0].batch_id)
+      }
+      return jobs
+    } catch (e) {
+      set({ error: e.message })
+      return []
+    }
+  },
+
+  fetchConnectorSettings: async () => {
+    const res = await apiFetch('/api/connector/settings')
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, 'Failed to load connector settings'))
+    }
+    return res.json()
+  },
+
+  saveConnectorSettings: async (settings) => {
+    const res = await apiFetch('/api/connector/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    })
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res, 'Failed to save connector settings'))
+    }
+    return res.json()
   },
 
   loadSeedDataset: async () => {
@@ -171,7 +304,7 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch('/api/seed', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id })
+        set({ batchID: rememberBatchID(data.batch_id) })
         await get().runMatching(data.batch_id)
       }
     } catch (e) {
@@ -185,7 +318,7 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch('/api/seed/big', { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id })
+        set({ batchID: rememberBatchID(data.batch_id) })
         await get().runMatching(data.batch_id)
       }
     } catch (e) {
@@ -203,10 +336,77 @@ export const useMatcherStore = create((set, get) => ({
       })
       const data = await res.json()
       if (res.ok) {
-        set({ batchID: data.batch_id, loading: false })
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
         return data.batch_id
       } else {
         throw new Error(data.message || 'Upload failed')
+      }
+    } catch (e) {
+      set({ error: e.message, loading: false })
+      throw e
+    }
+  },
+
+  uploadDataFiles: async (formData) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await apiFetch('/api/upload/file', {
+        method: 'POST',
+        body: formData,
+      })
+      const raw = await res.text()
+      if (!res.ok) {
+        let message = raw.trim()
+        try {
+          const parsed = JSON.parse(raw)
+          message = parsed.message || parsed.error || message
+        } catch (e) {
+          // raw is plain text, use as-is
+        }
+        if (!message) {
+          message = `File upload failed (${res.status})`
+        }
+        throw new Error(message)
+      } else {
+        const data = JSON.parse(raw)
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
+        return data
+      }
+    } catch (e) {
+      set({ error: e.message, loading: false })
+      throw e
+    }
+  },
+
+  ingestFromConnectors: async ({ source, destination, columnMapping }) => {
+    set({ loading: true, error: null })
+    try {
+      const res = await apiFetch('/api/connector/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source,
+          destination,
+          ...(columnMapping ? { column_mapping: columnMapping } : {})
+        }),
+      })
+      const raw = await res.text()
+      if (!res.ok) {
+        let message = raw.trim()
+        try {
+          const parsed = JSON.parse(raw)
+          message = parsed.message || parsed.error || message
+        } catch (e) {
+          // raw is plain text, use as-is
+        }
+        if (!message) {
+          message = `Connector ingestion failed (${res.status})`
+        }
+        throw new Error(message)
+      } else {
+        const data = JSON.parse(raw)
+        set({ batchID: rememberBatchID(data.batch_id), loading: false })
+        return data
       }
     } catch (e) {
       set({ error: e.message, loading: false })
@@ -222,11 +422,28 @@ export const useMatcherStore = create((set, get) => ({
       const res = await apiFetch(`/api/match/run?batch_id=${bId}`, { method: 'POST' })
       if (!res.ok) throw new Error('Failed to start matching job')
 
-      // Listen to SSE progress updates
       const token = getAccessToken()
       const eventSource = new EventSource(`/api/match/progress?batch_id=${bId}&access_token=${token || ''}`)
+      let staleStartedAt = null
+      let firstMessage = true
+
+      // Server replays the last known progress on connect, so a terminal status
+      // in the very first frame belongs to the PREVIOUS run and must not be
+      // mistaken for this run finishing, otherwise every Re-run click would
+      // silently no-op from the user's perspective
       eventSource.onmessage = (event) => {
         const p = JSON.parse(event.data)
+        if (firstMessage) {
+          firstMessage = false
+          if (staleStartedAt === null && (p.status === 'COMPLETED' || p.status === 'FAILED')) {
+            staleStartedAt = p.started_at
+            return
+          }
+        }
+        if (staleStartedAt !== null && p.started_at === staleStartedAt) {
+          // This is the same stale snapshot being repeated, ignore it
+          return
+        }
         set({ progress: p })
         if (p.status === 'COMPLETED' || p.status === 'FAILED') {
           eventSource.close()
@@ -244,36 +461,108 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
-  fetchResults: async (batchIdOverride) => {
+  fetchResults: async (batchIdOverride, opts = {}) => {
     const bId = batchIdOverride || get().batchID
-    const { statusFilter, searchQuery, page, limit } = get()
+    if (!bId) {
+      set({ results: [], totalCount: 0, totalPages: 1, statusCounts: {}, selectedMatch: null, resultsLoading: false })
+      return
+    }
+
+    const seq = ++fetchSeq
+    set({ resultsLoading: true })
+
+    const { statusFilter, searchQuery, page, limit, sortBy, sortDir, rank1Only } = get()
+    const queryParams = new URLSearchParams({
+      batch_id: bId,
+      status: statusFilter,
+      search: searchQuery,
+      page: page.toString(),
+      limit: limit.toString(),
+      sort_by: sortBy,
+      sort_dir: sortDir,
+    })
+    if (opts.includeCounts) {
+      queryParams.append('include_counts', '1')
+    }
+    if (rank1Only) {
+      queryParams.append('rank1_only', '1')
+    }
 
     try {
-      const queryParams = new URLSearchParams({
-        batch_id: bId,
-        status: statusFilter,
-        search: searchQuery,
-        page: page.toString(),
-        limit: limit.toString(),
-      })
-
       const res = await apiFetch(`/api/match/results?${queryParams}`)
-      if (res.ok) {
-        const data = await res.json()
-        set({
-          results: data.results || [],
-          totalCount: data.total_count || 0,
-          selectedMatch: data.results && data.results.length > 0 ? data.results[0] : null,
-        })
+      if (seq !== fetchSeq) return
+      if (!res.ok) {
+        set({ resultsLoading: false })
+        return
       }
+      const data = await res.json()
+      const newResults = data.results || []
+      const newTotalCount = data.total_count || 0
+      const newTotalPages = data.total_pages && data.total_pages >= 1 ? data.total_pages : 1
+
+      if (newTotalPages >= 1 && page > newTotalPages && newTotalPages !== page) {
+        set({ page: newTotalPages, resultsLoading: false })
+        return get().fetchResults(bId, opts)
+      }
+
+      let newSelectedMatch = null
+      if (opts.resetSelection) {
+        newSelectedMatch = newResults.length > 0 ? newResults[0] : null
+      } else {
+        const currentSelected = get().selectedMatch
+        if (currentSelected) {
+          const found = newResults.find(r => r.id === currentSelected.id)
+          newSelectedMatch = found || newResults[0] || null
+        } else {
+          newSelectedMatch = newResults[0] || null
+        }
+      }
+
+      const newStatusCounts = opts.includeCounts ? (data.status_counts || {}) : get().statusCounts
+
+      set({
+        results: newResults,
+        totalCount: newTotalCount,
+        totalPages: newTotalPages,
+        statusCounts: newStatusCounts,
+        selectedMatch: newSelectedMatch,
+        resultsLoading: false
+      })
     } catch (e) {
       console.error('Failed to fetch results', e)
+      set({ resultsLoading: false })
     }
   },
 
-  updateMatchAction: async (matchID, action, userID = 'reviewer_op', reviewComments = '') => {
+  loadProgress: async (batchIdOverride) => {
+    const bId = batchIdOverride || get().batchID
+    if (!bId) {
+      set({ progress: idleProgress() })
+      return
+    }
+    try {
+      const res = await apiFetch(`/api/match/status?batch_id=${encodeURIComponent(bId)}`)
+      if (res.ok) {
+        set({ progress: await res.json() })
+      } else {
+        // A 404 means this batch has never been matched (no stored job). Without
+        // resetting to idle here, the previously selected batch's numbers would
+        // linger on screen and be misread as belonging to the newly selected batch.
+        set({ progress: idleProgress(bId) })
+      }
+    } catch (e) {
+      // A background status read must never break batch selection; fall back to
+      // idle and log, same reasoning as the non-ok branch above.
+      console.error('Failed to load match status', e)
+      set({ progress: idleProgress(bId) })
+    }
+  },
+
+  updateMatchAction: async (matchID, action, reviewComments = '') => {
     const { batchID } = get()
     try {
+      // The server takes the acting user from the JWT claims and ignores any user_id in the payload,
+      // so sending one only implies a control the client does not have.
       const res = await apiFetch('/api/match/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -281,13 +570,12 @@ export const useMatcherStore = create((set, get) => ({
           batch_id: batchID,
           match_id: matchID,
           action,
-          user_id: userID,
           review_comments: reviewComments,
         }),
       })
       if (res.ok) {
         // Refresh local list
-        await get().fetchResults()
+        await get().fetchResults(undefined, { includeCounts: true })
       }
     } catch (e) {
       console.error('Failed to update action', e)
@@ -305,7 +593,9 @@ export const useMatcherStore = create((set, get) => ({
       if (res.ok) {
         const newItem = await res.json()
         set({ isManualSearchOpen: false })
-        await get().fetchResults()
+        // The chip totals (statusCounts) come from `status_counts` in the API response,
+        // which is only returned when `include_counts` is requested.
+        await get().fetchResults(undefined, { includeCounts: true })
         set({ selectedMatch: newItem })
       }
     } catch (e) {

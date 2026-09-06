@@ -9,6 +9,15 @@ CREATE TABLE IF NOT EXISTS config (
     CONSTRAINT only_one_row CHECK (id = 1)
 );
 
+-- Connector settings: single row holds the source/destination data source
+-- connection settings the UI shows. Passwords are deliberately NOT stored.
+CREATE TABLE IF NOT EXISTS connector_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    settings JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT connector_settings_only_one_row CHECK (id = 1)
+);
+
 -- Match jobs: high-level summary of each batch matching job
 CREATE TABLE IF NOT EXISTS match_jobs (
     batch_id VARCHAR(255) PRIMARY KEY,
@@ -78,6 +87,14 @@ CREATE INDEX IF NOT EXISTS idx_match_results_batch_status
 CREATE INDEX IF NOT EXISTS idx_match_results_batch_source
     ON match_results(batch_id, source_id);
 
+-- Paging indexes. The default review-queue order is (created_at, id) and the
+-- most common user-chosen order is confidence descending; without these,
+-- every LIMIT/OFFSET page sorts the whole batch before slicing it.
+CREATE INDEX IF NOT EXISTS idx_match_results_batch_created
+    ON match_results(batch_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_match_results_batch_confidence
+    ON match_results(batch_id, confidence_score DESC, id);
+
 -- Match audit logs: compliance-critical, append-only record of all match decisions
 -- Application role should NOT hold TRUNCATE privilege on this table.
 CREATE TABLE IF NOT EXISTS match_audit_logs (
@@ -125,3 +142,85 @@ DROP TRIGGER IF EXISTS audit_prevent_delete ON match_audit_logs;
 CREATE TRIGGER audit_prevent_delete
     BEFORE DELETE ON match_audit_logs
     FOR EACH ROW EXECUTE FUNCTION prevent_audit_delete();
+
+-- Match sources: uploaded source records for a batch, persisted so a match run can be
+-- re-executed (or retried after a crash) without re-uploading the file.
+-- PK is composite (batch_id, id) to prevent cross-batch ID collisions, mirroring match_results.
+-- NOTE: no column for the normalized name (matcher.CleanName). It is derived from
+-- customer_name_raw via matcher.Normalize, which is deterministic, so storing it would let it
+-- go stale against a future normalizer change; recomputing on read means existing rows benefit
+-- from normalizer fixes automatically instead of requiring a backfill migration.
+CREATE TABLE IF NOT EXISTS match_sources (
+    batch_id VARCHAR(255) NOT NULL REFERENCES match_jobs(batch_id) ON DELETE CASCADE,
+    id VARCHAR(255) NOT NULL,
+    reference_id VARCHAR(255) NOT NULL,
+    customer_name_raw VARCHAR(255) NOT NULL,
+    transaction_date TIMESTAMPTZ NOT NULL,
+    transaction_type VARCHAR(50) NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (batch_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_sources_batch_id
+    ON match_sources(batch_id);
+
+-- Match destinations: uploaded destination records for a batch. See match_sources above for
+-- why there is no stored normalized-name column.
+CREATE TABLE IF NOT EXISTS match_destinations (
+    batch_id VARCHAR(255) NOT NULL REFERENCES match_jobs(batch_id) ON DELETE CASCADE,
+    id VARCHAR(255) NOT NULL,
+    customer_id VARCHAR(255) NOT NULL,
+    customer_name_raw VARCHAR(255) NOT NULL,
+    transaction_date TIMESTAMPTZ NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (batch_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_destinations_batch_id
+    ON match_destinations(batch_id);
+
+-- Calibration models: fitted score-to-probability calibrators (Platt/Isotonic/Identity), with
+-- the metrics they were evaluated at fit time. Append-only for model_json/metrics/observation
+-- counts — a re-fit always inserts a new row. The `active` column is the one field callers are
+-- expected to update (via UPDATE ... SET active = false on the previous holder, then INSERT the
+-- new active row) when promoting a newly-fitted model, so at most one row is active at a time.
+CREATE TABLE IF NOT EXISTS calibration_models (
+    id VARCHAR(255) PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    fitted_by VARCHAR(255) NOT NULL DEFAULT '',
+    batch_id VARCHAR(255) NOT NULL DEFAULT '',
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    positive_count INTEGER NOT NULL DEFAULT 0,
+    brier_score NUMERIC NOT NULL DEFAULT 0,
+    ece_score NUMERIC NOT NULL DEFAULT 0,
+    model_json JSONB NOT NULL DEFAULT '{}',
+    active BOOLEAN NOT NULL DEFAULT false
+);
+
+-- Only one model should be active at a time; this partial unique index enforces it at the
+-- database level as a defense-in-depth check alongside the application-level deactivate-then-
+-- insert logic.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calibration_models_one_active
+    ON calibration_models ((active)) WHERE active = true;
+
+CREATE INDEX IF NOT EXISTS idx_calibration_models_created_at_desc
+    ON calibration_models(created_at DESC);
+
+-- Dictionary entries: operator-added aliases that feed the pre-normalizer
+-- (matcher.ReplaceSynonymsInText), so they must survive a backend restart --
+-- previously this data lived only in the in-process matcher.CustomDictionary
+-- and was lost every time the process restarted. Keyed by alias (rather than
+-- a single settings blob) since the dictionary is keyed data and this makes
+-- upsert-by-alias natural. `alias` is stored already-lowercased and trimmed,
+-- because matcher.CustomDictionary.Set lowercases and trims before writing.
+CREATE TABLE IF NOT EXISTS dictionary_entries (
+    alias VARCHAR(255) PRIMARY KEY,
+    canonical VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- A deleted alias is tombstoned rather than removed: the built-in defaults seeded
+-- by matcher.NewCustomDictionary() are re-created at every boot, so a bare DELETE
+-- of the row would let a default the operator removed reappear on the next restart.
+ALTER TABLE dictionary_entries ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE;

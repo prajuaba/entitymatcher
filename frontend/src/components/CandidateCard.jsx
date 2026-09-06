@@ -5,8 +5,7 @@ import { useMatcherStore } from '../store/useMatcherStore'
 import { can } from '../lib/rbac'
 
 export function CandidateCard({ matchItem }) {
-  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user } = useMatcherStore()
-  const [reviewerId, setReviewerId] = useState('reviewer_john')
+  const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user, config } = useMatcherStore()
   const [commentText, setCommentText] = useState('')
 
   if (!matchItem) {
@@ -24,11 +23,15 @@ export function CandidateCard({ matchItem }) {
   const getStatusBadge = (status) => {
     switch (status) {
       case 'AUTO_MATCHED':
-        return <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-semibold">AUTO MATCHED (≥90%)</span>
+        return <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-semibold">{Number.isFinite(config?.auto_match_threshold) ? `AUTO MATCHED (≥${Math.round(config.auto_match_threshold * 100)}%)` : 'AUTO MATCHED'}</span>
       case 'CONFIRMED':
         return <span className="px-3 py-1 bg-blue-500/10 text-blue-400 border border-blue-500/30 rounded-full text-xs font-semibold">MANUALLY CONFIRMED</span>
       case 'REVIEW_NEEDED':
-        return <span className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full text-xs font-semibold">REVIEW NEEDED (70-89%)</span>
+        // REVIEW_NEEDED is not a confidence band: pairs land here due to 1:1 destination
+        // contention ("Destination already assigned"), runner-up/alternative-candidate rows,
+        // and ambiguous-margin rows, and can score anywhere from very low up to 100%.
+        // Do NOT restore a percentage range on this badge.
+        return <span className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full text-xs font-semibold">REVIEW NEEDED</span>
       case 'REJECTED':
         return <span className="px-3 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/30 rounded-full text-xs font-semibold">REJECTED</span>
       case 'NO_MATCH':
@@ -240,13 +243,11 @@ export function CandidateCard({ matchItem }) {
         {user && can(user, 'CONFIRM_MATCH') ? (
           <>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <input
-                type="text"
-                placeholder="Reviewer User ID (e.g. op_john)"
-                value={reviewerId}
-                onChange={(e) => setReviewerId(e.target.value)}
-                className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 font-mono"
-              />
+              {/* Attribution comes from the JWT server-side; the client cannot set who
+                  a decision is attributed to, so this is read-only display, not an input. */}
+              <div className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-400 font-mono">
+                Signed in as {user?.username ?? user?.name ?? '—'}
+              </div>
               <input
                 type="text"
                 placeholder="Compliance Rationale / Comments (e.g. Verified Tax ID match with bank registry)"
@@ -260,7 +261,7 @@ export function CandidateCard({ matchItem }) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    updateMatchAction(matchItem.id, 'CONFIRM', reviewerId || 'reviewer_op', commentText)
+                    updateMatchAction(matchItem.id, 'CONFIRM', commentText)
                     setCommentText('')
                   }}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium text-xs flex items-center gap-1.5 transition shadow-sm"
@@ -269,7 +270,7 @@ export function CandidateCard({ matchItem }) {
                 </button>
                 <button
                   onClick={() => {
-                    updateMatchAction(matchItem.id, 'REJECT', reviewerId || 'reviewer_op', commentText)
+                    updateMatchAction(matchItem.id, 'REJECT', commentText)
                     setCommentText('')
                   }}
                   className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"

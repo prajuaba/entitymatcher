@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { Sliders, Plus, Trash2, CheckSquare, Square, Layers, Link2, Info } from 'lucide-react'
 
-export function FieldMapper({ availableSourceCols = [], availableDestCols = [], onMappingSaved }) {
+export function FieldMapper({ availableSourceCols = [], availableDestCols = [], onMappingSaved, onMappingChange }) {
   const { config, updateConfig } = useMatcherStore()
 
   // Default detected columns if none provided
@@ -14,8 +14,10 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
     name_fields_dest: ['customer_name'],
     ref_id_src: 'reference_id',
     ref_id_dest: 'customer_id',
-    date_field_src: 'transaction_date',
-    date_field_dest: 'transaction_date',
+    date_field_src: '',
+    date_field_dest: '',
+    date_calendar_src: 'AUTO',
+    date_calendar_dest: 'AUTO',
     secondary_fields: [],
   })
 
@@ -24,6 +26,14 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
       setMapping(config.column_mapping)
     }
   }, [config.column_mapping])
+
+  // Publish every edit upward so ConfigPanel's "Save Configuration" writes the
+  // mapping the user is actually looking at, not the stale one it fetched.
+  // Intentionally keyed on `mapping` alone: onMappingChange is an inline arrow
+  // in the parent and would re-fire this effect on every render.
+  useEffect(() => {
+    if (onMappingChange) onMappingChange(mapping)
+  }, [mapping])
 
   const toggleSrcNameField = (col) => {
     setMapping((prev) => {
@@ -87,9 +97,25 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
     })
   }
 
+  // A <select> whose value is absent from its options renders the FIRST option,
+  // so an unset mapping silently displays a column that was never chosen. Always
+  // offer an explicit empty option, and keep a saved-but-missing column visible
+  // rather than letting it be replaced by an unrelated one.
+  const columnOptions = (cols, selected, placeholder) => {
+    const opts = [<option key="__none__" value="">{placeholder}</option>]
+    for (const col of cols) {
+      opts.push(<option key={col} value={col}>{col}</option>)
+    }
+    if (selected && !cols.includes(selected)) {
+      opts.push(<option key={`__missing__${selected}`} value={selected}>{`${selected} (not in current columns)`}</option>)
+    }
+    return opts
+  }
+
   const handleSave = async () => {
-    const updatedCfg = { ...config, column_mapping: mapping }
-    await updateConfig(updatedCfg)
+    // Send only column_mapping: the backend merges per-field, so scoping the
+    // write keeps this panel from overwriting settings it does not own.
+    await updateConfig({ column_mapping: mapping })
     if (onMappingSaved) onMappingSaved(mapping)
   }
 
@@ -178,9 +204,7 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, ref_id_src: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {srcCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(srcCols, mapping.ref_id_src, '— select a column —')}
           </select>
         </div>
 
@@ -191,9 +215,7 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, ref_id_dest: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {destCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(destCols, mapping.ref_id_dest, '— select a column —')}
           </select>
         </div>
 
@@ -204,10 +226,22 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, date_field_src: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {srcCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(srcCols, mapping.date_field_src, '— none (no date column) —')}
           </select>
+          <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
+          <div className="mt-2">
+            <label className="text-xs font-medium text-slate-300 block mb-1">Calendar</label>
+            <select
+              value={mapping.date_calendar_src || 'AUTO'}
+              onChange={(e) => setMapping({ ...mapping, date_calendar_src: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
+            >
+              <option value="AUTO">Auto-detect</option>
+              <option value="CE">Gregorian (CE)</option>
+              <option value="BE">Thai Buddhist (BE)</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">Controls how a 2-digit year is read: 68 = 2068 (CE) or 2568 BE = 2025.</p>
+          </div>
         </div>
 
         <div>
@@ -217,10 +251,22 @@ export function FieldMapper({ availableSourceCols = [], availableDestCols = [], 
             onChange={(e) => setMapping({ ...mapping, date_field_dest: e.target.value })}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
           >
-            {destCols.map((col) => (
-              <option key={col} value={col}>{col}</option>
-            ))}
+            {columnOptions(destCols, mapping.date_field_dest, '— none (no date column) —')}
           </select>
+          <p className="text-[11px] text-slate-500 mt-1">Leave as none if your data has no date; scoring then uses the name alone.</p>
+          <div className="mt-2">
+            <label className="text-xs font-medium text-slate-300 block mb-1">Calendar</label>
+            <select
+              value={mapping.date_calendar_dest || 'AUTO'}
+              onChange={(e) => setMapping({ ...mapping, date_calendar_dest: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200"
+            >
+              <option value="AUTO">Auto-detect</option>
+              <option value="CE">Gregorian (CE)</option>
+              <option value="BE">Thai Buddhist (BE)</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">Controls how a 2-digit year is read: 68 = 2068 (CE) or 2568 BE = 2025.</p>
+          </div>
         </div>
       </div>
 

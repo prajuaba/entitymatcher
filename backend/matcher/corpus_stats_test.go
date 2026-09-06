@@ -43,14 +43,14 @@ func TestCorpusStats_FrequentTokenHasLowWeight(t *testing.T) {
 	// 70 source records contain 'ขนส่ง'
 	for i := 0; i < 70; i++ {
 		sources = append(sources, SourceRecord{
-			ID: "src" + string(rune(i)),
+			ID:             "src" + string(rune(i)),
 			NormalizedName: Normalize("บริษัทขนส่ง จำกัด"),
 		})
 	}
 	// 30 source records without 'ขนส่ง'
 	for i := 70; i < 100; i++ {
 		sources = append(sources, SourceRecord{
-			ID: "src" + string(rune(i)),
+			ID:             "src" + string(rune(i)),
 			NormalizedName: Normalize("บริษัท logistics"),
 		})
 	}
@@ -58,14 +58,14 @@ func TestCorpusStats_FrequentTokenHasLowWeight(t *testing.T) {
 	// 10 dest records contain 'ขนส่ง'
 	for i := 0; i < 10; i++ {
 		dests = append(dests, DestinationRecord{
-			ID: "dst" + string(rune(i)),
+			ID:             "dst" + string(rune(i)),
 			NormalizedName: Normalize("ขนส่ง กรุงเทพ"),
 		})
 	}
 	// 10 dest records without 'ขนส่ง'
 	for i := 10; i < 20; i++ {
 		dests = append(dests, DestinationRecord{
-			ID: "dst" + string(rune(i)),
+			ID:             "dst" + string(rune(i)),
 			NormalizedName: Normalize("logistics thailand"),
 		})
 	}
@@ -104,11 +104,11 @@ func TestDistinctiveTokenScore_FrequentVsRareToken(t *testing.T) {
 	// 70 records with 'ขนส่ง'
 	for i := 0; i < 70; i++ {
 		sources = append(sources, SourceRecord{
-			ID: "src" + string(rune(i)),
+			ID:             "src" + string(rune(i)),
 			NormalizedName: Normalize("บริษัทขนส่ง"),
 		})
 		dests = append(dests, DestinationRecord{
-			ID: "dst" + string(rune(i)),
+			ID:             "dst" + string(rune(i)),
 			NormalizedName: Normalize("บริษัทขนส่ง"),
 		})
 	}
@@ -116,11 +116,11 @@ func TestDistinctiveTokenScore_FrequentVsRareToken(t *testing.T) {
 	// 2 records with 'สยาม'
 	for i := 70; i < 72; i++ {
 		sources = append(sources, SourceRecord{
-			ID: "src" + string(rune(i)),
+			ID:             "src" + string(rune(i)),
 			NormalizedName: Normalize("สยาม"),
 		})
 		dests = append(dests, DestinationRecord{
-			ID: "dst" + string(rune(i)),
+			ID:             "dst" + string(rune(i)),
 			NormalizedName: Normalize("สยาม"),
 		})
 	}
@@ -131,7 +131,7 @@ func TestDistinctiveTokenScore_FrequentVsRareToken(t *testing.T) {
 	}
 
 	// Key assertion: rare token should have higher weight than frequent token
-	weightFrequent := corpus.Weight("ขนส่ง")  // df=70, should be low
+	weightFrequent := corpus.Weight("ขนส่ง") // df=70, should be low
 	weightRare := corpus.Weight("สยาม")      // df=2, should be high
 
 	if weightRare <= weightFrequent {
@@ -142,8 +142,8 @@ func TestDistinctiveTokenScore_FrequentVsRareToken(t *testing.T) {
 	// If two names match ONLY on 'ขนส่ง', the weighted match is low
 	// If two names match ONLY on 'สยาม', the weighted match is high
 	// This is the core improvement: IDF weighting makes rare matches more valuable
-	frequentMatchScore := 1.0 * weightFrequent / 1.0  // 1 match on 'ขนส่ง'
-	rareMatchScore := 1.0 * weightRare / 1.0          // 1 match on 'สยาม'
+	frequentMatchScore := 1.0 * weightFrequent / 1.0 // 1 match on 'ขนส่ง'
+	rareMatchScore := 1.0 * weightRare / 1.0         // 1 match on 'สยาม'
 
 	if rareMatchScore <= frequentMatchScore {
 		t.Errorf("match on rare token (%f) should score higher than match on frequent token (%f)",

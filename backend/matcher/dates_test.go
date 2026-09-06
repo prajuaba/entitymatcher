@@ -102,6 +102,96 @@ func TestParseFlexibleDate(t *testing.T) {
 			expected: time.Time{},
 			wantOk:   false,
 		},
+		{
+			name:     "Thai DD/MM/YY: year 00 pivots to 2000, not rejected as year 0",
+			input:    "15/03/00",
+			expected: time.Date(2000, 3, 15, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "null placeholder 00/00/00 stays unparseable",
+			input:    "00/00/00",
+			expected: time.Time{},
+			wantOk:   false,
+		},
+		{
+			name:     "Thai DD/MM/YY: 25/10/24 pivots to 2024",
+			input:    "25/10/24",
+			expected: time.Date(2024, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "Thai DD/MM/YY: 04/10/24 pivots to 2024",
+			input:    "04/10/24",
+			expected: time.Date(2024, 10, 4, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "Thai DD/MM/YY: 15/01/26 pivots to 2026",
+			input:    "15/01/26",
+			expected: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "Thai DD/MM/YY: 23/01/26 pivots to 2026",
+			input:    "23/01/26",
+			expected: time.Date(2026, 1, 23, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "2-digit year pivot: yy=99 goes to 1900s",
+			input:    "01/02/99",
+			expected: time.Date(1999, 2, 1, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "2-digit year pivot boundary: yy=70 goes to 1970",
+			input:    "01/02/70",
+			expected: time.Date(1970, 2, 1, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "2-digit year pivot boundary: yy=69 goes to 2069",
+			input:    "01/02/69",
+			expected: time.Date(2069, 2, 1, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "4-digit year is never pivoted",
+			input:    "25/10/2024",
+			expected: time.Date(2024, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "direct YYYY-MM-DD layout unaffected by pivot logic",
+			input:    "2024-10-25",
+			expected: time.Date(2024, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "day-first date with seconds and time is stripped",
+			input:    "16/08/2026 11:00:00",
+			expected: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "day-first date with HH:MM time is stripped",
+			input:    "16/08/2026 11:00",
+			expected: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "day-first date without time is unchanged",
+			input:    "16/08/2026",
+			expected: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "ISO date with fractional-second time is unchanged, keeps its time",
+			input:    "2026-08-16 11:00:00.000",
+			expected: time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,5 +204,86 @@ func TestParseFlexibleDate(t *testing.T) {
 				t.Errorf("ParseFlexibleDate(%q) = %v, want %v", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestParseFlexibleDateInCalendar(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		calendar string
+		expected time.Time
+		wantOk   bool
+	}{
+		{
+			name:     "BE calendar with yy=68",
+			input:    "25/10/68",
+			calendar: "BE",
+			expected: time.Date(2025, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "BE calendar with yyyy=2568",
+			input:    "25/10/2568",
+			calendar: "BE",
+			expected: time.Date(2025, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "CE calendar with yy=68",
+			input:    "25/10/68",
+			calendar: "CE",
+			expected: time.Date(2068, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "CE calendar with yy=25",
+			input:    "25/10/25",
+			calendar: "CE",
+			expected: time.Date(2025, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "AUTO calendar with yy=68",
+			input:    "25/10/68",
+			calendar: "AUTO",
+			expected: time.Date(2068, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "AUTO calendar with yyyy=2568",
+			input:    "25/10/2568",
+			calendar: "AUTO",
+			expected: time.Date(2025, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+		{
+			name:     "BE calendar with Thai digits",
+			input:    "๒๕/๑๐/๒๕๖๘",
+			calendar: "BE",
+			expected: time.Date(2025, 10, 25, 0, 0, 0, 0, time.UTC),
+			wantOk:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ParseFlexibleDateInCalendar(tt.input, tt.calendar)
+			if ok != tt.wantOk {
+				t.Errorf("ParseFlexibleDateInCalendar(%q, %q) ok = %v, want %v", tt.input, tt.calendar, ok, tt.wantOk)
+			}
+			if ok && !got.Equal(tt.expected) {
+				t.Errorf("ParseFlexibleDateInCalendar(%q, %q) = %v, want %v", tt.input, tt.calendar, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCalculateDateScoreSameCalendarDay(t *testing.T) {
+	srcDate := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	destDate := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
+	got := CalculateDateScore(srcDate, destDate, 30)
+	if got != 1.0 {
+		t.Errorf("CalculateDateScore(%v, %v, 30) = %v, want 1.0", srcDate, destDate, got)
 	}
 }

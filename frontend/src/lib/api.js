@@ -34,3 +34,25 @@ export function downloadBlob(blob, filename) {
 export function getAccessToken() {
   return localStorage.getItem("entity_matcher_token");
 }
+
+// The Go backend reports errors with http.Error, which writes a plain-text body.
+// Parsing that as JSON throws a SyntaxError that masks the real message, so read
+// the body as text first and only then try to interpret it as JSON.
+export async function readErrorMessage(response, fallback = "Request failed") {
+  let body = "";
+  try {
+    body = await response.text();
+  } catch {
+    return `${fallback} (HTTP ${response.status})`;
+  }
+
+  const trimmed = body.trim();
+  if (!trimmed) return `${fallback} (HTTP ${response.status})`;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed.message || parsed.error || trimmed;
+  } catch {
+    return trimmed;
+  }
+}

@@ -3,6 +3,7 @@ package matcher
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // RomanizeThai converts Thai text to its RTGS (Royal Thai General System) romanization.
@@ -149,6 +150,13 @@ func romanizeInitial(initial string) string {
 	case "ห", "ฮ":
 		return "h"
 
+	// ฤ/ฦ are vowel-consonants: RTGS romanizes them as rue/lue. Without these
+	// they fall to default, which is what exposed the recursion bug above.
+	case "ฤ":
+		return "rue"
+	case "ฦ":
+		return "lue"
+
 	// อ-class (glottal stop, handled in romanizeSyllable)
 	case "อ":
 		return ""
@@ -156,12 +164,16 @@ func romanizeInitial(initial string) string {
 	// If initial is a cluster, recursively handle it
 	// (clusters should already be in the initial position from segmenter)
 	default:
-		// Try to handle clusters by mapping component consonants
-		if len(initial) > 1 {
+		// Try to handle clusters by mapping component consonants.
+		//
+		// This MUST count runes, not bytes: a Thai consonant is 3 bytes in UTF-8,
+		// so a byte-length check treats a single unmapped character (ฤ, ฦ) as a
+		// cluster, decodes it to one rune, and recurses on the identical string
+		// until the stack is exhausted and the process dies.
+		if utf8.RuneCountInString(initial) > 1 {
 			// For clusters like "กร", map each component
-			runes := []rune(initial)
 			var result string
-			for _, r := range runes {
+			for _, r := range initial {
 				result += romanizeInitial(string(r))
 			}
 			return result
@@ -264,12 +276,55 @@ func romanizeFinal(final string) string {
 	}
 }
 
+type phoneticEquivalence struct{ from, to string }
+
+// phoneticEquivalence is one spelling-only fold applied when COMPARING names.
+//
+// These folds unify spellings that RTGS romanizes differently onto a single comparison form.
+// RTGS writes จ as "ch" and ว as "w"; English conventionally writes them "j" and "v".
+// Example: ใจดี -> RTGS "chaidi", commonly written "Jaidee"; วิชัย -> RTGS "wichai",
+// commonly written "Vichai".
+//
+// SELECTION RULE: Fold only a Latin letter that RTGS never emits in its own output alphabet.
+// RTGS's output alphabet is:
+//
+//	a, ae, ai, am, b, ch, d, e, f, h, i, ia, k, kh, l, m, n, ng, o, p, ph, r, s, t, th, u, ua, ue, uea, w, y
+//
+// "j" and "v" never appear in that alphabet, so folding them only rewrites the English side
+// and destroys no information.
+//
+// REJECTED FOLDS (with measured benchmark effect):
+//   - g->k: rejected because "g" occurs in RTGS only inside the digraph "ng", so the fold corrupts it.
+//     Example: "wongpool" would become "wonkpool". Measured effect on the benchmark: none
+//     (true-positive count unchanged).
+//   - t->th and p->ph: rejected because both "t" and "p" are emitted alone AND inside the digraphs
+//     "th"/"ph" in RTGS output, so folding them corrupts the RTGS side itself (example:
+//     "thongdi" would become "thhongdi") and also merges the Thai consonant classes ต/ท and ป/พ,
+//     which Thai contrasts phonemically. Note that each of these two folds measured +1 true positive
+//     on the benchmark with no precision loss when tried, but the benchmark contains no pair that would
+//     expose the resulting merged-contrast error, so that apparent gain is fitting the test set,
+//     not a genuine accuracy improvement, which is why they were not added.
+//
+// This fold list is used for a COMPARISON key only. RomanizeThai and RomanizeThaiTokens must keep
+// emitting RTGS-correct output (this guarantee is already stated in a nearby comment).
+//
+// Ordered, not a map, so a multi-entry fold is deterministic.
+// Deliberately minimal. Each additional fold merges two sounds that Thai distinguishes,
+// so it buys recall at precision's expense and must be justified by measurement, not by
+// symmetry with this entry.
+var phoneticEquivalents = []phoneticEquivalence{
+	{from: "j", to: "ch"},
+	{from: "v", to: "w"},
+}
+
 // PhoneticSkeleton reduces a romanized or Latin string to a comparable consonant skeleton.
 // Identical reduction for BOTH scripts: lowercase, keep digraphs as single units,
 // drop vowels except a leading one.
 //
 // HAZARD: Do NOT map Latin "ph" to "f". RTGS uses ph for aspirated /p/ (พ);
 // treating it as English /f/ would destroy the alignment this exists to create.
+//
+// Latin "j" folds to "ch" via phoneticEquivalents so an English spelling aligns with the RTGS one.
 func PhoneticSkeleton(s string) string {
 	if s == "" {
 		return ""
@@ -311,7 +366,14 @@ func PhoneticSkeleton(s string) string {
 
 		// Handle consonants and other characters
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			result = append(result, string(r))
+			c := string(r)
+			for _, eq := range phoneticEquivalents {
+				if c == eq.from {
+					c = eq.to
+					break
+				}
+			}
+			result = append(result, c)
 			leadingVowel = false
 		}
 
@@ -319,6 +381,24 @@ func PhoneticSkeleton(s string) string {
 	}
 
 	return strings.Join(result, "")
+}
+
+// PhoneticComparisonForm folds spelling-only differences in an already-romanized
+// string so two conventions for the same sound compare equal. Unlike
+// PhoneticSkeleton it keeps vowels, so it is usable where the vowel-bearing form
+// is what carries the discriminating information.
+//
+// Comparison only -- callers must not store or display the result as
+// romanization, which stays RTGS-correct.
+func PhoneticComparisonForm(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = strings.ToLower(s)
+	for _, eq := range phoneticEquivalents {
+		s = strings.ReplaceAll(s, eq.from, eq.to)
+	}
+	return s
 }
 
 // RomanizeThaiTokens romanizes each token independently, preserving vowels (unlike

@@ -1,10 +1,65 @@
 package matcher
 
 import (
+	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 )
+
+// partyCache memoises Normalize per party string. Scoring visits the same
+// source and destination names across many candidate pairs, so without this the
+// multi-party path would re-normalise the same strings hundreds of thousands of
+// times.
+var partyCache sync.Map // string -> CleanName
+
+func normalizedPartyCached(s string) CleanName {
+	if v, ok := partyCache.Load(s); ok {
+		return v.(CleanName)
+	}
+	n := Normalize(s)
+	partyCache.Store(s, n)
+	return n
+}
+
+// defaultDistinctiveOverlapMinWeight is the corpus-IDF floor at which a shared token
+// counts as evidence of identity rather than shared boilerplate. Derived from
+// the data, not a fixed word list, so it adapts to whatever vocabulary a corpus
+// happens to overuse.
+// It is the fallback used when Config leaves the tuning value at zero.
+const defaultDistinctiveOverlapMinWeight = 0.30
+
+// defaultNoDistinctiveOverlapCap bounds a pair that agrees only on generic words. It
+// sits below the default auto-match threshold (0.90) and inside the review band,
+// so such a pair is surfaced for a human rather than silently accepted or
+// silently discarded.
+// It is the fallback used when Config leaves the tuning value at zero.
+const defaultNoDistinctiveOverlapCap = 0.85
+
+// ScoreTuning carries optional numeric tuning. A zero field means "use the
+// package default", so callers that do not care can pass the zero value.
+type ScoreTuning struct {
+	// NoDistinctiveOverlapCap bounds a pair that agrees only on generic words.
+	NoDistinctiveOverlapCap float64
+	// DistinctiveOverlapMinWeight is the corpus-IDF floor at which a shared
+	// token counts as evidence of identity.
+	DistinctiveOverlapMinWeight float64
+}
+
+func (t ScoreTuning) capOrDefault() float64 {
+	if t.NoDistinctiveOverlapCap > 0 {
+		return t.NoDistinctiveOverlapCap
+	}
+	return defaultNoDistinctiveOverlapCap
+}
+
+func (t ScoreTuning) minWeightOrDefault() float64 {
+	if t.DistinctiveOverlapMinWeight > 0 {
+		return t.DistinctiveOverlapMinWeight
+	}
+	return defaultDistinctiveOverlapMinWeight
+}
 
 type MatchWeights struct {
 	NameWeight float64 `json:"name_weight"`
@@ -12,14 +67,14 @@ type MatchWeights struct {
 }
 
 type AlgorithmToggles struct {
-	UseJaroWinkler     bool `json:"use_jaro_winkler"`
-	UseLevenshtein     bool `json:"use_levenshtein"`
-	UseTokenSort       bool `json:"use_token_sort"`
-	UsePhonetic        bool `json:"use_phonetic"`
-	UseTrigram         bool `json:"use_trigram"`
-	UseThaiPhonetic    bool `json:"use_thai_phonetic"`
-	UseCorpusIDF       bool `json:"use_corpus_idf"`
-	UseRomanizedMatch  bool `json:"use_romanized_match"`
+	UseJaroWinkler    bool `json:"use_jaro_winkler"`
+	UseLevenshtein    bool `json:"use_levenshtein"`
+	UseTokenSort      bool `json:"use_token_sort"`
+	UsePhonetic       bool `json:"use_phonetic"`
+	UseTrigram        bool `json:"use_trigram"`
+	UseThaiPhonetic   bool `json:"use_thai_phonetic"`
+	UseCorpusIDF      bool `json:"use_corpus_idf"`
+	UseRomanizedMatch bool `json:"use_romanized_match"`
 }
 
 var DefaultWeights = MatchWeights{
@@ -192,11 +247,28 @@ func extractTrigrams(s string) []string {
 }
 
 // CalculateDateScore uses exponential decay for date proximity scoring.
+//
+// NOTE: it returns 1.0 when either date is zero. That is deliberately permissive
+// for callers that do not distinguish an absent date from a close one;
+// CalculateCompositeScoreWithCorpus checks IsZero itself and drops the date term
+// entirely rather than scoring an absent date as a perfect match.
+//
+// The comparison is calendar-day based: both dates are truncated to UTC midnight
+// before computing the difference, so that two timestamps on the same UTC calendar
+// day will score exactly 1.0.
 func CalculateDateScore(srcDate, destDate time.Time, maxToleranceDays int) float64 {
 	if srcDate.IsZero() || destDate.IsZero() {
 		return 1.0
 	}
-	diffDays := math.Abs(srcDate.Sub(destDate).Hours() / 24)
+
+	// Truncate both dates to UTC midnight
+	srcYear, srcMonth, srcDay := srcDate.UTC().Date()
+	destYear, destMonth, destDay := destDate.UTC().Date()
+
+	truncatedSrc := time.Date(srcYear, srcMonth, srcDay, 0, 0, 0, 0, time.UTC)
+	truncatedDest := time.Date(destYear, destMonth, destDay, 0, 0, 0, 0, time.UTC)
+
+	diffDays := math.Abs(truncatedSrc.Sub(truncatedDest).Hours() / 24)
 
 	if maxToleranceDays > 0 && diffDays > float64(maxToleranceDays) {
 		return 0.0
@@ -274,6 +346,42 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 	return matched / total, bilingualMatch
 }
 
+// sharesDistinctiveToken reports whether two names agree on at least one token
+// the corpus considers distinctive.
+//
+// It returns true whenever the question cannot be answered fairly: if either
+// side carries no distinctive token at all, there is nothing to require, and
+// blocking on that would punish names built entirely from common words.
+func sharesDistinctiveToken(a, b CleanName, corpus *CorpusStats, minWeight float64) bool {
+	if corpus == nil {
+		return true
+	}
+	if a.Cleaned == b.Cleaned {
+		return true // identical after normalisation; nothing to doubt
+	}
+
+	aDistinctive := make(map[string]bool)
+	for _, t := range a.Tokens {
+		if corpus.Weight(t) >= minWeight {
+			aDistinctive[t] = true
+		}
+	}
+	bHasDistinctive := false
+	for _, t := range b.Tokens {
+		if corpus.Weight(t) >= minWeight {
+			bHasDistinctive = true
+			if aDistinctive[t] {
+				return true
+			}
+		}
+	}
+	// Neither side can be judged on distinctiveness: do not block.
+	if len(aDistinctive) == 0 || !bHasDistinctive {
+		return true
+	}
+	return false
+}
+
 // CrossScriptPartsScore compares two token sequences ACROSS SCRIPTS by aligning tokens
 // position-by-position (e.g. given-name-to-given-name, surname-to-surname) and taking the
 // WEAKEST per-part Jaro-Winkler similarity of the FULL vowel-bearing RTGS romanization
@@ -294,6 +402,11 @@ func DistinctiveTokenScore(srcName, destName CleanName, corpus *CorpusStats, use
 // can be trusted, so MIN (not an average that a single strong part could inflate) is the honest
 // aggregation here.
 //
+// Each part is folded through PhoneticComparisonForm before comparison, so an English "j" spelling
+// aligns with the RTGS "ch" one. The romanization itself (RomanizeThai / RomanizeThaiTokens
+// output) is unchanged by this -- the fold only affects the comparison, never what gets stored or
+// displayed as romanization.
+//
 // Falls back to comparing the joined whole strings if token counts don't align (can't pair parts
 // 1:1), which happens e.g. when a Thai single-token corporate name matches a two-word Latin name.
 func CrossScriptPartsScore(srcTokens, destTokens []string) float64 {
@@ -305,12 +418,15 @@ func CrossScriptPartsScore(srcTokens, destTokens []string) float64 {
 	romDest := RomanizeThaiTokens(destTokens)
 
 	if len(romSrc) != len(romDest) {
-		return JaroWinkler(strings.Join(romSrc, " "), strings.Join(romDest, " "))
+		return JaroWinkler(
+			PhoneticComparisonForm(strings.Join(romSrc, " ")),
+			PhoneticComparisonForm(strings.Join(romDest, " ")),
+		)
 	}
 
 	minScore := 1.0
 	for i := range romSrc {
-		s := JaroWinkler(romSrc[i], romDest[i])
+		s := JaroWinkler(PhoneticComparisonForm(romSrc[i]), PhoneticComparisonForm(romDest[i]))
 		if s < minScore {
 			minScore = s
 		}
@@ -346,28 +462,80 @@ func CheckNumberMismatch(srcName, destName CleanName) bool {
 
 // ScoreResult details metrics generated for candidate pair.
 type ScoreResult struct {
-	TotalScore     float64  `json:"total_score"`
-	NameScore      float64  `json:"name_score"`
-	DateScore      float64  `json:"date_score"`
-	JWScore        float64  `json:"jw_score"`
-	LevScore       float64  `json:"lev_score"`
-	TokenScore     float64  `json:"token_score"`
-	TrigramScore   float64  `json:"trigram_score"`
-	RomanizedScore float64  `json:"romanized_score"`
-	MatchReasons   []string `json:"match_reasons"`
+	TotalScore     float64 `json:"total_score"`
+	NameScore      float64 `json:"name_score"`
+	DateScore      float64 `json:"date_score"`
+	JWScore        float64 `json:"jw_score"`
+	LevScore       float64 `json:"lev_score"`
+	TokenScore     float64 `json:"token_score"`
+	TrigramScore   float64 `json:"trigram_score"`
+	RomanizedScore float64 `json:"romanized_score"`
+	// CrossScript records that the pair spans scripts (one side Thai, one side Latin);
+	// the decision layer uses it to pick the auto-match threshold.
+	CrossScript  bool     `json:"cross_script"`
+	MatchReasons []string `json:"match_reasons"`
 }
 
-// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// CalculateCompositeScoreWithCorpusTuned calculates name and date metrics with optional corpus IDF weighting.
 // If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
 // If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
-func CalculateCompositeScoreWithCorpus(
+func CalculateCompositeScoreWithCorpusTuned(
 	srcName, destName CleanName,
 	srcDate, destDate time.Time,
 	weights MatchWeights,
 	algos AlgorithmToggles,
 	dateTolerance int,
 	corpus *CorpusStats,
+	tuning ScoreTuning,
 ) ScoreResult {
+	// A name field may carry several parties (a former name, or co-borrowers).
+	// Score every source party against every destination party and keep the best
+	// pairing: any party matching is a real link. Single-party names fall through
+	// to the normal path below, so the common case is untouched.
+	srcParties := SplitParties(srcName.Raw)
+	destParties := SplitParties(destName.Raw)
+	if len(srcParties) > 1 || len(destParties) > 1 {
+		best := ScoreResult{}
+		bestSrc, bestDest := "", ""
+		found := false
+		for _, sp := range srcParties {
+			for _, dp := range destParties {
+				sub := CalculateCompositeScoreWithCorpusTuned(
+					normalizedPartyCached(sp), normalizedPartyCached(dp),
+					srcDate, destDate, weights, algos, dateTolerance, corpus, tuning)
+				if !found || sub.TotalScore > best.TotalScore {
+					best, bestSrc, bestDest, found = sub, sp, dp, true
+				}
+			}
+		}
+		if found {
+			// Branch and reference numbers live in the ORIGINAL strings. Splitting can
+			// move a differing number into a party that is never the winning pairing,
+			// which let "(สาขาที่ 1)" and "(สาขาที่ 99)" score 1.0. Re-apply the
+			// whole-string mismatch penalty so splitting can never launder a genuine
+			// numeric difference.
+			if CheckNumberMismatch(srcName, destName) {
+				best.NameScore = math.Round(best.NameScore*0.50*10000) / 10000
+				if !srcDate.IsZero() && !destDate.IsZero() {
+					best.TotalScore = (best.NameScore * weights.NameWeight) + (best.DateScore * weights.DateWeight)
+				} else {
+					best.TotalScore = best.NameScore
+				}
+				best.TotalScore = math.Round(best.TotalScore*10000) / 10000
+				best.MatchReasons = append(best.MatchReasons, "Branch / numerical identifier mismatch penalty (-50%)")
+			}
+			if !best.CrossScript && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus, tuning.minWeightOrDefault()) {
+				if best.TotalScore > tuning.capOrDefault() {
+					best.TotalScore = tuning.capOrDefault()
+					best.MatchReasons = append(best.MatchReasons, "No distinctive token in common; capped for review")
+				}
+			}
+			best.MatchReasons = append(best.MatchReasons,
+				fmt.Sprintf("Best of %dx%d parties: %q matched %q", len(srcParties), len(destParties), bestSrc, bestDest))
+			return best
+		}
+	}
+
 	var scores []float64
 	var jwScore, levScore, tokenScore, trigramScore, romanizedScore float64
 	var crossScriptGate bool
@@ -535,18 +703,42 @@ func CalculateCompositeScoreWithCorpus(
 		reasons = append(reasons, "Branch / numerical identifier mismatch penalty (-50%)")
 	}
 
-	// Compute date score
-	dateScore := CalculateDateScore(srcDate, destDate, dateTolerance)
-	if dateScore >= 0.95 {
-		reasons = append(reasons, "Exact or 1-day transaction date proximity")
-	} else if dateScore >= 0.70 {
-		reasons = append(reasons, "Transaction date within close tolerance window")
-	} else if dateScore == 0.0 {
-		reasons = append(reasons, "Transaction date exceeds tolerance delta")
+	// A pair is only date-comparable when BOTH sides carry a real date. Absent
+	// dates used to score 1.0 and still draw their full weight, handing every
+	// pair a free DateWeight of confidence for a comparison that never ran.
+	// Instead, drop the date term and let the name carry the whole score, so
+	// confidence reflects only what was actually compared.
+	dateComparable := !srcDate.IsZero() && !destDate.IsZero()
+
+	var dateScore, totalScore float64
+	if dateComparable {
+		dateScore = CalculateDateScore(srcDate, destDate, dateTolerance)
+		if dateScore >= 0.95 {
+			reasons = append(reasons, "Exact or 1-day transaction date proximity")
+		} else if dateScore >= 0.70 {
+			reasons = append(reasons, "Transaction date within close tolerance window")
+		} else if dateScore == 0.0 {
+			reasons = append(reasons, "Transaction date exceeds tolerance delta")
+		}
+		totalScore = (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
+	} else {
+		// dateScore stays 0 and is reported as such; the reason string is what
+		// distinguishes "no date to compare" from "dates too far apart".
+		reasons = append(reasons, "No comparable transaction date; scored on name similarity alone")
+		totalScore = nameScore
 	}
 
-	// Composite total score
-	totalScore := (nameScore * weights.NameWeight) + (dateScore * weights.DateWeight)
+	// A pair that agrees only on boilerplate is not the same entity: "สาน
+	// ทรานสปอร์ต" and "สุทิน ทรานสปอร์ต" share only the word for "transport".
+	// Cap it into the review band instead of letting generic overlap carry it
+	// over the auto-match bar. Cross-script pairs are exempt: a Thai name and
+	// its romanisation share no literal token by construction.
+	if !crossScriptGate && algos.UseCorpusIDF && !sharesDistinctiveToken(srcName, destName, corpus, tuning.minWeightOrDefault()) {
+		if totalScore > tuning.capOrDefault() {
+			totalScore = tuning.capOrDefault()
+			reasons = append(reasons, "No distinctive token in common; capped for review")
+		}
+	}
 
 	return ScoreResult{
 		TotalScore:     math.Round(totalScore*10000) / 10000,
@@ -557,8 +749,23 @@ func CalculateCompositeScoreWithCorpus(
 		TokenScore:     math.Round(tokenScore*10000) / 10000,
 		TrigramScore:   math.Round(trigramScore*10000) / 10000,
 		RomanizedScore: math.Round(romanizedScore*10000) / 10000,
+		CrossScript:    crossScriptGate,
 		MatchReasons:   reasons,
 	}
+}
+
+// CalculateCompositeScoreWithCorpus calculates name and date metrics with optional corpus IDF weighting.
+// If corpus is provided and algos.UseCorpusIDF is true, matches are weighted by inverse document frequency.
+// If corpus is nil or UseCorpusIDF is false, falls back to binary distinctive/generic matching.
+func CalculateCompositeScoreWithCorpus(
+	srcName, destName CleanName,
+	srcDate, destDate time.Time,
+	weights MatchWeights,
+	algos AlgorithmToggles,
+	dateTolerance int,
+	corpus *CorpusStats,
+) ScoreResult {
+	return CalculateCompositeScoreWithCorpusTuned(srcName, destName, srcDate, destDate, weights, algos, dateTolerance, corpus, ScoreTuning{})
 }
 
 // CalculateCompositeScore is the backward-compatible version that maintains the original signature.

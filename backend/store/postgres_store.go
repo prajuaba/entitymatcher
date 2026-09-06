@@ -1,10 +1,11 @@
 package store
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -103,21 +104,356 @@ func (s *PostgresStore) UpdateConfig(cfg matcher.Config) {
 		configJSON)
 }
 
-// SaveDataset stores source and destination records for a batch.
-func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) {
-	// For now, we don't persist source/destination records to keep schema minimal.
+// GetConnectorSettings retrieves the stored connector settings. A missing row
+// is normal on a fresh database and yields the zero value.
+func (s *PostgresStore) GetConnectorSettings() ConnectorSettings {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var settingsJSON []byte
+	err := s.pool.QueryRow(ctx,
+		"SELECT settings FROM connector_settings WHERE id = 1").
+		Scan(&settingsJSON)
+	if err != nil {
+		return ConnectorSettings{}
+	}
+
+	var cs ConnectorSettings
+	if err := json.Unmarshal(settingsJSON, &cs); err != nil {
+		return ConnectorSettings{}
+	}
+	return cs
+}
+
+func (s *PostgresStore) UpdateConnectorSettings(cs ConnectorSettings) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	settingsJSON, err := json.Marshal(cs)
+	if err != nil {
+		log.Printf("connector settings: marshal failed: %v", err)
+		return
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO connector_settings (id, settings, updated_at) VALUES (1, $1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = CURRENT_TIMESTAMP`,
+		settingsJSON); err != nil {
+		log.Printf("connector settings: write failed: %v", err)
+	}
+}
+
+// SaveDataset stores source and destination records for a batch, replacing any previously
+// saved dataset for the same batch. Failures are now returned to the caller instead of only logged.
+//
+// Follows the same transactional shape as SaveResultsCtx:
+// ensure the match_jobs row exists for the FK, delete existing rows for the batch, then
+// bulk-insert with CopyFrom.
+func (s *PostgresStore) SaveDataset(batchID string, sources []matcher.SourceRecord, dests []matcher.DestinationRecord) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("save dataset for batch %q: begin transaction: %w", batchID, err)
+	}
+	// This closure keys off the function's named error return, err: every early
+	// "return fmt.Errorf(...)" below assigns that named return automatically, so
+	// this deferred check observes it and rolls back on every error path.
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	// Ensure batch exists in match_jobs (create minimal entry if needed for FK constraint).
+	//
+	// SaveDataset is the only place that knows both total_sources and total_destinations at
+	// once, so it is the authoritative writer for those two columns. UpdateProgress's
+	// matcher.BatchProgress carries TotalSources but has no TotalDestinations field at all, so
+	// it must not (and structurally cannot) own these columns -- see the comment on its Exec
+	// call below. ON CONFLICT DO UPDATE (rather than DO NOTHING) ensures re-uploading a batch
+	// refreshes the counts instead of leaving the first upload's stale values in place.
+	_, err = tx.Exec(ctx,
+		`INSERT INTO match_jobs (batch_id, status, started_at, total_sources, total_destinations)
+		 VALUES ($1, 'IDLE', CURRENT_TIMESTAMP, $2, $3)
+		 ON CONFLICT (batch_id) DO UPDATE SET
+		    total_sources = EXCLUDED.total_sources,
+		    total_destinations = EXCLUDED.total_destinations`,
+		batchID, len(sources), len(dests))
+	if err != nil {
+		return fmt.Errorf("save dataset for batch %q: create match_jobs row: %w", batchID, err)
+	}
+
+	// Delete existing rows for this batch so re-uploading replaces rather than accumulates.
+	_, err = tx.Exec(ctx, "DELETE FROM match_sources WHERE batch_id = $1", batchID)
+	if err != nil {
+		return fmt.Errorf("save dataset for batch %q: delete existing match_sources: %w", batchID, err)
+	}
+	_, err = tx.Exec(ctx, "DELETE FROM match_destinations WHERE batch_id = $1", batchID)
+	if err != nil {
+		return fmt.Errorf("save dataset for batch %q: delete existing match_destinations: %w", batchID, err)
+	}
+
+	if len(sources) > 0 {
+		srcRows := make([][]interface{}, len(sources))
+		for i, src := range sources {
+			attrsJSON, marshalErr := marshalAttributes(src.Attributes)
+			if marshalErr != nil {
+				return fmt.Errorf("save dataset for batch %q: marshal source %q attributes: %w", batchID, src.ID, marshalErr)
+			}
+			srcRows[i] = []interface{}{
+				batchID,
+				src.ID,
+				src.ReferenceID,
+				src.CustomerNameRaw,
+				src.TransactionDate,
+				src.TransactionType,
+				attrsJSON,
+			}
+		}
+
+		var rowCount int64
+		rowCount, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"match_sources"},
+			[]string{
+				"batch_id", "id", "reference_id", "customer_name_raw",
+				"transaction_date", "transaction_type", "attributes",
+			},
+			pgx.CopyFromRows(srcRows),
+		)
+		if err != nil {
+			return fmt.Errorf("save dataset for batch %q: copy match_sources failed: %w", batchID, err)
+		}
+		if rowCount != int64(len(sources)) {
+			return fmt.Errorf("save dataset for batch %q: copy match_sources inserted %d rows, expected %d", batchID, rowCount, len(sources))
+		}
+	}
+
+	if len(dests) > 0 {
+		dstRows := make([][]interface{}, len(dests))
+		for i, dst := range dests {
+			attrsJSON, marshalErr := marshalAttributes(dst.Attributes)
+			if marshalErr != nil {
+				return fmt.Errorf("save dataset for batch %q: marshal destination %q attributes: %w", batchID, dst.ID, marshalErr)
+			}
+			dstRows[i] = []interface{}{
+				batchID,
+				dst.ID,
+				dst.CustomerID,
+				dst.CustomerNameRaw,
+				dst.TransactionDate,
+				attrsJSON,
+			}
+		}
+
+		var rowCount int64
+		rowCount, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"match_destinations"},
+			[]string{
+				"batch_id", "id", "customer_id", "customer_name_raw",
+				"transaction_date", "attributes",
+			},
+			pgx.CopyFromRows(dstRows),
+		)
+		if err != nil {
+			return fmt.Errorf("save dataset for batch %q: copy match_destinations failed: %w", batchID, err)
+		}
+		if rowCount != int64(len(dests)) {
+			return fmt.Errorf("save dataset for batch %q: copy match_destinations inserted %d rows, expected %d", batchID, rowCount, len(dests))
+		}
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("save dataset for batch %q: commit transaction: %w", batchID, err)
+	}
+
+	return nil
+}
+
+// marshalAttributes marshals an attributes map to JSON, storing a nil/empty map as the
+// JSON object "{}" rather than SQL NULL (matching the attributes column's NOT NULL DEFAULT).
+func marshalAttributes(attrs map[string]interface{}) (string, error) {
+	if len(attrs) == 0 {
+		return "{}", nil
+	}
+	b, err := json.Marshal(attrs)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // GetDataset retrieves source and destination records for a batch.
+//
+// Return semantics mirror the in-memory store: the bool is true only when the batch has an
+// entry. An empty dataset (0 sources, 0 destinations) is legal -- e.g. right after
+// SaveDataset is called with empty slices -- so presence can't be inferred from row counts
+// alone. Instead we check match_jobs directly for the batch_id, since SaveDataset always
+// creates/ensures that row before touching match_sources/match_destinations.
+//
+// On query error, log and return nil, nil, false rather than partial/empty-but-valid data,
+// so a read failure never masquerades as a genuinely empty dataset.
 func (s *PostgresStore) GetDataset(batchID string) ([]matcher.SourceRecord, []matcher.DestinationRecord, bool) {
-	return nil, nil, false
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var exists int
+	err := s.pool.QueryRow(ctx, "SELECT 1 FROM match_jobs WHERE batch_id = $1", batchID).Scan(&exists)
+	if err == pgx.ErrNoRows {
+		return nil, nil, false
+	}
+	if err != nil {
+		log.Printf("GetDataset: batch %q: check match_jobs existence: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	srcRows, err := s.pool.Query(ctx,
+		`SELECT id, reference_id, customer_name_raw, transaction_date, transaction_type, attributes
+		 FROM match_sources WHERE batch_id = $1 ORDER BY id`,
+		batchID)
+	if err != nil {
+		log.Printf("GetDataset: batch %q: query match_sources: %v", batchID, err)
+		return nil, nil, false
+	}
+	defer srcRows.Close()
+
+	var sources []matcher.SourceRecord
+	for srcRows.Next() {
+		var rec matcher.SourceRecord
+		var attrsJSON []byte
+		if err := srcRows.Scan(&rec.ID, &rec.ReferenceID, &rec.CustomerNameRaw,
+			&rec.TransactionDate, &rec.TransactionType, &attrsJSON); err != nil {
+			log.Printf("GetDataset: batch %q: scan match_sources row: %v", batchID, err)
+			return nil, nil, false
+		}
+		rec.BatchID = batchID
+		rec.NormalizedName = matcher.Normalize(rec.CustomerNameRaw)
+		if len(attrsJSON) > 0 {
+			if err := json.Unmarshal(attrsJSON, &rec.Attributes); err != nil {
+				log.Printf("GetDataset: batch %q: unmarshal source %q attributes: %v", batchID, rec.ID, err)
+				return nil, nil, false
+			}
+		}
+		sources = append(sources, rec)
+	}
+	if err := srcRows.Err(); err != nil {
+		log.Printf("GetDataset: batch %q: iterate match_sources: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	dstRows, err := s.pool.Query(ctx,
+		`SELECT id, customer_id, customer_name_raw, transaction_date, attributes
+		 FROM match_destinations WHERE batch_id = $1 ORDER BY id`,
+		batchID)
+	if err != nil {
+		log.Printf("GetDataset: batch %q: query match_destinations: %v", batchID, err)
+		return nil, nil, false
+	}
+	defer dstRows.Close()
+
+	var dests []matcher.DestinationRecord
+	for dstRows.Next() {
+		var rec matcher.DestinationRecord
+		var attrsJSON []byte
+		if err := dstRows.Scan(&rec.ID, &rec.CustomerID, &rec.CustomerNameRaw,
+			&rec.TransactionDate, &attrsJSON); err != nil {
+			log.Printf("GetDataset: batch %q: scan match_destinations row: %v", batchID, err)
+			return nil, nil, false
+		}
+		rec.BatchID = batchID
+		rec.NormalizedName = matcher.Normalize(rec.CustomerNameRaw)
+		if len(attrsJSON) > 0 {
+			if err := json.Unmarshal(attrsJSON, &rec.Attributes); err != nil {
+				log.Printf("GetDataset: batch %q: unmarshal destination %q attributes: %v", batchID, rec.ID, err)
+				return nil, nil, false
+			}
+		}
+		dests = append(dests, rec)
+	}
+	if err := dstRows.Err(); err != nil {
+		log.Printf("GetDataset: batch %q: iterate match_destinations: %v", batchID, err)
+		return nil, nil, false
+	}
+
+	return sources, dests, true
+}
+
+// resultsSaveBaseTimeout, resultsSaveTimeoutPerRow and resultsSaveTimeoutCap size the
+// transaction budget used by SaveResultsCtx. A flat 30s budget previously covered the ENTIRE
+// transaction and was blown through by a real 280,049-row batch: production logs measured an
+// average of ~2,222 bytes of combined source_snapshot + destination_snapshot JSON marshaled
+// per row and streamed via CopyFrom inside the transaction, so a fixed deadline fires mid-copy
+// on large batches. That failure tore down the connection with "use of closed network
+// connection" / "incomplete message from client", rolled back the transaction, and persisted
+// zero rows while the job was marked FAILED. The budget below scales with row count instead.
+const (
+	// resultsSaveBaseTimeout is the minimum transaction budget for SaveResultsCtx, even
+	// for a tiny batch, so small requests are never starved by the per-row term below.
+	resultsSaveBaseTimeout = 2 * time.Minute
+
+	// resultsSaveTimeoutPerRow is added to the base budget once per result row. Measured
+	// in production: ~2,222 bytes/row of combined source_snapshot + destination_snapshot
+	// JSON is marshaled and streamed via CopyFrom inside the transaction, so the budget
+	// must scale with row count or large batches hit the same deadline that previously
+	// truncated a 280,049-row CopyFrom mid-stream and rolled back the whole batch.
+	resultsSaveTimeoutPerRow = time.Millisecond
+
+	// resultsSaveTimeoutCap bounds the scaled budget so a pathological row count cannot
+	// hold a transaction (and its locks) open indefinitely.
+	resultsSaveTimeoutCap = 30 * time.Minute
+)
+
+// resultsSaveTimeout returns the transaction time budget for persisting n result rows,
+// scaling linearly from resultsSaveBaseTimeout by resultsSaveTimeoutPerRow per row and
+// capped at resultsSaveTimeoutCap.
+func resultsSaveTimeout(n int) time.Duration {
+	timeout := resultsSaveBaseTimeout + time.Duration(n)*resultsSaveTimeoutPerRow
+	if timeout > resultsSaveTimeoutCap {
+		timeout = resultsSaveTimeoutCap
+	}
+	return timeout
 }
 
 // SaveResultsCtx stores match results for a batch with proper transaction handling.
 // Uses CopyFrom for bulk inserts. DEFECT 1: wraps DELETE + INSERT in ONE transaction.
 // DEFECT 2: returns errors instead of discarding. DEFECT 4: uses CopyFrom + validates row count.
 func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, results []matcher.MatchResultItem) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// The snapshot is deliberately point-in-time evidence of what the reviewer saw, and it
+	// also backs server-side search (GetResultsPage greps source_snapshot/destination_snapshot),
+	// so it is written here at save time from the batch's dataset rather than dropped: the
+	// pipeline no longer embeds Source/Destination on each result item, so result.Source and
+	// result.Destination are nil and cannot be marshaled directly anymore.
+	//
+	// This load is hoisted OUT of the write transaction (and out from under any timeout applied
+	// to it) below: GetDataset applies its own internal timeout, and running it before Begin
+	// means the ~135,000-row dataset read for a large batch no longer eats into the write
+	// transaction's budget while holding the transaction open. As before, a missing dataset is
+	// tolerated -- the third GetDataset return value is ignored and unmatched rows below fall
+	// back to the "null" snapshot string.
+	// Skipped entirely for an empty result set: that path commits without building any
+	// snapshots, so loading the dataset would be a pointless ~135,000-row read. Lookups
+	// on the resulting nil maps are safe.
+	var sourceMap map[string]matcher.SourceRecord
+	var destMap map[string]matcher.DestinationRecord
+	if len(results) > 0 {
+		sources, dests, _ := s.GetDataset(batchID)
+
+		sourceMap = make(map[string]matcher.SourceRecord, len(sources))
+		for _, src := range sources {
+			sourceMap[src.ID] = src
+		}
+
+		destMap = make(map[string]matcher.DestinationRecord, len(dests))
+		for _, dst := range dests {
+			destMap[dst.ID] = dst
+		}
+	}
+
+	// Budget is computed AFTER the dataset load above, so it covers only the transaction
+	// (upsert + delete + CopyFrom + commit) and scales with the number of rows being written --
+	// see resultsSaveTimeout's doc comment for the measured justification.
+	timeout := resultsSaveTimeout(len(results))
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// DEFECT 1: Wrap DELETE + INSERT in explicit transaction
@@ -155,8 +491,26 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 	rows := make([][]interface{}, len(results))
 	for i, result := range results {
 		matchReasons, _ := json.Marshal(result.MatchReasons)
-		srcSnapshot, _ := json.Marshal(result.Source)
-		dstSnapshot, _ := json.Marshal(result.Destination)
+
+		var srcSnapshot string
+		if srcRec, exists := sourceMap[result.SourceID]; exists {
+			srcBytes, _ := json.Marshal(srcRec)
+			srcSnapshot = string(srcBytes)
+		} else {
+			srcSnapshot = "null"
+		}
+
+		var dstSnapshot string
+		if result.DestinationID != "" {
+			if dstRec, exists := destMap[result.DestinationID]; exists {
+				dstBytes, _ := json.Marshal(dstRec)
+				dstSnapshot = string(dstBytes)
+			} else {
+				dstSnapshot = "null"
+			}
+		} else {
+			dstSnapshot = "null"
+		}
 
 		rows[i] = []interface{}{
 			result.BatchID,
@@ -171,8 +525,8 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 			result.ScoreMargin,
 			result.DecisionNote,
 			string(matchReasons),
-			string(srcSnapshot),
-			string(dstSnapshot),
+			srcSnapshot,
+			dstSnapshot,
 			result.CreatedAt,
 		}
 	}
@@ -189,7 +543,7 @@ func (s *PostgresStore) SaveResultsCtx(ctx context.Context, batchID string, resu
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		return fmt.Errorf("copy from failed: %w", err)
+		return fmt.Errorf("copy from failed: batch %q, %d rows: %w", batchID, len(results), err)
 	}
 
 	if rowCount != int64(len(results)) {
@@ -216,11 +570,16 @@ func (s *PostgresStore) GetResults(batchID string) ([]matcher.MatchResultItem, b
 		return nil, false
 	}
 
+	// ORDER BY created_at ASC, id ASC: id is required as a tiebreaker because bulk-inserted
+	// rows frequently share a created_at microsecond, which otherwise makes the order
+	// non-deterministic. ASC (not DESC) is required so this matches the in-memory store,
+	// which returns results in raw insertion order -- both backends must agree on order
+	// for the same underlying data.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		        match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
 		        destination_snapshot, created_at
-		 FROM match_results WHERE batch_id = $1 ORDER BY created_at DESC`,
+		 FROM match_results WHERE batch_id = $1 ORDER BY created_at ASC, id ASC`,
 		batchID)
 	if err != nil {
 		return nil, false
@@ -319,8 +678,40 @@ func (s *PostgresStore) UpdateMatchStatus(batchID, matchID, newStatus string) er
 	return nil
 }
 
+// escapeLikePattern escapes the LIKE/ILIKE metacharacters in s so a caller's
+// search term is matched as literal text, keeping this SQL predicate's
+// semantics identical to the in-memory store's strings.Contains. Without this,
+// e.g. `'Alice Wonderland' ILIKE '%_%'` is TRUE, so a user searching for a
+// literal underscore would match every row instead of only rows containing
+// one. Postgres treats backslash as the default LIKE escape character, so no
+// ESCAPE clause is needed. The backslash replacement MUST happen first, or
+// escaping % and _ afterwards would double-escape the backslashes those
+// replacements just introduced.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
+// resultsSortExprs maps an API-visible sort field to its SQL expression.
+// ORDER BY cannot be parameterized, so only values from this map are ever
+// interpolated into the query -- caller input is used solely as a map key.
+// COALESCE keeps the JSON-extracted text sorts aligned with the in-memory
+// store, where an absent record sorts as the empty string rather than NULL.
+var resultsSortExprs = map[string]string{
+	SortByCreatedAt:   "created_at",
+	SortByConfidence:  "confidence_score",
+	SortByNameScore:   "name_score",
+	SortByDateScore:   "date_score",
+	SortByStatus:      "match_status",
+	SortBySourceName:  "COALESCE(source_snapshot->>'customer_name_raw', '')",
+	SortByReferenceID: "COALESCE(source_snapshot->>'reference_id', '')",
+}
+
 // GetResultsPage retrieves a paginated, filtered set of match results.
-func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, offset int) ([]matcher.MatchResultItem, int, error) {
+func (s *PostgresStore) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, error) {
+	q = q.Normalized()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -330,22 +721,39 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 	argCount := 1
 
 	whereConditions = append(whereConditions, fmt.Sprintf("batch_id = $%d", argCount))
-	args = append(args, batchID)
+	args = append(args, q.BatchID)
 	argCount++
 
-	if status != "" && status != "ALL" {
+	if q.Status != "" && q.Status != "ALL" {
 		whereConditions = append(whereConditions, fmt.Sprintf("match_status = $%d", argCount))
-		args = append(args, status)
+		args = append(args, q.Status)
 		argCount++
 	}
 
-	if search != "" {
-		searchLower := strings.ToLower(search)
+	// Appended to the SAME whereConditions slice that builds both the count query
+	// and the page query below, so the two can never disagree -- a filter applied
+	// to one but not the other is exactly how paging breaks.
+	if q.Rank1Only {
+		whereConditions = append(whereConditions, "rank = 1")
+	}
+
+	if q.Search != "" {
+		// Search is narrowed to the four named keys the HTTP handler and the
+		// in-memory store have always searched (customer_name_raw / reference_id on
+		// the source, customer_name_raw / customer_id on the destination). This
+		// replaces a prior `LOWER(source_snapshot::text) LIKE ...` predicate that
+		// matched against the ENTIRE JSON blob, so it could hit on unrelated
+		// snapshot fields never intended to be searchable. ILIKE makes the match
+		// case-insensitive, so the LOWER() calls are no longer needed either.
+		// The search term is escaped before wrapping: an unescaped %, _ or \ in
+		// the caller's text would otherwise be interpreted as a LIKE pattern
+		// metacharacter rather than literal text (see escapeLikePattern).
+		searchArg := "%" + escapeLikePattern(q.Search) + "%"
 		whereConditions = append(whereConditions,
-			fmt.Sprintf("(LOWER(source_snapshot::text) LIKE $%d OR LOWER(destination_snapshot::text) LIKE $%d)",
-				argCount, argCount+1))
-		args = append(args, "%"+searchLower+"%", "%"+searchLower+"%")
-		argCount += 2
+			fmt.Sprintf("(source_snapshot->>'customer_name_raw' ILIKE $%d OR source_snapshot->>'reference_id' ILIKE $%d OR destination_snapshot->>'customer_name_raw' ILIKE $%d OR destination_snapshot->>'customer_id' ILIKE $%d)",
+				argCount, argCount, argCount, argCount))
+		args = append(args, searchArg)
+		argCount++
 	}
 
 	whereClause := strings.Join(whereConditions, " AND ")
@@ -358,22 +766,33 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 		return nil, 0, fmt.Errorf("count query failed: %w", err)
 	}
 
-	// Get paginated results
-	if limit <= 0 {
-		limit = 20
+	// Get paginated results. sortExpr/sortDir are already validated by
+	// q.Normalized() (SortBy is guaranteed to be a resultsSortExprs key, SortDir
+	// is "asc" or "desc"); the fallback below only guards against this map ever
+	// getting out of sync with the SortBy* constants.
+	sortExpr := resultsSortExprs[q.SortBy]
+	if sortExpr == "" {
+		sortExpr = "created_at"
 	}
-	if offset < 0 {
-		offset = 0
+	sortDir := "ASC"
+	if q.SortDir == "desc" {
+		sortDir = "DESC"
 	}
 
-	args = append(args, limit, offset)
+	// `, id ASC` is a mandatory tiebreaker on every sort, not just the default one:
+	// bulk-inserted rows frequently share a value on any single column (created_at
+	// microsecond, confidence score, status, ...), and without a unique secondary
+	// key Postgres does not guarantee a consistent row order between the queries
+	// fetching different LIMIT/OFFSET pages, which can cause a row to appear on
+	// two pages or on none.
+	args = append(args, q.Limit, q.Offset)
 	query := fmt.Sprintf(`
 		SELECT batch_id, id, source_id, destination_id, confidence_score, name_score, date_score,
 		       match_status, rank, score_margin, decision_note, match_reasons, source_snapshot,
 		       destination_snapshot, created_at
 		FROM match_results WHERE %s
-		ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
-		whereClause, argCount, argCount+1)
+		ORDER BY %s %s, id ASC LIMIT $%d OFFSET $%d`,
+		whereClause, sortExpr, sortDir, argCount, argCount+1)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -396,7 +815,6 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 			continue
 		}
 
-		// Unmarshal snapshots
 		if srcJSON != "" {
 			_ = json.Unmarshal([]byte(srcJSON), &result.Source)
 		}
@@ -413,6 +831,55 @@ func (s *PostgresStore) GetResultsPage(batchID, status, search string, limit, of
 	return results, totalCount, nil
 }
 
+// CountResultsByStatus counts match results by status for a given batch and optional search term.
+func (s *PostgresStore) CountResultsByStatus(batchID, search string) (map[string]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Build WHERE clause
+	var whereConditions []string
+	var args []interface{}
+	argCount := 1
+
+	whereConditions = append(whereConditions, fmt.Sprintf("batch_id = $%d", argCount))
+	args = append(args, batchID)
+	argCount++
+
+	if search != "" {
+		// Escaped for the same reason as in GetResultsPage: an unescaped %, _ or
+		// \ would otherwise be interpreted as a LIKE pattern metacharacter.
+		searchArg := "%" + escapeLikePattern(search) + "%"
+		whereConditions = append(whereConditions,
+			fmt.Sprintf("(source_snapshot->>'customer_name_raw' ILIKE $%d OR source_snapshot->>'reference_id' ILIKE $%d OR destination_snapshot->>'customer_name_raw' ILIKE $%d OR destination_snapshot->>'customer_id' ILIKE $%d)",
+				argCount, argCount, argCount, argCount))
+		args = append(args, searchArg)
+		argCount++
+	}
+
+	whereClause := strings.Join(whereConditions, " AND ")
+
+	query := fmt.Sprintf("SELECT match_status, COUNT(*) FROM match_results WHERE %s GROUP BY match_status", whereClause)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count by status query failed: %w", err)
+	}
+	defer rows.Close()
+
+	statusCounts := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		err := rows.Scan(&status, &count)
+		if err != nil {
+			continue
+		}
+		statusCounts[status] = count
+	}
+
+	return statusCounts, nil
+}
+
 // UpdateProgress updates or creates a batch progress record.
 func (s *PostgresStore) UpdateProgress(p matcher.BatchProgress) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -420,6 +887,11 @@ func (s *PostgresStore) UpdateProgress(p matcher.BatchProgress) {
 
 	configJSON, _ := json.Marshal(p)
 
+	// total_sources and total_destinations are owned by SaveDataset and are deliberately NOT
+	// included in this DO UPDATE SET, because a progress update can legitimately carry a zero
+	// TotalSources value (an early/IDLE update), which would incorrectly zero out a correct
+	// value already written by SaveDataset. total_destinations isn't even present on
+	// matcher.BatchProgress, so it structurally can't be written from here.
 	_, _ = s.pool.Exec(ctx,
 		`INSERT INTO match_jobs (batch_id, status, total_sources, auto_matched, review_needed,
 		                        no_match_count, total_candidate_pairs, elapsed_ms, started_at,
@@ -456,15 +928,27 @@ func (s *PostgresStore) GetProgress(batchID string) (matcher.BatchProgress, bool
 	defer cancel()
 
 	var p matcher.BatchProgress
+	// completed_at is NULL until a run finishes, and a NULL cannot scan into a
+	// non-pointer time.Time. Scanning it directly made this function report "not
+	// found" for every batch that was uploaded-but-never-matched OR currently
+	// RUNNING -- the scan failed and the error was flattened into `false`, so the
+	// caller could not tell a missing batch from a live one.
+	var completedAt *time.Time
 	err := s.pool.QueryRow(ctx,
 		`SELECT batch_id, total_sources, auto_matched, review_needed, no_match_count,
 		        total_candidate_pairs, elapsed_ms, status, started_at, completed_at
 		 FROM match_jobs WHERE batch_id = $1`,
 		batchID).
 		Scan(&p.BatchID, &p.TotalSources, &p.AutoMatched, &p.ReviewNeeded, &p.NoMatchCount,
-			&p.TotalMatches, &p.ElapsedMs, &p.Status, &p.StartedAt, &p.CompletedAt)
+			&p.TotalMatches, &p.ElapsedMs, &p.Status, &p.StartedAt, &completedAt)
+	if err != nil {
+		return p, false
+	}
+	if completedAt != nil {
+		p.CompletedAt = *completedAt
+	}
 
-	return p, err == nil
+	return p, true
 }
 
 // RegisterSSEClient registers a new SSE client for progress updates.
@@ -501,6 +985,26 @@ func (s *PostgresStore) ManualLink(batchID, sourceID, destinationID string) (*ma
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Check that both source and destination records exist for this batch
+	var srcExists, dstExists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM match_sources WHERE batch_id = $1 AND id = $2),
+		        EXISTS(SELECT 1 FROM match_destinations WHERE batch_id = $1 AND id = $3)`,
+		batchID, sourceID, destinationID).Scan(&srcExists, &dstExists)
+	if err != nil {
+		return nil, fmt.Errorf("check manual link records exist: %w", err)
+	}
+	// An empty sourceID or destinationID needs no special-case handling here: it simply
+	// matches no row in match_sources/match_destinations (both tables have PRIMARY KEY
+	// (batch_id, id)), so no redundant empty-string check should ever be added.
+	if !srcExists || !dstExists {
+		// This exact, unwrapped error string must match the in-memory store's error message
+		// byte-for-byte: the HTTP handler puts err.Error() directly into the 400 response
+		// body, so an identical message is what makes both store backends behave
+		// identically to an API client.
+		return nil, fmt.Errorf("source or destination record not found")
+	}
+
 	newID := fmt.Sprintf("%s-%s-%s-manual", batchID, sourceID, destinationID)
 	createdAt := time.Now()
 
@@ -508,7 +1012,7 @@ func (s *PostgresStore) ManualLink(batchID, sourceID, destinationID string) (*ma
 	dstSnapshot, _ := json.Marshal(map[string]string{"id": destinationID})
 	reasons, _ := json.Marshal([]string{"Manually linked by user"})
 
-	_, err := s.pool.Exec(ctx,
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO match_results
 		 (batch_id, id, source_id, destination_id, confidence_score, match_status,
 		  match_reasons, source_snapshot, destination_snapshot, created_at)
@@ -591,10 +1095,14 @@ func (s *PostgresStore) GetAuditLogs(batchID, userID, actionFilter string) []Aud
 		whereClause = "WHERE " + strings.Join(whereConditions, " AND ")
 	}
 
+	// ORDER BY timestamp DESC, id DESC: id (the match_audit_logs primary key) is required as
+	// a tiebreaker because multiple audit entries can share a timestamp, which otherwise
+	// makes the returned order non-deterministic. DESC is kept for both columns to preserve
+	// the existing most-recent-first intent.
 	query := fmt.Sprintf(
 		`SELECT id, batch_id, source_id, destination_id, user_id, action, previous_status,
 		        new_status, confidence_score, review_comments, timestamp
-		 FROM match_audit_logs %s ORDER BY timestamp DESC`, whereClause)
+		 FROM match_audit_logs %s ORDER BY timestamp DESC, id DESC`, whereClause)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -615,6 +1123,9 @@ func (s *PostgresStore) GetAuditLogs(batchID, userID, actionFilter string) []Aud
 }
 
 // DeleteBatch deletes a batch and cascades to related records.
+// The match_results, match_sources, and match_destinations tables all have
+// batch_id REFERENCES match_jobs(batch_id) ON DELETE CASCADE, so deleting the match_jobs
+// row here is sufficient to clean up all three -- no separate DELETE needed.
 func (s *PostgresStore) DeleteBatch(batchID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -637,9 +1148,13 @@ func (s *PostgresStore) ListBatches() []BatchSummary {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// ORDER BY created_at DESC, batch_id DESC: batch_id (the match_jobs primary key) is
+	// required as a tiebreaker because multiple batches can share a created_at timestamp,
+	// which otherwise makes the returned order non-deterministic. DESC is kept for both
+	// columns to preserve the existing most-recent-first intent.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, status, total_sources, total_destinations, created_at
-		 FROM match_jobs ORDER BY created_at DESC`)
+		 FROM match_jobs ORDER BY created_at DESC, batch_id DESC`)
 	if err != nil {
 		return nil
 	}
@@ -674,10 +1189,15 @@ func (s *PostgresStore) ListJobs(limit, offset int) ([]JobSummary, error) {
 		offset = 0
 	}
 
+	// ORDER BY started_at DESC, batch_id DESC: batch_id (the match_jobs primary key) is
+	// required as a tiebreaker because jobs started in the same batch/second otherwise sort
+	// non-deterministically, which corrupts LIMIT/OFFSET pagination (a job can appear on two
+	// pages or on none). DESC is kept for both columns to preserve the existing
+	// most-recent-first intent.
 	rows, err := s.pool.Query(ctx,
 		`SELECT batch_id, status, total_sources, total_destinations, auto_matched, review_needed,
 		        no_match_count, total_candidate_pairs, elapsed_ms, started_at, completed_at
-		 FROM match_jobs ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
+		 FROM match_jobs ORDER BY started_at DESC, batch_id DESC LIMIT $1 OFFSET $2`,
 		limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("query jobs: %w", err)
@@ -711,6 +1231,239 @@ func (s *PostgresStore) ListJobs(limit, offset int) ([]JobSummary, error) {
 // Close gracefully closes the connection pool.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
+}
+
+// CalibrationObservations retrieves calibration observations for a batch from audit logs.
+func (s *PostgresStore) CalibrationObservations(batchID string) ([]matcher.LabelledScore, error) {
+	entries := s.GetAuditLogs(batchID, "", "")
+	labels, _ := computeCalibrationObservations(entries)
+	return labels, nil
+}
+
+// CalibrationObservationStats returns statistics about calibration observations for a batch.
+func (s *PostgresStore) CalibrationObservationStats(batchID string) (CalibrationObservationStats, error) {
+	entries := s.GetAuditLogs(batchID, "", "")
+	_, stats := computeCalibrationObservations(entries)
+	return stats, nil
+}
+
+// SaveCalibrationModel persists a calibration model, ensuring only one active model exists.
+func (s *PostgresStore) SaveCalibrationModel(model CalibrationModel) (CalibrationModel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if model.ID == "" {
+		model.ID = fmt.Sprintf("calib-%d", time.Now().UnixNano())
+	}
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = time.Now()
+	}
+
+	var err error
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if model.Active {
+		if _, err = tx.Exec(ctx, "UPDATE calibration_models SET active = false WHERE active = true"); err != nil {
+			return CalibrationModel{}, fmt.Errorf("deactivate previous model: %w", err)
+		}
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO calibration_models (id, created_at, fitted_by, batch_id, observation_count,
+		                                 positive_count, brier_score, ece_score, model_json, active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		model.ID, model.CreatedAt, model.FittedBy, model.BatchID, model.ObservationCount,
+		model.PositiveCount, model.BrierScore, model.ECEScore, model.ModelJSON, model.Active)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("insert model: %w", err)
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		return CalibrationModel{}, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return model, nil
+}
+
+// GetActiveCalibrationModel retrieves the currently active calibration model, if any.
+func (s *PostgresStore) GetActiveCalibrationModel() (CalibrationModel, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var model CalibrationModel
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, created_at, fitted_by, batch_id, observation_count, positive_count,
+		        brier_score, ece_score, model_json, active
+		 FROM calibration_models WHERE active = true LIMIT 1`).
+		Scan(&model.ID, &model.CreatedAt, &model.FittedBy, &model.BatchID,
+			&model.ObservationCount, &model.PositiveCount, &model.BrierScore, &model.ECEScore,
+			&model.ModelJSON, &model.Active)
+
+	if err == pgx.ErrNoRows {
+		return CalibrationModel{}, false, nil
+	}
+	if err != nil {
+		return CalibrationModel{}, false, err
+	}
+
+	return model, true, nil
+}
+
+// ListCalibrationModels retrieves calibration models with pagination.
+func (s *PostgresStore) ListCalibrationModels(limit, offset int) ([]CalibrationModel, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	// ORDER BY created_at DESC, id DESC: id (the calibration_models primary key) is required
+	// as a tiebreaker because multiple models can share a created_at timestamp, which
+	// otherwise corrupts LIMIT/OFFSET pagination the same way it did in GetResultsPage (a
+	// model can appear on two pages or on none). DESC is kept for both columns to preserve
+	// the existing most-recent-first intent.
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, created_at, fitted_by, batch_id, observation_count, positive_count,
+		        brier_score, ece_score, model_json, active
+		 FROM calibration_models ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query models: %w", err)
+	}
+	defer rows.Close()
+
+	var models []CalibrationModel
+	for rows.Next() {
+		var model CalibrationModel
+		if err := rows.Scan(&model.ID, &model.CreatedAt, &model.FittedBy, &model.BatchID,
+			&model.ObservationCount, &model.PositiveCount, &model.BrierScore, &model.ECEScore,
+			&model.ModelJSON, &model.Active); err != nil {
+			continue
+		}
+		models = append(models, model)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+
+	return models, nil
+}
+
+// SaveDictionaryEntry upserts a custom alias into the dictionary_entries table.
+// The error is returned (not just logged) deliberately: this is the persistence
+// boundary for the pre-normalizer's alias dictionary, and a write failure that
+// only got logged would leave an operator believing an alias was saved when it
+// will actually vanish on restart.
+func (s *PostgresStore) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO dictionary_entries (alias, canonical, description, updated_at)
+		 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+		 ON CONFLICT (alias) DO UPDATE SET
+		    canonical = EXCLUDED.canonical,
+		    description = EXCLUDED.description,
+		    updated_at = CURRENT_TIMESTAMP,
+		    deleted = FALSE`, // Re-adding a previously deleted alias revives it.
+		entry.Alias, entry.Canonical, entry.Description); err != nil {
+		return fmt.Errorf("save dictionary entry %q: %w", entry.Alias, err)
+	}
+
+	return nil
+}
+
+// ListDictionaryEntries returns all persisted custom aliases, ordered by alias.
+// A table with no rows is a normal empty result, not an error.
+func (s *PostgresStore) ListDictionaryEntries() ([]matcher.SynonymEntry, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx,
+		"SELECT alias, canonical, description FROM dictionary_entries WHERE deleted = FALSE ORDER BY alias")
+	if err != nil {
+		return nil, fmt.Errorf("list dictionary entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []matcher.SynonymEntry
+	for rows.Next() {
+		var entry matcher.SynonymEntry
+		if err := rows.Scan(&entry.Alias, &entry.Canonical, &entry.Description); err != nil {
+			return nil, fmt.Errorf("list dictionary entries: scan row: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list dictionary entries: iterate rows: %w", err)
+	}
+
+	return entries, nil
+}
+
+// DeleteDictionaryEntry upserts a tombstone for an alias into the dictionary_entries
+// table. The error is returned (not just logged) deliberately, for the same reason
+// as SaveDictionaryEntry: a write failure that only got logged would leave an
+// operator believing an alias was deleted when it will actually reappear on restart.
+// This upserts deleted = TRUE rather than issuing a DELETE, because the built-in
+// defaults are re-seeded at every boot by matcher.NewCustomDictionary(), so a hard
+// delete would let a removed default silently come back.
+func (s *PostgresStore) DeleteDictionaryEntry(alias string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO dictionary_entries (alias, canonical, description, deleted, updated_at)
+		 VALUES ($1, '', '', TRUE, CURRENT_TIMESTAMP)
+		 ON CONFLICT (alias) DO UPDATE SET deleted = TRUE, updated_at = CURRENT_TIMESTAMP`,
+		alias); err != nil {
+		return fmt.Errorf("delete dictionary entry %q: %w", alias, err)
+	}
+
+	return nil
+}
+
+// ListDeletedDictionaryAliases returns the aliases that have been tombstoned via
+// DeleteDictionaryEntry, so boot-time hydration can un-seed a built-in default
+// the operator removed.
+func (s *PostgresStore) ListDeletedDictionaryAliases() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx,
+		"SELECT alias FROM dictionary_entries WHERE deleted = TRUE ORDER BY alias")
+	if err != nil {
+		return nil, fmt.Errorf("list deleted dictionary aliases: %w", err)
+	}
+	defer rows.Close()
+
+	var aliases []string
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			return nil, fmt.Errorf("list deleted dictionary aliases: scan row: %w", err)
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list deleted dictionary aliases: iterate rows: %w", err)
+	}
+
+	return aliases, nil
 }
 
 // Compile-time assertion that PostgresStore implements Repository

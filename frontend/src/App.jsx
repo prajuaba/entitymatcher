@@ -12,7 +12,7 @@ import { Cpu, Sliders, Activity, Database, FileCheck, ShieldCheck, LogOut } from
 import { can } from './lib/rbac'
 
 export function App() {
-  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth } = useMatcherStore()
+  const { activeTab, setActiveTab, loadSeedDataset, progress, totalCount, authChecked, user, logout, initAuth, batchID, fetchConfig } = useMatcherStore()
 
   useEffect(() => {
     // Initialize auth on mount
@@ -20,7 +20,18 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    // Only seed when there is no batch to return to. The store deliberately
+    // rehydrates batchID from localStorage so a reload keeps the batch the user
+    // was reviewing; seeding unconditionally overwrote that remembered id with
+    // the demo batch on every page load.
+    // Pull the server's saved config into the store. Without this the store keeps
+    // its hardcoded defaults, which carry no column_mapping at all -- so FieldMapper
+    // fell back to its own blank defaults and saving from that screen overwrote the
+    // real mapping (this is how date_field_src/date_field_dest got silently cleared).
     if (authChecked && user) {
+      fetchConfig()
+    }
+    if (authChecked && user && !batchID) {
       // Load benchmark dataset on boot for out-of-the-box demonstration
       loadSeedDataset()
     }
@@ -91,8 +102,32 @@ export function App() {
           </div>
         </div>
 
+        {/* User Profile & Logout */}
+        <div className="flex items-center gap-2.5 bg-slate-950/80 p-1.5 pl-3 rounded-xl border border-slate-800 shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-slate-100">{user.name}</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+              user.role === 'ADMIN' ? 'bg-rose-950/80 text-rose-300 border-rose-700/50' :
+              user.role === 'ENGINEER' ? 'bg-sky-950/80 text-sky-300 border-sky-700/50' :
+              user.role === 'REVIEWER' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50' :
+              'bg-amber-950/80 text-amber-300 border-amber-700/50'
+            }`}>
+              {user.role}
+            </span>
+          </div>
+          <div className="w-px h-4 bg-slate-800" />
+          <button
+            onClick={logout}
+            title="Logout"
+            className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-rose-400 rounded-lg text-xs font-medium flex items-center gap-1 transition"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline text-[11px]">Logout</span>
+          </button>
+        </div>
+
         {/* Tab Navigation Controls */}
-        <nav className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+        <nav className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 ml-auto">
           {allowedNavItems.map((item) => {
             const Icon = item.icon
             const isActive = activeTab === item.id
@@ -113,30 +148,6 @@ export function App() {
             )
           })}
         </nav>
-
-        {/* User Profile & Logout */}
-        <div className="flex items-center gap-3 ml-auto">
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/80 rounded-lg border border-slate-800">
-            <div>
-              <p className="text-xs font-semibold text-slate-100">{user.name}</p>
-              <p className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
-                user.role === 'ADMIN' ? 'bg-rose-950/80 text-rose-300 border-rose-700/50' :
-                user.role === 'ENGINEER' ? 'bg-sky-950/80 text-sky-300 border-sky-700/50' :
-                user.role === 'REVIEWER' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/50' :
-                'bg-amber-950/80 text-amber-300 border-amber-700/50'
-              }`}>
-                {user.role}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={logout}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Logout
-          </button>
-        </div>
       </header>
 
       {/* Main Content Area */}

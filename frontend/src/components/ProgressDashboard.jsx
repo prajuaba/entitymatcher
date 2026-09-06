@@ -3,7 +3,7 @@ import { useMatcherStore } from '../store/useMatcherStore'
 import { Activity, CheckCircle2, Clock, Zap, ArrowRight, RefreshCw } from 'lucide-react'
 
 export function ProgressDashboard() {
-  const { progress, batchID, runMatching, setActiveTab, loading } = useMatcherStore()
+  const { progress, batchID, runMatching, setActiveTab, loading, config } = useMatcherStore()
 
   const { total_sources, processed_sources, total_candidate_pairs, no_match_count, total_decisions, auto_matched, review_needed, status, elapsed_ms } = progress
 
@@ -14,7 +14,7 @@ export function ProgressDashboard() {
     <div className="max-w-4xl mx-auto space-y-6 bg-slate-900/60 p-8 rounded-2xl border border-slate-800">
       <div className="flex items-center justify-between border-b border-slate-800 pb-4">
         <div>
-          <span className="text-xs font-mono text-slate-400 uppercase tracking-widest">Batch execution ID: {batchID || 'benchmark-batch-001'}</span>
+          <span className="text-xs font-mono text-slate-400 uppercase tracking-widest">Batch execution ID: {batchID || 'none selected'}</span>
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2 mt-0.5">
             <Activity className="w-5 h-5 text-sky-400" /> Real-Time Engine Execution Stream
           </h2>
@@ -74,13 +74,16 @@ export function ProgressDashboard() {
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
           <span className="text-xs text-emerald-400 uppercase tracking-wider font-semibold">Auto-Matched</span>
           <div className="text-2xl font-bold text-emerald-400 font-mono">{auto_matched}</div>
-          <p className="text-[11px] text-slate-500">Confidence ≥ 90%</p>
+          <p className="text-[11px] text-slate-500">{Number.isFinite(config?.auto_match_threshold) ? `Confidence ≥ ${Math.round(config.auto_match_threshold * 100)}%` : 'Auto-matched by the engine'}</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
           <span className="text-xs text-amber-400 uppercase tracking-wider font-semibold">Review Queue</span>
           <div className="text-2xl font-bold text-amber-400 font-mono">{review_needed}</div>
-          <p className="text-[11px] text-slate-500">Confidence 70% - 89%</p>
+          {/* REVIEW_NEEDED is not a confidence band: pairs land here due to 1:1 destination
+              contention, rank 2-5 alternative-candidate rows, and ambiguous-margin rows, and
+              can score anywhere up to 100%. Do NOT restore a percentage range on this label. */}
+          <p className="text-[11px] text-slate-500">Awaiting human review</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">

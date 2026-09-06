@@ -14,13 +14,17 @@ type SynonymEntry struct {
 type CustomDictionary struct {
 	mu      sync.RWMutex
 	entries map[string]string // lowercase alias -> canonical
+	// descriptions is a parallel map, kept separate specifically so `entries` keeps its `map[string]string` shape,
+	// because `ReplaceSynonymsInText` reads `dict.entries[lower]` directly on the hot normalization path and must not change type.
+	descriptions map[string]string // lowercase alias -> description
 }
 
 var globalDictionary = NewCustomDictionary()
 
 func NewCustomDictionary() *CustomDictionary {
 	d := &CustomDictionary{
-		entries: make(map[string]string),
+		entries:      make(map[string]string),
+		descriptions: make(map[string]string),
 	}
 	// Default enterprise aliases
 	d.entries["kbank"] = "kasikornbank"
@@ -57,7 +61,9 @@ func (d *CustomDictionary) Set(alias, canonical string) {
 func (d *CustomDictionary) Delete(alias string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	delete(d.entries, strings.ToLower(strings.TrimSpace(alias)))
+	normalizedAlias := strings.ToLower(strings.TrimSpace(alias))
+	delete(d.entries, normalizedAlias)
+	delete(d.descriptions, normalizedAlias)
 }
 
 func (d *CustomDictionary) ListEntries() []SynonymEntry {
@@ -67,11 +73,24 @@ func (d *CustomDictionary) ListEntries() []SynonymEntry {
 	var list []SynonymEntry
 	for k, v := range d.entries {
 		list = append(list, SynonymEntry{
-			Alias:     k,
-			Canonical: v,
+			Alias:       k,
+			Canonical:   v,
+			Description: d.descriptions[k],
 		})
 	}
 	return list
+}
+
+func (d *CustomDictionary) SetEntry(entry SynonymEntry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	normalizedAlias := strings.ToLower(strings.TrimSpace(entry.Alias))
+	d.entries[normalizedAlias] = strings.TrimSpace(entry.Canonical)
+	if strings.TrimSpace(entry.Description) == "" {
+		delete(d.descriptions, normalizedAlias)
+	} else {
+		d.descriptions[normalizedAlias] = strings.TrimSpace(entry.Description)
+	}
 }
 
 func ReplaceSynonymsInText(text string) string {
