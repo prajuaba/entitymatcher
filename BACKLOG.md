@@ -10,14 +10,13 @@ Severity: **C**ritical / **H**igh / **M**edium.
 
 ## Status — 2026-09-06
 
-**69 of 76 items closed.** One defect is open: **J5**, an infrastructure ceiling found on
-2026-09-06 during maintenance. The other six are open by decision: three product calls (S1–S3),
-one coverage gap (T1), and Round 1's A5 and C5, each of which the code argues against on
-measured grounds.
+**70 of 76 items closed, and no known defect remains open.** The six that remain are open by
+decision: three product calls (S1–S3), one coverage gap (T1), and Round 1's A5 and C5, each of
+which the code argues against on measured grounds.
 
 | Round | Epics | Items | State |
 | :-- | :-- | --: | :-- |
-| Round 1 | A–J | 42 | 39 closed; **A5** and **C5** deliberately left — see below; **J5** added 2026-09-06 |
+| Round 1 | A–J | 42 | 40 closed; **A5** and **C5** deliberately left — see below; **J5** added and closed 2026-09-06 |
 | Round 2 | K, L, M, N | 18 | ✅ all closed |
 | Round 3 | O, P, Q, R | 12 | ✅ all closed — **R3**'s premise was wrong, pinned by test; **O3** and **Q3** were found *during* the round and fixed in it |
 | Round 3 | S, T | 4 | Open by decision: **S1–S3** are operator calls, **T1** is untested surface, not known-broken |
@@ -190,7 +189,7 @@ opened, and `go.mod` contains no drivers.
 | I2 | O(1) review actions | Results indexed by ID; no full-batch scan per click |
 | I3 | Stop embedding record copies | Results hold IDs; records hydrated on read |
 
-## EPIC J — Deployment & Docs (M) — J1–J4 ✅ closed; **J5** open
+## EPIC J — Deployment & Docs (M) — ✅ complete
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
@@ -198,7 +197,7 @@ opened, and `go.mod` contains no drivers.
 | J2 | nginx `/api` proxy | SPA served by nginx reaches the backend |
 | J3 | Port alignment | Compose and README agree |
 | J4 | README truth pass | Every claim maps to working code; measured numbers replace aspirational ones |
-| J5 | Give the Postgres container a real `shm_size` | **Found 2026-09-06 during routine maintenance, and it is a live failure, not a theoretical one.** `docker-compose.yml` sets no `shm_size` on the `postgres` service, so the container gets Docker's 64 MB default while the host has 61 GB. `VACUUM (ANALYZE)` over `match_results` failed three times with `could not resize shared memory segment ... No space left on device` — the message names disk, but the host had 2.9 TB free; it is `/dev/shm`. It only completed with `PARALLEL 0`. Postgres uses that segment for parallel workers, so the same ceiling applies to **parallel query execution**, not just maintenance — and this database routinely holds a 191,425-row result set that the UI pages, filters and searches. Add `shm_size: 1gb` (or mount a larger `/dev/shm`) to the `postgres` service. Cheap to fix, and it fails with a message that points at the wrong resource, which is what makes it worth recording |
+| ~~J5~~ ✅ | Give the Postgres container a real `shm_size` | **Found 2026-09-06 during routine maintenance, and it is a live failure, not a theoretical one.** `docker-compose.yml` sets no `shm_size` on the `postgres` service, so the container gets Docker's 64 MB default while the host has 61 GB. `VACUUM (ANALYZE)` over `match_results` failed three times with `could not resize shared memory segment ... No space left on device` — the message names disk, but the host had 2.9 TB free; it is `/dev/shm`. It only completed with `PARALLEL 0`. Postgres uses that segment for parallel workers, so the same ceiling applies to **parallel query execution**, not just maintenance — and this database routinely holds a 191,425-row result set that the UI pages, filters and searches. Add `shm_size: 1gb` (or mount a larger `/dev/shm`) to the `postgres` service. Cheap to fix, and it fails with a message that points at the wrong resource, which is what makes it worth recording. **Shipped:** `shm_size: 1gb` on the `postgres` service, with the failing error text recorded in a comment beside it so the next person does not chase disk. Verified: the container's `/dev/shm` is **64M → 1.0G**, the exact `VACUUM (ANALYZE) match_results` that failed now succeeds, so does an explicitly forced `VACUUM (ANALYZE, PARALLEL 4)`, and a forced parallel query over the real batch launches a worker and returns. **One honest limit on that verification:** the table was 10 GB when this failed and is 607 MB after the `VACUUM FULL` that followed, so the original failure condition cannot be reproduced exactly. The arithmetic settles it instead — the failed allocation was `67145344` bytes, i.e. 64.0 MiB, against a 64 MiB `/dev/shm`; it now has 1 GiB, so that request fits with 15× headroom |
 
 ---
 

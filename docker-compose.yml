@@ -8,6 +8,14 @@ services:
       POSTGRES_PASSWORD: postgrespassword
     ports:
       - "5432:5432"
+    # Docker defaults a container's /dev/shm to 64MB. PostgreSQL allocates parallel
+    # worker state there, so on this database -- which holds a 191k-row result set the
+    # UI pages, filters and searches -- both parallel query execution and maintenance
+    # hit that ceiling. VACUUM (ANALYZE) over match_results failed three times with
+    # "could not resize shared memory segment ... No space left on device" while the
+    # host had 2.9TB free, and only completed with PARALLEL 0. The error names disk,
+    # which is why this is worth a comment rather than a bare value.
+    shm_size: 1gb
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
