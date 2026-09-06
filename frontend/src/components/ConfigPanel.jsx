@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useMatcherStore } from '../store/useMatcherStore'
 import { ConnectionManager } from './ConnectionManager'
 import { FieldMapper } from './FieldMapper'
@@ -201,6 +201,47 @@ export function ConfigPanel() {
   const capViolatesRule = cap > 0 && cap >= auto
   const reviewViolatesRule = review > auto
   const hasBlockingValidationError = capViolatesRule || reviewViolatesRule
+
+  // Compute warnings for self-inconsistencies that silently disable scoring components.
+  // This is a warning, not a blocker — a deliberate no-date or no-name configuration must remain saveable.
+  // Blocking dialogs were deliberately removed from this project (backlog R1) because they froze the renderer.
+  const configWarnings = useMemo(() => {
+    const warnings = []
+    const dateWeight = localCfg.weights?.date_weight ?? 0.15
+    const nameWeight = localCfg.weights?.name_weight ?? 0.85
+
+    // Check for date weight being non-zero with missing date fields
+    if (dateWeight > 0) {
+      const srcEmpty = !localCfg.column_mapping?.date_field_src
+      const destEmpty = !localCfg.column_mapping?.date_field_dest
+      if (srcEmpty || destEmpty) {
+        let side = ''
+        if (srcEmpty && destEmpty) side = 'source and destination'
+        else if (srcEmpty) side = 'source'
+        else side = 'destination'
+        warnings.push(
+          `Date weight is ${Math.round(dateWeight * 100)}% but no date column is mapped on the ${side} side, so the date term will be dropped for every pair and only the name will score. Set both date columns, or set date weight to 0.`
+        )
+      }
+    }
+
+    // Check for name weight being non-zero with missing name fields
+    if (nameWeight > 0) {
+      const srcEmpty = !localCfg.column_mapping?.name_fields_src || localCfg.column_mapping.name_fields_src.length === 0
+      const destEmpty = !localCfg.column_mapping?.name_fields_dest || localCfg.column_mapping.name_fields_dest.length === 0
+      if (srcEmpty || destEmpty) {
+        let side = ''
+        if (srcEmpty && destEmpty) side = 'source and destination'
+        else if (srcEmpty) side = 'source'
+        else side = 'destination'
+        warnings.push(
+          `Name weight is ${Math.round(nameWeight * 100)}% but no name column(s) are mapped on the ${side} side, so name scoring has nothing to compare. Set both name columns, or set name weight to 0.`
+        )
+      }
+    }
+
+    return warnings
+  }, [localCfg])
 
   // Tab list & panels
   const tabs = ["Data Sources", "Matching Rules", "Algorithms"]
@@ -659,6 +700,13 @@ export function ConfigPanel() {
             {saveError}
           </div>
         )}
+        {configWarnings.length > 0 && (
+          <div className="w-full md:w-auto px-4 py-3 bg-amber-950/80 border border-amber-700/50 text-amber-300 rounded-lg text-xs font-medium text-center md:text-left">
+            {configWarnings.map((warning, i) => (
+              <p key={i} className="mb-1 last:mb-0">{warning}</p>
+            ))}
+          </div>
+        )}
 
         {/* Buttons */}
         <div className="flex items-center gap-3">
@@ -701,3 +749,4 @@ export function ConfigPanel() {
     </div>
   )
 }
+
