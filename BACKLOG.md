@@ -10,17 +10,19 @@ Severity: **C**ritical / **H**igh / **M**edium.
 
 ## Status — 2026-09-06
 
-**67 of 73 items closed. The six that remain are open by decision, not by neglect.**
+**67 of 74 items closed.** Six of the seven that remain are open by decision; **Q3** is a live
+defect, found while closing Q2 and recorded rather than fixed in the same pass.
 
 | Round | Epics | Items | State |
 | :-- | :-- | --: | :-- |
 | Round 1 | A–J | 41 | 39 closed; **A5** and **C5** deliberately left — see below |
 | Round 2 | K, L, M, N | 18 | ✅ all closed |
-| Round 3 | O, P, Q, R | 10 | ✅ all closed — **R3**'s premise was wrong; nothing to fix, pinned by test |
+| Round 3 | O, P, Q, R | 11 | 10 closed — **R3**'s premise was wrong, pinned by test; **Q3** newly found, open |
 | Round 3 | S, T | 4 | Open by decision: **S1–S3** are operator calls, **T1** is untested surface, not known-broken |
 
-**No defect found in any round is still open.** What remains is three product decisions (S) and
-one coverage gap (T), plus A5 and C5, each of which the code argues against on measured grounds.
+Every defect any round *set out* to fix is now closed. What remains is three product decisions
+(S), one coverage gap (T), A5 and C5 — each of which the code argues against on measured
+grounds — and **Q3**, the one genuinely open defect, surfaced by Q2's own work.
 
 ### Round 1's two open items, and why they stay open
 
@@ -394,15 +396,17 @@ than the UI implies. Neither is a scoring bug; both are evidentiary.
 | ~~P2~~ ✅ | Dashboard tiles must stop naming a confidence band | `ProgressDashboard.jsx:77,83` still hardcode `Confidence ≥ 90%` and `Confidence 70% - 89%`. **`fedcd1b` missed this component.** Two faults, as before: review status is not a confidence band, and the numbers ignore the configurable `auto_match_threshold` / `review_threshold` — set auto to 0.95 and both labels are simply wrong. **Shipped**, following the precedent `fedcd1b` set in the other two components: the Auto-Matched tile derives its threshold from `config.auto_match_threshold`, and the Review Queue tile now reads *Awaiting human review* — the range was dropped rather than replaced with another wrong one, and the "REVIEW_NEEDED is not a confidence band" comment travels with it so it does not come back. Mutation-checked: re-hardcoding `Confidence ≥ 90%` fails the test, which sets the threshold to 0.95 and asserts `95%` |
 | ~~P3~~ ✅ | Refresh status counts after a manual pairing | The pair is written and the modal closes, but the filter chips keep their old totals until something else forces a refetch: `All Pairs 58 · Confirmed 1` immediately after, `59 · 2` once a filter is touched. **Shipped:** `manualLink`'s post-write refetch now passes `{ includeCounts: true }`. The chips read `statusCounts`, which the API only returns when `include_counts` is requested, so the plain refetch refreshed the rows and left the totals stale. Mutation-checked: dropping the option fails the test |
 
-## EPIC Q — Dictionary durability (H) — ✅ complete
+## EPIC Q — Dictionary durability (H) — Q1, Q2 ✅ closed; **Q3** open
 
 The alias map feeds the pre-normalizer, so its contents change match outcomes. Q1 made it
-durable; what remains is that an entry, once added, cannot be taken back.
+durable and Q2 made it removable. Q3 is a gap those two exposed: one field of an alias is
+accepted and stored, but can never be read back.
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
 | ~~Q1~~ ✅ | Persist custom aliases | `GetGlobalDictionary()` is an in-process map. There is **no dictionary table and no store persistence**, so every operator-added alias is lost on restart and the seeded defaults (`scb`, `ไทยพาณิชย์`, `bbl`) return. Results therefore change between runs for reasons nothing records. Persist alongside `config` / `connector_settings`. **Shipped** `b82fc48`: a `dictionary_entries` table **keyed by alias**, not the single-row JSONB `config` and `connector_settings` use — the dictionary is keyed data, so upsert is natural, concurrent saves cannot clobber each other through a read-modify-write, and it makes Q2 a single statement rather than a rewrite. `SaveDictionaryEntry` returns an error and the handler answers **500** on failure, following the precedent `SaveDataset` sets: reporting success for a write that did not land leaves exactly this defect. `main.go` hydrates the global dictionary at startup beside the calibration-model load; built-in defaults still seed it and persisted entries apply on top, so an operator alias overrides a default of the same name. **Removing a default remains unexpressible — that needs Q2.** Verified end to end: an alias added through the API landed lowercased, survived a container restart, and the backend logged `Loaded 1 custom alias(es) from the dictionary`. Mutation-checked by removing the persistence call, which fails `TestHandleDictionaryPostPersistsEntry` |
 | ~~Q2~~ ✅ | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Before Q1 the only way to clear a typo was a restart, which took every other alias with it; now that aliases persist (`b82fc48`) a typo survives restarts too, so deletion is the only way to remove one. The keyed `dictionary_entries` table added by Q1 makes the store side a single `DELETE ... WHERE alias = $1`. **Shipped**, but *not* as that `DELETE` — **a hard delete cannot express removing a built-in default.** `matcher.NewCustomDictionary()` re-seeds `scb`, `bbl`, `ไทยพาณิชย์` and the rest into the in-process map at every boot, and Q1's hydration applies persisted rows on top; dropping the row would let a default the operator removed silently reappear on the next restart — the exact gap Q1 recorded as "removing a default remains unexpressible". So the row is **tombstoned**: a `deleted` column (added by `ALTER TABLE ... IF NOT EXISTS`, since `CREATE TABLE IF NOT EXISTS` will not alter an existing one), `ListDictionaryEntries` filters `deleted = FALSE`, and boot-time hydration applies `ListDeletedDictionaryAliases` **after** the `Set` loop so the un-seed wins. Re-adding an alias clears its tombstone, so delete is reversible. `DELETE /api/dictionary?alias=` is ADMIN/ENGINEER like POST, and the UI adds a per-chip remove button — no `window.confirm`, which would reintroduce exactly the blocking dialog R1 removes. **The handler persists before mutating the in-process map**, the reverse of the POST path: dropping the alias from live scoring and *then* answering 500 would take it out of matching while telling the operator the delete failed. Mutation-checked three ways — reversing that order, removing the tombstone-clear on re-save, and the failure path itself, which asserts the alias survives a failed write |
+| Q3 | Make `description` readable, or stop accepting it | **Found while closing Q2, not previously recorded.** `SynonymEntry.Description` is accepted by `POST /api/dictionary` and written to the `dictionary_entries.description` column, but nothing ever reads it back: `CustomDictionary.ListEntries()` (`dictionary.go:63`) rebuilds entries from an in-process `alias → canonical` map that has nowhere to hold a description, and both the GET and POST responses are built from it, so the field always serializes as `""`. Boot-time hydration drops it too — `main.go:57` calls `dict.Set(e.Alias, e.Canonical)` and discards the rest. The data is therefore write-only: an operator can send a description, it is durably stored, and it can never be displayed. Pre-existing, but Q1 made it visible by giving the column somewhere to persist to. Either carry the description on the in-memory entry so it round-trips, or drop the field from the API and the column — **the one thing not to leave is a field that silently accepts input it will never return** |
 
 ## EPIC R — Input handling and interface polish (M) — ✅ complete (**R3**'s premise was wrong)
 
