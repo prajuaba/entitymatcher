@@ -1985,17 +1985,28 @@ func (s *Server) HandleDictionary(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if entry.Alias != "" && entry.Canonical != "" {
-			dict.Set(entry.Alias, entry.Canonical)
+			// SetEntry (not Set) so the description reaches the in-process dictionary too --
+			// Set only carries alias/canonical and would silently drop it, leaving
+			// ListEntries() (which both this response and GET read from) unable to ever
+			// return a description that was just saved.
+			dict.SetEntry(matcher.SynonymEntry{
+				Alias:       entry.Alias,
+				Canonical:   entry.Canonical,
+				Description: strings.TrimSpace(entry.Description),
+			})
 
 			// Persist through the store so the alias survives a restart. The alias is
-			// normalized (lowercased and trimmed) to match dict.Set's own normalization,
+			// normalized (lowercased and trimmed) to match SetEntry's own normalization,
 			// keeping the persisted row keyed the same way it will be looked up on
 			// hydration. An operator alias that appears saved but silently vanishes on
 			// restart is exactly the defect this closes, so a persistence failure must
-			// be reported as a failure rather than as success.
+			// be reported as a failure rather than as success. All three fields are
+			// normalized the same way SetEntry normalizes them, so what is stored and
+			// what is held in memory cannot disagree.
 			persistEntry := entry
 			persistEntry.Alias = strings.ToLower(strings.TrimSpace(entry.Alias))
 			persistEntry.Canonical = strings.TrimSpace(entry.Canonical)
+			persistEntry.Description = strings.TrimSpace(entry.Description)
 			if err := s.store.SaveDictionaryEntry(persistEntry); err != nil {
 				http.Error(w, "Failed to persist dictionary entry: "+err.Error(), http.StatusInternalServerError)
 				return

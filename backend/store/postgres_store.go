@@ -966,6 +966,26 @@ func (s *PostgresStore) ManualLink(batchID, sourceID, destinationID string) (*ma
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Check that both source and destination records exist for this batch
+	var srcExists, dstExists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM match_sources WHERE batch_id = $1 AND id = $2),
+		        EXISTS(SELECT 1 FROM match_destinations WHERE batch_id = $1 AND id = $3)`,
+		batchID, sourceID, destinationID).Scan(&srcExists, &dstExists)
+	if err != nil {
+		return nil, fmt.Errorf("check manual link records exist: %w", err)
+	}
+	// An empty sourceID or destinationID needs no special-case handling here: it simply
+	// matches no row in match_sources/match_destinations (both tables have PRIMARY KEY
+	// (batch_id, id)), so no redundant empty-string check should ever be added.
+	if !srcExists || !dstExists {
+		// This exact, unwrapped error string must match the in-memory store's error message
+		// byte-for-byte: the HTTP handler puts err.Error() directly into the 400 response
+		// body, so an identical message is what makes both store backends behave
+		// identically to an API client.
+		return nil, fmt.Errorf("source or destination record not found")
+	}
+
 	newID := fmt.Sprintf("%s-%s-%s-manual", batchID, sourceID, destinationID)
 	createdAt := time.Now()
 
@@ -973,7 +993,7 @@ func (s *PostgresStore) ManualLink(batchID, sourceID, destinationID string) (*ma
 	dstSnapshot, _ := json.Marshal(map[string]string{"id": destinationID})
 	reasons, _ := json.Marshal([]string{"Manually linked by user"})
 
-	_, err := s.pool.Exec(ctx,
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO match_results
 		 (batch_id, id, source_id, destination_id, confidence_score, match_status,
 		  match_reasons, source_snapshot, destination_snapshot, created_at)

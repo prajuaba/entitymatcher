@@ -54,7 +54,9 @@ func main() {
 	} else if len(entries) > 0 {
 		dict := matcher.GetGlobalDictionary()
 		for _, e := range entries {
-			dict.Set(e.Alias, e.Canonical)
+			// SetEntry (not Set) so a persisted description survives a restart, not just
+			// the alias/canonical pair.
+			dict.SetEntry(e)
 		}
 		log.Printf("Loaded %d custom alias(es) from the dictionary", len(entries))
 	}
