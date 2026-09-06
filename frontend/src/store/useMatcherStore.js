@@ -87,6 +87,10 @@ export const useMatcherStore = create((set, get) => ({
   totalCount: 0,
   sortBy: 'created_at',
   sortDir: 'asc',
+  // Excludes rank>1 alternative candidates from the list. Off by default: it
+  // changes what the reviewer sees, so it is opt-in and the toggle stays visible
+  // whenever it is on (see MasterDetailView) -- rows are never hidden silently.
+  rank1Only: false,
   totalPages: 1,
   statusCounts: {},
   resultsLoading: false,
@@ -99,6 +103,10 @@ export const useMatcherStore = create((set, get) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
   setStatusFilter: (filter) => {
     set({ statusFilter: filter, page: 1 })
+    get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
+  },
+  setRank1Only: (value) => {
+    set({ rank1Only: !!value, page: 1 })
     get().fetchResults(undefined, { includeCounts: true, resetSelection: true })
   },
   setSearchQuery: (query) => {
@@ -463,7 +471,7 @@ export const useMatcherStore = create((set, get) => ({
     const seq = ++fetchSeq
     set({ resultsLoading: true })
 
-    const { statusFilter, searchQuery, page, limit, sortBy, sortDir } = get()
+    const { statusFilter, searchQuery, page, limit, sortBy, sortDir, rank1Only } = get()
     const queryParams = new URLSearchParams({
       batch_id: bId,
       status: statusFilter,
@@ -475,6 +483,9 @@ export const useMatcherStore = create((set, get) => ({
     })
     if (opts.includeCounts) {
       queryParams.append('include_counts', '1')
+    }
+    if (rank1Only) {
+      queryParams.append('rank1_only', '1')
     }
 
     try {

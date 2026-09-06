@@ -411,6 +411,11 @@ func (s *Store) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultItem, int, 
 		if q.Status != "" && q.Status != "ALL" && item.MatchStatus != q.Status {
 			continue
 		}
+		// Mirrors the Postgres store's `rank = 1` predicate. totalCount is derived
+		// from this same filtered slice, so the count and the page cannot diverge.
+		if q.Rank1Only && item.Rank > 1 {
+			continue
+		}
 		if q.Search != "" {
 			// A nil Source/Destination must NOT be treated as an automatic match.
 			// This fixes a bug where NO_MATCH rows with nil Destination would

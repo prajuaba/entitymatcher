@@ -10,6 +10,8 @@ export function MasterDetailView() {
     totalCount,
     totalPages,
     statusCounts,
+    rank1Only,
+    setRank1Only,
     resultsLoading,
     config,
     page,
@@ -119,6 +121,28 @@ export function MasterDetailView() {
               </button>
             )
           })}
+
+          {/* Rank-1-only toggle (backlog S2). On production data, rank>1
+              alternates are 128,974 of the 171,402-row review queue -- 75% --
+              and they are supporting evidence for a rank-1 row already decided,
+              not independent decisions. Off by default, and the control stays
+              visible while it is on so rows are never filtered out silently. */}
+          <label
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap cursor-pointer transition border ${
+              rank1Only
+                ? 'bg-amber-600/20 text-amber-300 border-amber-600/40'
+                : 'bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-800'
+            }`}
+            title="Alternative candidates (rank 2+) are runner-ups for a source whose best pair was already decided"
+          >
+            <input
+              type="checkbox"
+              checked={rank1Only}
+              onChange={(e) => setRank1Only(e.target.checked)}
+              className="accent-amber-500"
+            />
+            Hide alternates (rank 2+)
+          </label>
         </div>
 
         {/* Search Input & CSV Export */}

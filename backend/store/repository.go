@@ -83,6 +83,13 @@ type ResultsQuery struct {
 	SortDir string // "asc" or "desc"
 	Limit   int
 	Offset  int
+
+	// Rank1Only excludes rank>1 alternative candidates from the page. They are
+	// supporting evidence for a rank-1 row whose decision was already taken, not
+	// independent decisions, and on production data they are 128,974 of the
+	// 171,402-row review queue -- 75%. Rows are stored either way; this filters
+	// only the view. Defaults to false so an existing caller is unaffected.
+	Rank1Only bool
 }
 
 // Normalized returns a copy of q with defaults applied and invalid sort/paging

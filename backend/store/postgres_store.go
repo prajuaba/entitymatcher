@@ -730,6 +730,13 @@ func (s *PostgresStore) GetResultsPage(q ResultsQuery) ([]matcher.MatchResultIte
 		argCount++
 	}
 
+	// Appended to the SAME whereConditions slice that builds both the count query
+	// and the page query below, so the two can never disagree -- a filter applied
+	// to one but not the other is exactly how paging breaks.
+	if q.Rank1Only {
+		whereConditions = append(whereConditions, "rank = 1")
+	}
+
 	if q.Search != "" {
 		// Search is narrowed to the four named keys the HTTP handler and the
 		// in-memory store have always searched (customer_name_raw / reference_id on

@@ -1252,6 +1252,9 @@ func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 	sortBy := r.URL.Query().Get("sort_by")
 	sortDir := r.URL.Query().Get("sort_dir")
 	includeCounts := r.URL.Query().Get("include_counts") == "1" || r.URL.Query().Get("include_counts") == "true"
+	// Opt-in only. Absent means false, so every existing caller keeps today's
+	// behaviour and rank>1 alternatives stay in the page as before.
+	rank1Only := r.URL.Query().Get("rank1_only") == "1" || r.URL.Query().Get("rank1_only") == "true"
 
 	// An absurd page number is clamped rather than rejected, matching how
 	// Normalized() below already silently corrects an invalid sort field or an
@@ -1267,12 +1270,13 @@ func (s *Server) HandleGetResults(w http.ResponseWriter, r *http.Request) {
 	// effective values it produces -- not the raw query params -- are what get
 	// echoed back in the response and used to compute the offset below.
 	q := store.ResultsQuery{
-		BatchID: batchID,
-		Status:  status,
-		Search:  search,
-		SortBy:  sortBy,
-		SortDir: sortDir,
-		Limit:   limit,
+		BatchID:   batchID,
+		Status:    status,
+		Search:    search,
+		SortBy:    sortBy,
+		SortDir:   sortDir,
+		Rank1Only: rank1Only,
+		Limit:     limit,
 	}.Normalized()
 	q.Offset = (page - 1) * q.Limit
 

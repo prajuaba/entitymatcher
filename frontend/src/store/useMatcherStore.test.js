@@ -360,3 +360,28 @@ describe('updateMatchAction', () => {
     expect(body.action).toBe('CONFIRM')
   })
 })
+
+describe('rank1Only filter (backlog S2)', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('omits rank1_only by default and sends it once enabled', async () => {
+    const urls = []
+    global.fetch = vi.fn(async (url) => {
+      urls.push(url)
+      return {
+        ok: true, status: 200,
+        json: async () => ({ results: [], total_count: 0, total_pages: 1, status_counts: {} }),
+      }
+    })
+
+    useMatcherStore.setState({ batchID: 'b1', rank1Only: false })
+    await useMatcherStore.getState().fetchResults()
+    expect(urls.at(-1)).not.toContain('rank1_only')
+
+    // Enabling must resend with the flag, so the server -- which owns paging and
+    // the status counts -- applies the same filter the UI is showing.
+    await useMatcherStore.getState().setRank1Only(true)
+    expect(urls.at(-1)).toContain('rank1_only=1')
+    expect(useMatcherStore.getState().rank1Only).toBe(true)
+  })
+})
