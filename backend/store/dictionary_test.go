@@ -103,3 +103,67 @@ func TestListDictionaryEntriesOrderedByAlias(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteDictionaryEntryTombstonesAndRevivesOnResave verifies that deleting
+// a dictionary entry creates a tombstone which is cleared when the same alias
+// is saved again, enabling a tombstone-then-revive round trip pattern.
+func TestDeleteDictionaryEntryTombstonesAndRevivesOnResave(t *testing.T) {
+	s := NewStore()
+
+	entry := matcher.SynonymEntry{
+		Alias:     "kbank",
+		Canonical: "kasikornbank",
+	}
+
+	if err := s.SaveDictionaryEntry(entry); err != nil {
+		t.Fatalf("SaveDictionaryEntry failed: %v", err)
+	}
+
+	if err := s.DeleteDictionaryEntry("kbank"); err != nil {
+		t.Fatalf("DeleteDictionaryEntry failed: %v", err)
+	}
+
+	entries, err := s.ListDictionaryEntries()
+	if err != nil {
+		t.Fatalf("ListDictionaryEntries failed: %v", err)
+	}
+	for _, e := range entries {
+		if e.Alias == "kbank" {
+			t.Errorf("expected no entry with alias 'kbank' after deletion, got %+v", e)
+		}
+	}
+
+	deleted, err := s.ListDeletedDictionaryAliases()
+	if err != nil {
+		t.Fatalf("ListDeletedDictionaryAliases failed: %v", err)
+	}
+	if len(deleted) != 1 {
+		t.Fatalf("expected exactly 1 deleted alias, got %d: %+v", len(deleted), deleted)
+	}
+	if deleted[0] != "kbank" {
+		t.Errorf("expected deleted alias 'kbank', got %q", deleted[0])
+	}
+
+	if err := s.SaveDictionaryEntry(entry); err != nil {
+		t.Fatalf("SaveDictionaryEntry (resave) failed: %v", err)
+	}
+
+	entries, err = s.ListDictionaryEntries()
+	if err != nil {
+		t.Fatalf("ListDictionaryEntries (after resave) failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after resave, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Alias != "kbank" {
+		t.Errorf("expected entry with alias 'kbank', got %+v", entries[0])
+	}
+
+	deleted, err = s.ListDeletedDictionaryAliases()
+	if err != nil {
+		t.Fatalf("ListDeletedDictionaryAliases (after resave) failed: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("expected no deleted aliases after resave, got %d: %+v", len(deleted), deleted)
+	}
+}

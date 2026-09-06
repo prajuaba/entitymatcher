@@ -59,6 +59,20 @@ func main() {
 		log.Printf("Loaded %d custom alias(es) from the dictionary", len(entries))
 	}
 
+	// Remove any tombstoned aliases that were deleted since the last boot; this MUST run
+	// after the custom alias hydration step above, because this is what lets an operator
+	// permanently remove a built-in default that matcher.NewCustomDictionary() would
+	// otherwise reseed on this same boot.
+	if deleted, err := repo.ListDeletedDictionaryAliases(); err != nil {
+		log.Printf("Failed to load deleted dictionary aliases: %v", err)
+	} else if len(deleted) > 0 {
+		dict := matcher.GetGlobalDictionary()
+		for _, a := range deleted {
+			dict.Delete(a)
+		}
+		log.Printf("Removed %d tombstoned alias(es) from the dictionary", len(deleted))
+	}
+
 	mux := http.NewServeMux()
 
 	// Middleware helper to apply CORS and route protection
@@ -127,6 +141,10 @@ func main() {
 	// Match results (authenticated)
 	mux.HandleFunc("/api/match/results",
 		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleGetResults))).ServeHTTP)
+
+	// Match status (authenticated)
+	mux.HandleFunc("/api/match/status",
+		corsHandler(api.RequireAuth(http.HandlerFunc(server.HandleMatchStatus))).ServeHTTP)
 
 	// Job history (authenticated)
 	mux.HandleFunc("/api/jobs",
@@ -204,11 +222,11 @@ func main() {
 			api.RequireAuth,
 		)).ServeHTTP)
 
-	// Dictionary: GET for any authenticated, POST for ADMIN,ENGINEER
+	// Dictionary: GET for any authenticated, POST/DELETE for ADMIN,ENGINEER
 	mux.HandleFunc("/api/dictionary",
 		corsHandler(chainMiddleware(
 			http.HandlerFunc(server.HandleDictionary),
-			newMethodRoleMiddleware([]string{"POST"}, api.RoleAdmin, api.RoleEngineer),
+			newMethodRoleMiddleware([]string{"POST", "DELETE"}, api.RoleAdmin, api.RoleEngineer),
 			api.RequireAuth,
 		)).ServeHTTP)
 

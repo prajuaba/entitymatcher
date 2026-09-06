@@ -1339,7 +1339,8 @@ func (s *PostgresStore) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
 		 ON CONFLICT (alias) DO UPDATE SET
 		    canonical = EXCLUDED.canonical,
 		    description = EXCLUDED.description,
-		    updated_at = CURRENT_TIMESTAMP`,
+		    updated_at = CURRENT_TIMESTAMP,
+		    deleted = FALSE`, // Re-adding a previously deleted alias revives it.
 		entry.Alias, entry.Canonical, entry.Description); err != nil {
 		return fmt.Errorf("save dictionary entry %q: %w", entry.Alias, err)
 	}
@@ -1354,7 +1355,7 @@ func (s *PostgresStore) ListDictionaryEntries() ([]matcher.SynonymEntry, error) 
 	defer cancel()
 
 	rows, err := s.pool.Query(ctx,
-		"SELECT alias, canonical, description FROM dictionary_entries ORDER BY alias")
+		"SELECT alias, canonical, description FROM dictionary_entries WHERE deleted = FALSE ORDER BY alias")
 	if err != nil {
 		return nil, fmt.Errorf("list dictionary entries: %w", err)
 	}
@@ -1373,6 +1374,57 @@ func (s *PostgresStore) ListDictionaryEntries() ([]matcher.SynonymEntry, error) 
 	}
 
 	return entries, nil
+}
+
+// DeleteDictionaryEntry upserts a tombstone for an alias into the dictionary_entries
+// table. The error is returned (not just logged) deliberately, for the same reason
+// as SaveDictionaryEntry: a write failure that only got logged would leave an
+// operator believing an alias was deleted when it will actually reappear on restart.
+// This upserts deleted = TRUE rather than issuing a DELETE, because the built-in
+// defaults are re-seeded at every boot by matcher.NewCustomDictionary(), so a hard
+// delete would let a removed default silently come back.
+func (s *PostgresStore) DeleteDictionaryEntry(alias string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO dictionary_entries (alias, canonical, description, deleted, updated_at)
+		 VALUES ($1, '', '', TRUE, CURRENT_TIMESTAMP)
+		 ON CONFLICT (alias) DO UPDATE SET deleted = TRUE, updated_at = CURRENT_TIMESTAMP`,
+		alias); err != nil {
+		return fmt.Errorf("delete dictionary entry %q: %w", alias, err)
+	}
+
+	return nil
+}
+
+// ListDeletedDictionaryAliases returns the aliases that have been tombstoned via
+// DeleteDictionaryEntry, so boot-time hydration can un-seed a built-in default
+// the operator removed.
+func (s *PostgresStore) ListDeletedDictionaryAliases() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx,
+		"SELECT alias FROM dictionary_entries WHERE deleted = TRUE ORDER BY alias")
+	if err != nil {
+		return nil, fmt.Errorf("list deleted dictionary aliases: %w", err)
+	}
+	defer rows.Close()
+
+	var aliases []string
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			return nil, fmt.Errorf("list deleted dictionary aliases: scan row: %w", err)
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list deleted dictionary aliases: iterate rows: %w", err)
+	}
+
+	return aliases, nil
 }
 
 // Compile-time assertion that PostgresStore implements Repository

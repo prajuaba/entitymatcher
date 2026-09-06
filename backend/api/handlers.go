@@ -1188,6 +1188,44 @@ func (s *Server) HandleSSEProgress(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleMatchStatus is the plain-HTTP counterpart to HandleSSEProgress: it lets a
+// caller read a batch's current progress without opening (or being able to open)
+// a streaming connection, which is what the UI needs to load a finished batch's
+// state without starting a new run.
+func (s *Server) HandleMatchStatus(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	batchID := r.URL.Query().Get("batch_id")
+	if batchID == "" {
+		http.Error(w, "batch_id required", http.StatusBadRequest)
+		return
+	}
+
+	p, ok := s.store.GetProgress(batchID)
+	if !ok {
+		http.Error(w, "Batch not found", http.StatusNotFound)
+		return
+	}
+
+	// match_jobs has no processed_sources column, so p.ProcessedSources always
+	// comes back 0 from storage. A completed run processed every source by
+	// definition, so that count is derived here in the handler rather than
+	// invented as a stored column.
+	if p.Status == "COMPLETED" {
+		p.ProcessedSources = p.TotalSources
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(p)
+}
+
 // HandleGetResults returns one page of match results for a batch. Filtering,
 // sorting and paging all happen in the store layer as a single bounded SQL
 // query (or the equivalent in-memory pass), so a page costs O(page size) work
@@ -1963,6 +2001,34 @@ func (s *Server) HandleDictionary(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "success",
+			"entries": dict.ListEntries(),
+		})
+		return
+	}
+
+	if r.Method == "DELETE" {
+		alias := r.URL.Query().Get("alias")
+		if alias == "" {
+			http.Error(w, "alias required", http.StatusBadRequest)
+			return
+		}
+		// The persisted row is keyed by the normalized alias (lowercased and
+		// trimmed, same as the POST path), so delete must normalize identically
+		// or it will miss the row.
+		normalized := strings.ToLower(strings.TrimSpace(alias))
+		// Persist BEFORE mutating the in-process map. Reporting success for a write
+		// that did not land is exactly the defect this closes, and the reverse is
+		// just as bad: dropping the alias from the live dictionary and then
+		// answering 500 would take the alias out of scoring while telling the
+		// operator nothing had happened. This order makes a failed delete a no-op.
+		if err := s.store.DeleteDictionaryEntry(normalized); err != nil {
+			http.Error(w, "Failed to delete dictionary entry: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		dict.Delete(normalized)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "success",

@@ -429,6 +429,14 @@ func (m *mockRepository) ListDictionaryEntries() ([]matcher.SynonymEntry, error)
 	return nil, nil
 }
 
+func (m *mockRepository) DeleteDictionaryEntry(alias string) error {
+	return nil
+}
+
+func (m *mockRepository) ListDeletedDictionaryAliases() ([]string, error) {
+	return nil, nil
+}
+
 // TestRunBatchAndPersistFailure tests that when SaveResultsCtx fails, runBatchAndPersist returns an error
 // with FAILED status and does not call fireWebhooks
 func TestRunBatchAndPersistFailure(t *testing.T) {

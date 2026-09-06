@@ -37,6 +37,11 @@ type Store struct {
 	// dictionaryEntries persists custom aliases keyed by alias so a repeat save
 	// overwrites rather than duplicates, mirroring the PostgreSQL upsert.
 	dictionaryEntries map[string]matcher.SynonymEntry
+
+	// deletedAliases tombstones aliases the operator explicitly deleted, mirroring the
+	// PostgreSQL `deleted` column, so a built-in default re-seeded by
+	// matcher.NewCustomDictionary() at boot can be un-seeded again on the next hydration.
+	deletedAliases map[string]bool
 }
 
 func NewStore() *Store {
@@ -51,6 +56,7 @@ func NewStore() *Store {
 		sseClients:        make(map[string][]chan matcher.BatchProgress),
 		auditStore:        NewAuditStore(),
 		dictionaryEntries: make(map[string]matcher.SynonymEntry),
+		deletedAliases:    make(map[string]bool),
 	}
 }
 
@@ -718,11 +724,13 @@ func (s *Store) ListCalibrationModels(limit, offset int) ([]CalibrationModel, er
 }
 
 // SaveDictionaryEntry saves a custom alias into the in-memory store, keyed by
-// alias so a repeat save overwrites rather than duplicates.
+// alias so a repeat save overwrites rather than duplicates. If the alias was
+// previously deleted (tombstoned), this clears the tombstone.
 func (s *Store) SaveDictionaryEntry(entry matcher.SynonymEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	delete(s.deletedAliases, entry.Alias)
 	s.dictionaryEntries[entry.Alias] = entry
 	return nil
 }
@@ -741,6 +749,33 @@ func (s *Store) ListDictionaryEntries() ([]matcher.SynonymEntry, error) {
 	})
 
 	return entries, nil
+}
+
+// DeleteDictionaryEntry tombstones the alias rather than only removing it, since
+// matcher.NewCustomDictionary() would otherwise re-seed a removed built-in default
+// on the next restart.
+func (s *Store) DeleteDictionaryEntry(alias string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.dictionaryEntries, alias)
+	s.deletedAliases[alias] = true
+	return nil
+}
+
+// ListDeletedDictionaryAliases returns the aliases that have been tombstoned via
+// DeleteDictionaryEntry, so boot-time hydration can un-seed a built-in default
+// the operator removed.
+func (s *Store) ListDeletedDictionaryAliases() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	aliases := make([]string, 0, len(s.deletedAliases))
+	for alias := range s.deletedAliases {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	return aliases, nil
 }
 
 // Compile-time assertion that Store implements Repository

@@ -223,5 +223,14 @@ type Repository interface {
 	// Callers MUST check and surface the returned error; silent write failure is
 	// indistinguishable from success to the caller.
 	SaveDictionaryEntry(entry matcher.SynonymEntry) error
+	// ListDictionaryEntries returns live (non-deleted) entries only.
 	ListDictionaryEntries() ([]matcher.SynonymEntry, error)
+	// DeleteDictionaryEntry tombstones the alias (soft-delete) rather than removing the
+	// row, so a built-in default re-seeded by matcher.NewCustomDictionary() at the next
+	// boot does not silently come back after an operator deleted it.
+	DeleteDictionaryEntry(alias string) error
+	// ListDeletedDictionaryAliases returns the aliases that have been tombstoned via
+	// DeleteDictionaryEntry, so boot-time hydration can un-seed a built-in default that
+	// the operator removed (ListDictionaryEntries would not include it).
+	ListDeletedDictionaryAliases() ([]string, error)
 }

@@ -219,3 +219,8 @@ CREATE TABLE IF NOT EXISTS dictionary_entries (
     description TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- A deleted alias is tombstoned rather than removed: the built-in defaults seeded
+-- by matcher.NewCustomDictionary() are re-created at every boot, so a bare DELETE
+-- of the row would let a default the operator removed reappear on the next restart.
+ALTER TABLE dictionary_entries ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE;
