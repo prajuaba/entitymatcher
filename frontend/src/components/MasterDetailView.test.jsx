@@ -42,6 +42,11 @@ describe('MasterDetailView', () => {
           json: async () => ({ results: [], total_count: 0 }) 
         }
       }
+      // setBatchID also reads the batch's stored progress (P1). This test is
+      // about the results list, so answer 404 -- the store falls back to idle.
+      if (url.startsWith('/api/match/status')) {
+        return { ok: false, status: 404, text: async () => 'Batch not found' }
+      }
       throw new Error(`Unexpected fetch call to ${url}`)
     })
 
@@ -74,6 +79,11 @@ describe('MasterDetailView', () => {
           status: 200, 
           json: async () => ({ results: [], total_count: 0 }) 
         }
+      }
+      // setBatchID also reads the batch's stored progress (P1). This test is
+      // about the results list, so answer 404 -- the store falls back to idle.
+      if (url.startsWith('/api/match/status')) {
+        return { ok: false, status: 404, text: async () => 'Batch not found' }
       }
       throw new Error(`Unexpected fetch call to ${url}`)
     })
@@ -108,6 +118,11 @@ describe('MasterDetailView', () => {
           json: async () => ({ count: 0, jobs: [] }) 
         }
       }
+      // setBatchID also reads the batch's stored progress (P1). This test is
+      // about the results list, so answer 404 -- the store falls back to idle.
+      if (url.startsWith('/api/match/status')) {
+        return { ok: false, status: 404, text: async () => 'Batch not found' }
+      }
       throw new Error(`Unexpected fetch call to ${url}`)
     })
 
@@ -140,6 +155,11 @@ describe('MasterDetailView', () => {
           status: 200, 
           json: async () => ({ results: [], total_count: 0 }) 
         }
+      }
+      // setBatchID also reads the batch's stored progress (P1). This test is
+      // about the results list, so answer 404 -- the store falls back to idle.
+      if (url.startsWith('/api/match/status')) {
+        return { ok: false, status: 404, text: async () => 'Batch not found' }
       }
       throw new Error(`Unexpected fetch call to ${url}`)
     })

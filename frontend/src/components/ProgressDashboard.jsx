@@ -3,7 +3,7 @@ import { useMatcherStore } from '../store/useMatcherStore'
 import { Activity, CheckCircle2, Clock, Zap, ArrowRight, RefreshCw } from 'lucide-react'
 
 export function ProgressDashboard() {
-  const { progress, batchID, runMatching, setActiveTab, loading } = useMatcherStore()
+  const { progress, batchID, runMatching, setActiveTab, loading, config } = useMatcherStore()
 
   const { total_sources, processed_sources, total_candidate_pairs, no_match_count, total_decisions, auto_matched, review_needed, status, elapsed_ms } = progress
 
@@ -74,13 +74,16 @@ export function ProgressDashboard() {
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
           <span className="text-xs text-emerald-400 uppercase tracking-wider font-semibold">Auto-Matched</span>
           <div className="text-2xl font-bold text-emerald-400 font-mono">{auto_matched}</div>
-          <p className="text-[11px] text-slate-500">Confidence ≥ 90%</p>
+          <p className="text-[11px] text-slate-500">{Number.isFinite(config?.auto_match_threshold) ? `Confidence ≥ ${Math.round(config.auto_match_threshold * 100)}%` : 'Auto-matched by the engine'}</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">
           <span className="text-xs text-amber-400 uppercase tracking-wider font-semibold">Review Queue</span>
           <div className="text-2xl font-bold text-amber-400 font-mono">{review_needed}</div>
-          <p className="text-[11px] text-slate-500">Confidence 70% - 89%</p>
+          {/* REVIEW_NEEDED is not a confidence band: pairs land here due to 1:1 destination
+              contention, rank 2-5 alternative-candidate rows, and ambiguous-margin rows, and
+              can score anywhere up to 100%. Do NOT restore a percentage range on this label. */}
+          <p className="text-[11px] text-slate-500">Awaiting human review</p>
         </div>
 
         <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-1">

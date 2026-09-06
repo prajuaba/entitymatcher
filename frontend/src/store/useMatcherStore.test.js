@@ -124,3 +124,239 @@ describe('ingestFromConnectors', () => {
     ).rejects.toThrow(/500/)
   })
 })
+
+describe('loadProgress', () => {
+  let mockFetch
+
+  beforeEach(() => {
+    mockFetch = vi.fn()
+    global.fetch = mockFetch
+    useMatcherStore.setState({ batchID: 'benchmark-batch-001', error: null, loading: false })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('populates progress from the endpoint\'s payload', async () => {
+    mockFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/api/match/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            batch_id: 'batch-1',
+            total_sources: 100,
+            processed_sources: 100,
+            total_candidate_pairs: 50,
+            auto_matched: 40,
+            review_needed: 5,
+            no_match_count: 5,
+            total_decisions: 45,
+            status: 'COMPLETED',
+            started_at: '2026-01-01T00:00:00Z',
+            completed_at: '2026-01-01T00:01:00Z',
+            elapsed_ms: 60000
+          })
+        }
+      }
+      if (url.startsWith('/api/match/results')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ results: [], total_count: 0 })
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
+    })
+
+    await useMatcherStore.getState().loadProgress('batch-1')
+
+    expect(useMatcherStore.getState().progress.status).toBe('COMPLETED')
+    expect(useMatcherStore.getState().progress.auto_matched).toBe(40)
+  })
+
+  it('resets progress to IDLE/zeros on a 404', async () => {
+    useMatcherStore.setState({
+      progress: {
+        batch_id: 'old-batch',
+        total_sources: 500,
+        processed_sources: 500,
+        total_candidate_pairs: 300,
+        auto_matched: 250,
+        review_needed: 30,
+        no_match_count: 20,
+        total_decisions: 280,
+        status: 'COMPLETED',
+        elapsed_ms: 12345
+      }
+    })
+
+    mockFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/api/match/status')) {
+        return {
+          ok: false,
+          status: 404,
+          text: async () => 'not found',
+          json: async () => { throw new Error('should not be called') }
+        }
+      }
+      if (url.startsWith('/api/match/results')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ results: [], total_count: 0 })
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
+    })
+
+    await useMatcherStore.getState().loadProgress('new-batch')
+
+    const progress = useMatcherStore.getState().progress
+    expect(progress.status).toBe('IDLE')
+    expect(progress.auto_matched).toBe(0)
+    expect(progress.review_needed).toBe(0)
+    expect(progress.total_sources).toBe(0)
+    expect(progress.batch_id).toBe('new-batch')
+  })
+})
+
+describe('setBatchID triggers status fetch', () => {
+  let mockFetch
+
+  beforeEach(() => {
+    mockFetch = vi.fn()
+    global.fetch = mockFetch
+    useMatcherStore.setState({ batchID: 'benchmark-batch-001', error: null, loading: false })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('triggers the status fetch with the right batch_id', async () => {
+    mockFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/api/match/results')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ results: [], total_count: 0 })
+        }
+      }
+      if (url.startsWith('/api/match/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            batch_id: 'batch-42',
+            status: 'RUNNING',
+            total_sources: 10,
+            processed_sources: 5,
+            total_candidate_pairs: 0,
+            auto_matched: 0,
+            review_needed: 0,
+            no_match_count: 0,
+            total_decisions: 0,
+            elapsed_ms: 100
+          })
+        }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
+    })
+
+    await useMatcherStore.getState().setBatchID('batch-42')
+
+    const statusCalls = mockFetch.mock.calls.filter(([url]) => url.startsWith('/api/match/status'))
+    expect(statusCalls.length).toBe(1)
+    const [statusUrl] = statusCalls[0]
+    expect(statusUrl).toContain('batch_id=batch-42')
+    expect(useMatcherStore.getState().progress.status).toBe('RUNNING')
+  })
+})
+
+describe('manualLink', () => {
+  let mockFetch
+
+  beforeEach(() => {
+    mockFetch = vi.fn()
+    global.fetch = mockFetch
+    useMatcherStore.setState({ batchID: 'batch-ml', isManualSearchOpen: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('requests results with include_counts set', async () => {
+    mockFetch.mockImplementation(async (url) => {
+      if (url === '/api/match/manual-link') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'match-99', match_status: 'CONFIRMED' })
+        }
+      }
+      if (url.startsWith('/api/match/results')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ results: [], total_count: 0, status_counts: { ALL: 1, CONFIRMED: 1 } })
+        }
+      }
+      throw new Error('Unexpected fetch call to ' + url)
+    })
+
+    await useMatcherStore.getState().manualLink('src-1', 'dst-1')
+
+    const resultsCalls = mockFetch.mock.calls.filter(([url]) => url.startsWith('/api/match/results'))
+    expect(resultsCalls.length).toBe(1)
+    const [resultsUrl] = resultsCalls[0]
+    expect(resultsUrl).toContain('include_counts=1')
+    expect(useMatcherStore.getState().selectedMatch).toEqual({ id: 'match-99', match_status: 'CONFIRMED' })
+  })
+})
+
+describe('updateMatchAction', () => {
+  let mockFetch
+
+  beforeEach(() => {
+    mockFetch = vi.fn()
+    global.fetch = mockFetch
+    useMatcherStore.setState({ batchID: 'batch-ua' })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('does NOT include user_id in its POST body', async () => {
+    mockFetch.mockImplementation(async (url) => {
+      if (url === '/api/match/action') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({})
+        }
+      }
+      if (url.startsWith('/api/match/results')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ results: [], total_count: 0 })
+        }
+      }
+      throw new Error('Unexpected fetch call to ' + url)
+    })
+
+    await useMatcherStore.getState().updateMatchAction('match-1', 'CONFIRM', 'looks good')
+
+    const actionCalls = mockFetch.mock.calls.filter(([url]) => url === '/api/match/action')
+    expect(actionCalls.length).toBe(1)
+    const [ , options] = actionCalls[0]
+    const body = JSON.parse(options.body)
+    expect(body).not.toHaveProperty('user_id')
+    expect(body.review_comments).toBe('looks good')
+    expect(body.action).toBe('CONFIRM')
+  })
+})

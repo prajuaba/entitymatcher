@@ -6,7 +6,6 @@ import { can } from '../lib/rbac'
 
 export function CandidateCard({ matchItem }) {
   const { updateMatchAction, evaluateLLM, setManualSearchOpen, loading, user, config } = useMatcherStore()
-  const [reviewerId, setReviewerId] = useState('reviewer_john')
   const [commentText, setCommentText] = useState('')
 
   if (!matchItem) {
@@ -244,13 +243,11 @@ export function CandidateCard({ matchItem }) {
         {user && can(user, 'CONFIRM_MATCH') ? (
           <>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <input
-                type="text"
-                placeholder="Reviewer User ID (e.g. op_john)"
-                value={reviewerId}
-                onChange={(e) => setReviewerId(e.target.value)}
-                className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 font-mono"
-              />
+              {/* Attribution comes from the JWT server-side; the client cannot set who
+                  a decision is attributed to, so this is read-only display, not an input. */}
+              <div className="w-48 bg-slate-950 border border-slate-800 rounded p-2 text-slate-400 font-mono">
+                Signed in as {user?.username ?? user?.name ?? '—'}
+              </div>
               <input
                 type="text"
                 placeholder="Compliance Rationale / Comments (e.g. Verified Tax ID match with bank registry)"
@@ -264,7 +261,7 @@ export function CandidateCard({ matchItem }) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    updateMatchAction(matchItem.id, 'CONFIRM', reviewerId || 'reviewer_op', commentText)
+                    updateMatchAction(matchItem.id, 'CONFIRM', commentText)
                     setCommentText('')
                   }}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-medium text-xs flex items-center gap-1.5 transition shadow-sm"
@@ -273,7 +270,7 @@ export function CandidateCard({ matchItem }) {
                 </button>
                 <button
                   onClick={() => {
-                    updateMatchAction(matchItem.id, 'REJECT', reviewerId || 'reviewer_op', commentText)
+                    updateMatchAction(matchItem.id, 'REJECT', commentText)
                     setCommentText('')
                   }}
                   className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 rounded-lg font-medium text-xs flex items-center gap-1.5 transition"

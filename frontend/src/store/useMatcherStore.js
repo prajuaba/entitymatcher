@@ -14,6 +14,21 @@ function rememberBatchID(id) {
   return id
 }
 
+function idleProgress(batchId = '') {
+  return {
+    batch_id: batchId,
+    total_sources: 0,
+    processed_sources: 0,
+    total_candidate_pairs: 0,
+    no_match_count: 0,
+    total_decisions: 0,
+    auto_matched: 0,
+    review_needed: 0,
+    status: 'IDLE',
+    elapsed_ms: 0,
+  }
+}
+
 export const useMatcherStore = create((set, get) => ({
   activeTab: 'results',
   // Seeded from localStorage so a reload keeps the batch the user was reviewing.
@@ -60,18 +75,7 @@ export const useMatcherStore = create((set, get) => ({
   },
 
   // Job Progress
-  progress: {
-    batch_id: '',
-    total_sources: 0,
-    processed_sources: 0,
-    total_candidate_pairs: 0,
-    no_match_count: 0,
-    total_decisions: 0,
-    auto_matched: 0,
-    review_needed: 0,
-    status: 'IDLE',
-    elapsed_ms: 0,
-  },
+  progress: idleProgress(),
 
   // Results & Selection
   results: [],
@@ -147,7 +151,10 @@ export const useMatcherStore = create((set, get) => ({
       // A browser that refuses storage still works for this session.
     }
     set({ batchID: id, page: 1, selectedMatch: null, statusCounts: {} })
-    return get().fetchResults(id, { includeCounts: true, resetSelection: true })
+    return Promise.all([
+      get().fetchResults(id, { includeCounts: true, resetSelection: true }),
+      get().loadProgress(id),
+    ])
   },
 
   // Authentication methods
@@ -516,9 +523,35 @@ export const useMatcherStore = create((set, get) => ({
     }
   },
 
-  updateMatchAction: async (matchID, action, userID = 'reviewer_op', reviewComments = '') => {
+  loadProgress: async (batchIdOverride) => {
+    const bId = batchIdOverride || get().batchID
+    if (!bId) {
+      set({ progress: idleProgress() })
+      return
+    }
+    try {
+      const res = await apiFetch(`/api/match/status?batch_id=${encodeURIComponent(bId)}`)
+      if (res.ok) {
+        set({ progress: await res.json() })
+      } else {
+        // A 404 means this batch has never been matched (no stored job). Without
+        // resetting to idle here, the previously selected batch's numbers would
+        // linger on screen and be misread as belonging to the newly selected batch.
+        set({ progress: idleProgress(bId) })
+      }
+    } catch (e) {
+      // A background status read must never break batch selection; fall back to
+      // idle and log, same reasoning as the non-ok branch above.
+      console.error('Failed to load match status', e)
+      set({ progress: idleProgress(bId) })
+    }
+  },
+
+  updateMatchAction: async (matchID, action, reviewComments = '') => {
     const { batchID } = get()
     try {
+      // The server takes the acting user from the JWT claims and ignores any user_id in the payload,
+      // so sending one only implies a control the client does not have.
       const res = await apiFetch('/api/match/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -526,7 +559,6 @@ export const useMatcherStore = create((set, get) => ({
           batch_id: batchID,
           match_id: matchID,
           action,
-          user_id: userID,
           review_comments: reviewComments,
         }),
       })
@@ -550,7 +582,9 @@ export const useMatcherStore = create((set, get) => ({
       if (res.ok) {
         const newItem = await res.json()
         set({ isManualSearchOpen: false })
-        await get().fetchResults()
+        // The chip totals (statusCounts) come from `status_counts` in the API response,
+        // which is only returned when `include_counts` is requested.
+        await get().fetchResults(undefined, { includeCounts: true })
         set({ selectedMatch: newItem })
       }
     } catch (e) {
