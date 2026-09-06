@@ -19,6 +19,11 @@ export function FileUpload() {
   const [fileUploadResult, setFileUploadResult] = useState(null)
   const [fileUploadError, setFileUploadError] = useState(null)
   const [fileUploading, setFileUploading] = useState(false)
+  // The pasted-JSON section and the CSV/Excel section are independent, so they
+  // hold their errors separately. Sharing one state would surface a JSON parse
+  // failure inside the file-picker section further down the page, next to
+  // controls that had nothing to do with it.
+  const [customUploadError, setCustomUploadError] = useState(null)
 
   const handleFileUpload = async () => {
     if (!sourceFile || !destFile) return
@@ -74,6 +79,12 @@ export function FileUpload() {
   }, [destsText])
 
   const handleCustomUpload = async () => {
+    // Errors here render inline. Do NOT reintroduce alert(): it blocks the
+    // renderer until dismissed, which froze the page during the UI sweep.
+    // Clear the previous message so a retry cannot show a stale error beside
+    // a fresh attempt.
+    setCustomUploadError(null)
+
     try {
       let sources = []
       let dests = []
@@ -86,7 +97,7 @@ export function FileUpload() {
       }
 
       if (sources.length === 0 || dests.length === 0) {
-        alert('Please provide valid JSON arrays for both Source and Destination records.')
+        setCustomUploadError('Please provide valid JSON arrays for both Source and Destination records.')
         return
       }
 
@@ -98,7 +109,7 @@ export function FileUpload() {
 
       await runMatching(batchId)
     } catch (e) {
-      alert('Failed to upload records: ' + e.message)
+      setCustomUploadError('Failed to upload records: ' + e.message)
     }
   }
 
@@ -212,6 +223,12 @@ export function FileUpload() {
             <Upload className="w-4 h-4" /> Stream Ingest & Execute Matching
           </button>
         </div>
+
+        {customUploadError && (
+          <div className="p-2.5 rounded text-xs flex items-center gap-2 bg-rose-950/60 text-rose-300 border border-rose-800">
+            <span>⚠</span> {customUploadError}
+          </div>
+        )}
       </div>
 
       {/* File Upload Section (CSV / Excel) */}

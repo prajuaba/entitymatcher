@@ -149,4 +149,29 @@ describe('ConnectionManager', () => {
     await userEvent.selectOptions(selects[0], 'MONGODB')
     expect(screen.getAllByPlaceholderText('Port')[0].value).toBe('27017')
   })
+
+  it('clears the New Column Name input after clicking + Source, while still adding the column', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (url === '/api/connector/settings') {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      throw new Error(`Unexpected fetch call to ${url}`)
+    })
+
+    render(<ConnectionManager />)
+
+    const input = screen.getByPlaceholderText('New Column Name')
+    await userEvent.type(input, 'my_new_column')
+    expect(input.value).toBe('my_new_column')
+
+    const addSourceBtn = screen.getByRole('button', { name: '+ Source' })
+    await userEvent.click(addSourceBtn)
+
+    // The column must actually have been added to the source column chip list.
+    expect(screen.getByText('my_new_column')).toBeInTheDocument()
+
+    // The input must be cleared after a successful add, so a typo cannot linger
+    // and get silently appended to the next column name typed.
+    expect(input.value).toBe('')
+  })
 })

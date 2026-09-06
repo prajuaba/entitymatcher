@@ -16,9 +16,11 @@ export function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const canSubmit = username.trim() !== '' && password !== ''
 
   const handleLogin = async (e) => {
     e.preventDefault()
+    if (!canSubmit) return
     setError('')
     setIsSubmitting(true)
 
@@ -103,7 +105,7 @@ export function LoginScreen() {
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={isSubmitting || loading}
+              disabled={isSubmitting || loading || !canSubmit}
               className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {isSubmitting || loading ? (
