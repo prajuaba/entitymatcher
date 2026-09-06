@@ -8,16 +8,21 @@ Severity: **C**ritical / **H**igh / **M**edium.
 
 ---
 
-## Status — 2026-08-31
+## Status — 2026-09-06
 
-**57 of 59 items closed. The two that remain are open by decision, not by neglect.**
+**67 of 73 items closed. The six that remain are open by decision, not by neglect.**
 
 | Round | Epics | Items | State |
 | :-- | :-- | --: | :-- |
 | Round 1 | A–J | 41 | 39 closed; **A5** and **C5** deliberately left — see below |
 | Round 2 | K, L, M, N | 18 | ✅ all closed |
+| Round 3 | O, P, Q, R | 10 | ✅ all closed — **R3**'s premise was wrong; nothing to fix, pinned by test |
+| Round 3 | S, T | 4 | Open by decision: **S1–S3** are operator calls, **T1** is untested surface, not known-broken |
 
-### The two open items, and why they stay open
+**No defect found in any round is still open.** What remains is three product decisions (S) and
+one coverage gap (T), plus A5 and C5, each of which the code argues against on measured grounds.
+
+### Round 1's two open items, and why they stay open
 
 **A5 — score aggregation.** The AC asks for a configurable weighted mean over enabled metrics,
 with `max` demoted to a tie-break. `scorer.go` still computes `max*0.6 + mean*0.4`, and the code
@@ -201,7 +206,7 @@ and two of those are the "real implementation with no caller" shape this project
 | J1–J3 | ✅ | `golang:1.25-alpine` matches `go 1.25.0`; nginx `/api` proxy verified live during M5; compose and README both 8085/3000 |
 | J4 | ✅ | truth pass ongoing and current — the scale figures were corrected in M6, and the one claim that could not be re-verified (~9% cross-script cost) is now explicitly marked a lower bound |
 
-**Still open after this audit:** A5 (by decision, rationale recorded in `scorer.go`) and C5 (partial).
+**Still open after this audit:** A5 (by decision, rationale recorded in `scorer.go`) and C5 (partial). Both remain open as of 2026-09-06.
 I2 and I3 were closed on 2026-08-31; a live nil-deref crash in the results search, found while
 scoping I3, was fixed in `422b357`.
 
@@ -353,6 +358,13 @@ Severity: **C**ritical / **H**igh / **M**edium.
 | `145881e` | Manual pairing wrote no audit row, leaving the MANUAL OVERRIDES filter empty by construction (O1) |
 | `b82fc48` | Custom aliases lived only in memory and were lost on every restart, silently changing match outcomes (Q1) |
 
+**Closed 2026-09-06**, in the order P1 → P2 → Q2 → O2 → P3 → R1–R3: the dashboard now loads a
+batch's stored state instead of only a live run (P1), its tiles stopped naming a confidence band
+they do not filter on (P2), aliases can be removed and *stay* removed across a restart (Q2), the
+reviewer-ID input that implied an attribution the client cannot set is gone (O2), the filter chips
+refresh after a manual pairing (P3), the two blocking `alert()` calls render inline (R1), and Sign
+In is disabled on empty credentials (R2). **R3 needed no change** — see the entry.
+
 **The Re-run defect is worth stating plainly.** The progress endpoint replays the last known
 progress on connect; for a batch that had run before, that first frame carries the *previous*
 run's `COMPLETED`, and `runMatching` took it as its own job finishing — closing the stream,
@@ -364,7 +376,7 @@ clock, which is subject to skew against server timestamps. This also un-stuck th
 bar and processed counter, which read `0%` / `0 / N` for the same reason — nothing was
 listening to the stream.
 
-## EPIC O — Audit and attribution integrity (C) — O1 ✅ closed; **O2** open
+## EPIC O — Audit and attribution integrity (C) — ✅ complete
 
 The product's compliance surface has two holes, both in the direction of recording *less*
 than the UI implies. Neither is a scoring bug; both are evidentiary.
@@ -372,17 +384,17 @@ than the UI implies. Neither is a scoring bug; both are evidentiary.
 | ID | Story | AC |
 | :-- | :-- | :-- |
 | ~~O1~~ ✅ | Manual pairing must write an audit record | Pairing by hand creates a `CONFIRMED` result at 1.000 confidence with **no row in `match_audit_logs`**. Approve and Reject both log correctly; only the override that bypasses the engine entirely does not. The Audit Trail ships a **MANUAL OVERRIDES** filter that therefore returns 0 by construction — verified live. Write an entry with the source/destination ids, the acting user from JWT claims, and `previous_status → CONFIRMED`, so the filter has something to select. **Shipped** `145881e`: `HandleManualLink` records `Action: "OVERRIDE"` with `NewStatus`/`ConfidenceScore` taken from the returned item rather than hardcoded. Attribution comes from `ClaimsFrom(r.Context())`, as it does for the other two actions. **`previous_status` is deliberately left empty**, not "NONE" or "NO_MATCH" — a manual link creates a pairing that did not exist, and inventing a prior status would put a false statement in an audit record; the UI renders it as `(none)`. An optional `review_comments` was added, defaulting to "Manually linked by reviewer"; the existing caller sends only the three ids and is unaffected. Verified live: the MANUAL OVERRIDES filter went 0 → 1 and All Review Actions 2 → 3. Mutation-checked three ways — deleting the call fails the build, sourcing the user from the body fails the `UserID` assertion, and flipping the action to `CONFIRM` fails with `expected: "OVERRIDE"`, which is the regression that would silently re-empty the filter |
-| O2 | Remove or bind the "Reviewer User ID" input | The field accepts text and the client sends it as `user_id`, but `HandleMatchAction` takes the reviewer from `ClaimsFrom(r.Context())` and discards the payload value — typing `qa_regression` produced a row attributed to `usr-01`. **The backend is right**: a client must not be able to attribute a decision to another person. The defect is a UI control implying otherwise, in the one screen where attribution is the point. Delete it, or render the signed-in user read-only |
+| ~~O2~~ ✅ | Remove or bind the "Reviewer User ID" input | The field accepts text and the client sends it as `user_id`, but `HandleMatchAction` takes the reviewer from `ClaimsFrom(r.Context())` and discards the payload value — typing `qa_regression` produced a row attributed to `usr-01`. **The backend is right**: a client must not be able to attribute a decision to another person. The defect is a UI control implying otherwise, in the one screen where attribution is the point. Delete it, or render the signed-in user read-only. **Shipped:** the input and its `reviewerId` state are gone from `CandidateCard.jsx`, replaced by a read-only `Signed in as <username>` panel in the same slot — the reviewer still sees who the decision will be attributed to, but cannot change it. `updateMatchAction` dropped its `userID` parameter and no longer sends `user_id` at all; the server's `ActionPayload` never had the field, so nothing on the wire changes except that the client stops implying a control it does not have. `AuditDashboard`'s `user_id` is a *read* filter over the audit log and was deliberately left alone. Mutation-checked: re-adding `user_id` to the request body fails `updateMatchAction` |
 
-## EPIC P — Execution visibility (H)
+## EPIC P — Execution visibility (H) — ✅ complete
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| P1 | Dashboard must load a batch's stored state | Progress is only ever populated by the SSE stream a re-run opens, so selecting an existing batch shows `Status: IDLE` with every tile at 0 — verified against `batch-dates-mapped` with **191,425 stored results** — and **"View Pair Results" is hidden**, gated on `status === 'COMPLETED'` (`ProgressDashboard.jsx:30`). The real state is already in `match_jobs`; nothing reads it. This is the remaining half of the Re-run confusion fixed in `15e1412`: clicking Re-run was the only way to make a finished job render |
-| P2 | Dashboard tiles must stop naming a confidence band | `ProgressDashboard.jsx:77,83` still hardcode `Confidence ≥ 90%` and `Confidence 70% - 89%`. **`fedcd1b` missed this component.** Two faults, as before: review status is not a confidence band, and the numbers ignore the configurable `auto_match_threshold` / `review_threshold` — set auto to 0.95 and both labels are simply wrong |
-| P3 | Refresh status counts after a manual pairing | The pair is written and the modal closes, but the filter chips keep their old totals until something else forces a refetch: `All Pairs 58 · Confirmed 1` immediately after, `59 · 2` once a filter is touched |
+| ~~P1~~ ✅ | Dashboard must load a batch's stored state | Progress is only ever populated by the SSE stream a re-run opens, so selecting an existing batch shows `Status: IDLE` with every tile at 0 — verified against `batch-dates-mapped` with **191,425 stored results** — and **"View Pair Results" is hidden**, gated on `status === 'COMPLETED'` (`ProgressDashboard.jsx:30`). The real state is already in `match_jobs`; nothing reads it. This is the remaining half of the Re-run confusion fixed in `15e1412`: clicking Re-run was the only way to make a finished job render. **Shipped:** a read-only `GET /api/match/status?batch_id=` (`HandleMatchStatus`) serves the same `BatchProgress` payload the SSE stream already sends, and the store's new `loadProgress` action calls it from `setBatchID`, so selecting a batch renders its real counters and the "View Pair Results" button without starting a run. A *dedicated* endpoint rather than reusing `/api/jobs`: that list is paged at 20, so a batch older than the last 20 runs would silently fall back to zeros. **`processed_sources` is derived, not stored** — `match_jobs` has no such column, so a finished run would read `0 / N`; the handler sets it to `total_sources` only when `status = COMPLETED`, which is true by definition, rather than adding a column nothing writes. A batch that has never been matched 404s and the store resets to idle: **that reset is the load-bearing part**, since without it the previously selected batch's numbers linger and are read as belonging to the new one. Mutation-checked by removing the reset, and by removing the derivation |
+| ~~P2~~ ✅ | Dashboard tiles must stop naming a confidence band | `ProgressDashboard.jsx:77,83` still hardcode `Confidence ≥ 90%` and `Confidence 70% - 89%`. **`fedcd1b` missed this component.** Two faults, as before: review status is not a confidence band, and the numbers ignore the configurable `auto_match_threshold` / `review_threshold` — set auto to 0.95 and both labels are simply wrong. **Shipped**, following the precedent `fedcd1b` set in the other two components: the Auto-Matched tile derives its threshold from `config.auto_match_threshold`, and the Review Queue tile now reads *Awaiting human review* — the range was dropped rather than replaced with another wrong one, and the "REVIEW_NEEDED is not a confidence band" comment travels with it so it does not come back. Mutation-checked: re-hardcoding `Confidence ≥ 90%` fails the test, which sets the threshold to 0.95 and asserts `95%` |
+| ~~P3~~ ✅ | Refresh status counts after a manual pairing | The pair is written and the modal closes, but the filter chips keep their old totals until something else forces a refetch: `All Pairs 58 · Confirmed 1` immediately after, `59 · 2` once a filter is touched. **Shipped:** `manualLink`'s post-write refetch now passes `{ includeCounts: true }`. The chips read `statusCounts`, which the API only returns when `include_counts` is requested, so the plain refetch refreshed the rows and left the totals stale. Mutation-checked: dropping the option fails the test |
 
-## EPIC Q — Dictionary durability (H) — Q1 ✅ closed; **Q2** open
+## EPIC Q — Dictionary durability (H) — ✅ complete
 
 The alias map feeds the pre-normalizer, so its contents change match outcomes. Q1 made it
 durable; what remains is that an entry, once added, cannot be taken back.
@@ -390,15 +402,15 @@ durable; what remains is that an entry, once added, cannot be taken back.
 | ID | Story | AC |
 | :-- | :-- | :-- |
 | ~~Q1~~ ✅ | Persist custom aliases | `GetGlobalDictionary()` is an in-process map. There is **no dictionary table and no store persistence**, so every operator-added alias is lost on restart and the seeded defaults (`scb`, `ไทยพาณิชย์`, `bbl`) return. Results therefore change between runs for reasons nothing records. Persist alongside `config` / `connector_settings`. **Shipped** `b82fc48`: a `dictionary_entries` table **keyed by alias**, not the single-row JSONB `config` and `connector_settings` use — the dictionary is keyed data, so upsert is natural, concurrent saves cannot clobber each other through a read-modify-write, and it makes Q2 a single statement rather than a rewrite. `SaveDictionaryEntry` returns an error and the handler answers **500** on failure, following the precedent `SaveDataset` sets: reporting success for a write that did not land leaves exactly this defect. `main.go` hydrates the global dictionary at startup beside the calibration-model load; built-in defaults still seed it and persisted entries apply on top, so an operator alias overrides a default of the same name. **Removing a default remains unexpressible — that needs Q2.** Verified end to end: an alias added through the API landed lowercased, survived a container restart, and the backend logged `Loaded 1 custom alias(es) from the dictionary`. Mutation-checked by removing the persistence call, which fails `TestHandleDictionaryPostPersistsEntry` |
-| Q2 | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Before Q1 the only way to clear a typo was a restart, which took every other alias with it; now that aliases persist (`b82fc48`) a typo survives restarts too, so deletion is the only way to remove one. The keyed `dictionary_entries` table added by Q1 makes the store side a single `DELETE ... WHERE alias = $1` |
+| ~~Q2~~ ✅ | Expose alias deletion | Aliases render as plain chips with no remove control, and `/api/dictionary` serves only GET and POST (`main.go:194-199`). `CustomDictionary.Delete(alias)` already exists (`dictionary.go:57`) and is simply never wired. Before Q1 the only way to clear a typo was a restart, which took every other alias with it; now that aliases persist (`b82fc48`) a typo survives restarts too, so deletion is the only way to remove one. The keyed `dictionary_entries` table added by Q1 makes the store side a single `DELETE ... WHERE alias = $1`. **Shipped**, but *not* as that `DELETE` — **a hard delete cannot express removing a built-in default.** `matcher.NewCustomDictionary()` re-seeds `scb`, `bbl`, `ไทยพาณิชย์` and the rest into the in-process map at every boot, and Q1's hydration applies persisted rows on top; dropping the row would let a default the operator removed silently reappear on the next restart — the exact gap Q1 recorded as "removing a default remains unexpressible". So the row is **tombstoned**: a `deleted` column (added by `ALTER TABLE ... IF NOT EXISTS`, since `CREATE TABLE IF NOT EXISTS` will not alter an existing one), `ListDictionaryEntries` filters `deleted = FALSE`, and boot-time hydration applies `ListDeletedDictionaryAliases` **after** the `Set` loop so the un-seed wins. Re-adding an alias clears its tombstone, so delete is reversible. `DELETE /api/dictionary?alias=` is ADMIN/ENGINEER like POST, and the UI adds a per-chip remove button — no `window.confirm`, which would reintroduce exactly the blocking dialog R1 removes. **The handler persists before mutating the in-process map**, the reverse of the POST path: dropping the alias from live scoring and *then* answering 500 would take it out of matching while telling the operator the delete failed. Mutation-checked three ways — reversing that order, removing the tombstone-clear on re-save, and the failure path itself, which asserts the alias survives a failed write |
 
-## EPIC R — Input handling and interface polish (M)
+## EPIC R — Input handling and interface polish (M) — ✅ complete (**R3**'s premise was wrong)
 
 | ID | Story | AC |
 | :-- | :-- | :-- |
-| R1 | Replace the blocking `alert()` on invalid JSON | `FileUpload.jsx:89,101` call `alert()`, which blocks the renderer until dismissed — during the sweep the page stopped responding entirely and only recovered on navigation. Every other validation error in this app renders inline (Test Connection's *"server-side file paths are disabled…"* is the model). Use the same treatment |
-| R2 | Disable Sign In on empty credentials | Submitting an empty form is possible; the server answers `Unauthorized`. Correct outcome, avoidable round trip |
-| R3 | Clear "New Column Name" after adding | The pairing-column field keeps its text after Add, unlike the Alias form beside it which clears both inputs — easy to add the same column twice |
+| ~~R1~~ ✅ | Replace the blocking `alert()` on invalid JSON | `FileUpload.jsx:89,101` call `alert()`, which blocks the renderer until dismissed — during the sweep the page stopped responding entirely and only recovered on navigation. Every other validation error in this app renders inline (Test Connection's *"server-side file paths are disabled…"* is the model). Use the same treatment. **Shipped:** both calls now set inline state, cleared at the top of the handler so a retry cannot show a stale message beside a fresh attempt. The pasted-JSON section got **its own** error state rather than reusing `fileUploadError` — that one belongs to the CSV/Excel section further down the page and is still rendered there, so sharing it would have surfaced a JSON parse failure next to the file pickers, which had nothing to do with it. Mutation-checked: restoring `alert()` fails a test that spies on `window.alert` and asserts it is never called |
+| ~~R2~~ ✅ | Disable Sign In on empty credentials | Submitting an empty form is possible; the server answers `Unauthorized`. Correct outcome, avoidable round trip. **Shipped:** the button is disabled unless both fields are non-empty, and `handleLogin` returns early on the same condition so submitting with Enter cannot bypass it. The username is trimmed; **the password deliberately is not** — leading or trailing whitespace can be significant, and trimming here would disagree with what is actually sent |
+| ~~R3~~ ⚠️ | Clear "New Column Name" after adding | The pairing-column field keeps its text after Add, unlike the Alias form beside it which clears both inputs — easy to add the same column twice. **The premise of this entry was wrong**, the same way N5's was. `addManualColumn` (`ConnectionManager.jsx:221`) already ends in `setNewColName('')`, and `git show 15e1412:...` confirms it did so at the commit the sweep ran against; it is also the only "New Column Name" control in the app. Nothing was changed. A regression test was added instead — type a name, click **+ Source**, assert both that the column was added and that the input is now empty — which **passes against the untouched component**, so the behaviour the AC asks for is now pinned rather than assumed |
 
 ## EPIC S — Matching quality decisions (M) — open by decision, not defect
 
