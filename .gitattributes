@@ -1,0 +1,16 @@
+# Git for Windows checks out CRLF by default. Normalise everything to LF in the
+# repository so a Windows clone cannot introduce line-ending-only diffs, and so a
+# shell script stays runnable when it is COPY'd into a Linux container image.
+* text=auto eol=lf
+
+# PowerShell is the Windows-side entry point and wants CRLF on disk.
+*.ps1 text eol=crlf
+
+# Binary-ish payloads Git must not touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.xlsx binary
+*.xls binary

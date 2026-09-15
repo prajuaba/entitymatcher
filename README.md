@@ -177,6 +177,19 @@ cd ../backend && go build -o server . && PORT=8085 JWT_SECRET=dev-secret ./serve
 
 For frontend development with hot reload, `npm run dev` proxies `/api` to port 8085.
 
+### Windows 11
+
+- Docker mode is identical on Windows: Docker Desktop with the WSL2 backend runs the same Linux images, so `docker compose up --build` behaves exactly as it does on Linux and macOS. Clone inside the WSL2 filesystem rather than under `C:\Users\` — a bind mount that crosses the 9p boundary makes ingest I/O noticeably slower.
+- The bash entry points have PowerShell equivalents with the same modes:
+  ```powershell
+  .\start.ps1          # Docker Compose, same as ./start.sh
+  .\start.ps1 local    # Go backend on :8085 + Vite frontend on :3000
+  .\stop.ps1           # stops both
+  ```
+- Local mode needs Go and Node on PATH; nothing else is Windows-specific. The backend falls back to the in-memory store when `DATABASE_URL` is unset, so Postgres is optional for a local run.
+- `CONNECTOR_FILE_ROOT` takes a Windows path in local mode, e.g. `C:\entitymatcher\connector-data`.
+- If PowerShell refuses to run the scripts, they are unsigned local files: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` for the current session.
+
 ### Demo accounts
 
 `admin`, `engineer_alex`, `reviewer_sarah`, `auditor_mike` — all with password `password123`.

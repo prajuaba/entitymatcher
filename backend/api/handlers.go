@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -786,7 +787,7 @@ func resolveConnectorFilePath(path string) (string, error) {
 		return "", fmt.Errorf("file not found or not readable: %s", path)
 	}
 
-	if candidate == realRoot || strings.HasPrefix(candidate, realRoot+string(os.PathSeparator)) {
+	if pathWithinRoot(candidate, realRoot) {
 		info, err := os.Stat(candidate)
 		if err != nil {
 			return "", fmt.Errorf("file not found or not readable: %s", path)
@@ -798,6 +799,21 @@ func resolveConnectorFilePath(path string) (string, error) {
 	}
 
 	return "", fmt.Errorf("file_path is outside the permitted directory")
+}
+
+// pathWithinRoot reports whether candidate is root itself or sits underneath it.
+//
+// Windows filesystems are case-insensitive, so a candidate that differs from the
+// root only in case names the same directory; comparing the two byte-for-byte
+// there denies a path that is in fact inside the root. Case-folding on Linux and
+// macOS would be wrong in the other direction -- two paths differing in case are
+// two different directories -- so this is conditioned on the platform.
+func pathWithinRoot(candidate, root string) bool {
+	if runtime.GOOS == "windows" {
+		candidate = strings.ToLower(candidate)
+		root = strings.ToLower(root)
+	}
+	return candidate == root || strings.HasPrefix(candidate, root+string(os.PathSeparator))
 }
 
 // saveUploadedFileToTemp validates the extension of an uploaded multipart file, copies its
