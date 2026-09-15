@@ -1,0 +1,33 @@
+# This file is entirely optional and is only needed if the user wants Postgres persistence
+# instead of the default in-memory store.
+# After running `docker compose -f docker-compose.postgres.yml up -d`, pass this exact
+# DATABASE_URL to the start script:
+# postgres://postgres:postgrespassword@localhost:5432/entity_matcher?sslmode=disable
+# example: .\Start-EntityMatcher.ps1 -DatabaseUrl "postgres://postgres:postgrespassword@localhost:5432/entity_matcher?sslmode=disable"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: entitymatcher-postgres
+    environment:
+      POSTGRES_DB: entity_matcher
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    # Docker's default 64MB /dev/shm makes parallel query execution and
+    # VACUUM fail on the large match_results table with a misleading "No space
+    # left on device" error even though disk has plenty of free space, so it is
+    # raised here.
+    shm_size: 1gb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+
