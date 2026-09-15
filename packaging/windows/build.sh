@@ -22,6 +22,7 @@ PG_STAGING_DIR=""
 # Arguments
 ARCH_TARGETS="both"
 POSTGRES_ENABLED=true
+KEEP_STAGING=false
 GIT_REF=""
 DIRTY_BUILD=false
 OUTPUT_DIR="$REPO_ROOT/dist-windows"
@@ -34,6 +35,7 @@ usage() {
   echo "Options:"
   echo "  --arch <amd64|arm64|both>   default: both"
   echo "  --no-postgres               omit the bundled database (smaller package)"
+  echo "  --keep-staging              keep the uncompressed per-arch staging trees (default: removed after archiving)"
   echo "  --ref <git-ref>             build from this ref instead of HEAD"
   echo "  --dirty                     build from the working tree, including uncommitted changes"
   echo "  --output <dir>              default: <repo>/dist-windows"
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-postgres) POSTGRES_ENABLED=false; shift ;;
+    --keep-staging) KEEP_STAGING=true; shift ;;
     --ref) GIT_REF="$2"; shift 2 ;;
     --dirty) DIRTY_BUILD=true; shift ;;
     --output) OUTPUT_DIR="$2"; shift 2 ;;
@@ -384,7 +387,28 @@ verify_powershell_scripts() {
   done
 }
 
-# --- Step 10: summary ---
+# --- Step 10: cleanup staging dirs ---
+cleanup_staging_dirs() {
+  if [[ "$KEEP_STAGING" == true ]]; then
+    echo -e "${YELLOW}! Keeping staging trees in ${OUTPUT_DIR} (--keep-staging was passed).${NC}"
+    return
+  fi
+
+  echo -e "${BLUE}==>${NC} Removing staging trees (use --keep-staging to keep them)..."
+
+  local arch
+  for arch in $ARCH_LIST; do
+    local pkg_dir="$OUTPUT_DIR/entitymatcher-windows-${arch}"
+    # An `if` rather than `[[ ... ]] && rm`: as the loop's last statement the
+    # short-circuit would make the function return 1 when a tree is already
+    # gone, and `set -e` would then abort the build before the summary prints.
+    if [[ -d "$pkg_dir" ]]; then
+      rm -rf "$pkg_dir"
+    fi
+  done
+}
+
+# --- Step 11: summary ---
 print_summary() {
   echo ""
   echo -e "${GREEN}--------------------------------------------------------${NC}"
@@ -449,6 +473,9 @@ done
 
 # Verify PowerShell scripts (per package)
 verify_powershell_scripts
+
+# Cleanup staging directories
+cleanup_staging_dirs
 
 # Final summary
 print_summary
