@@ -18,7 +18,15 @@ export function CandidateCard({ matchItem }) {
     )
   }
 
-  const { source, destination, confidence_score, rank, score_margin, decision_note, name_score, date_score, jw_score, lev_score, token_score, trigram_score, match_status, match_reasons } = matchItem
+  const { source, destination, confidence_score, rank, score_margin, decision_note, name_score, date_score, jw_score, lev_score, token_score, trigram_score, match_status, match_reasons, secondary_score, secondary_weight } = matchItem
+
+  // secondary_weight is the fraction of confidence_score that secondary pairing
+  // columns actually contributed for this candidate; it is 0 whenever no
+  // secondary fields are configured, which is what gates showing the bar at all.
+  const hasSecondaryPairing = Number.isFinite(secondary_weight) && secondary_weight > 0
+  const nameWeightPct = hasSecondaryPairing ? 85 * (1 - secondary_weight) : 85
+  const dateWeightPct = hasSecondaryPairing ? 15 * (1 - secondary_weight) : 15
+  const secondaryWeightPct = hasSecondaryPairing ? secondary_weight * 100 : 0
 
   const getStatusBadge = (status) => {
     switch (status) {
@@ -164,7 +172,7 @@ export function CandidateCard({ matchItem }) {
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-xs">
           <div>
             <div className="flex justify-between text-slate-400 mb-1">
-              <span>Name Similarity Score (85%)</span>
+              <span>Name Similarity Score ({nameWeightPct.toFixed(0)}%)</span>
               <span className="font-mono text-slate-200 font-medium">{(name_score * 100).toFixed(1)}%</span>
             </div>
             <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -174,13 +182,25 @@ export function CandidateCard({ matchItem }) {
 
           <div>
             <div className="flex justify-between text-slate-400 mb-1">
-              <span>Date Match Score (15%)</span>
+              <span>Date Match Score ({dateWeightPct.toFixed(0)}%)</span>
               <span className="font-mono text-slate-200 font-medium">{(date_score * 100).toFixed(1)}%</span>
             </div>
             <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
               <div className="bg-emerald-500 h-full rounded-full" style={{ width: `${date_score * 100}%` }}></div>
             </div>
           </div>
+
+          {hasSecondaryPairing && (
+            <div>
+              <div className="flex justify-between text-slate-400 mb-1">
+                <span>Secondary Attribute Match ({secondaryWeightPct.toFixed(0)}%)</span>
+                <span className="font-mono text-slate-200 font-medium">{(secondary_score * 100).toFixed(1)}%</span>
+              </div>
+              <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                <div className="bg-amber-500 h-full rounded-full" style={{ width: `${secondary_score * 100}%` }}></div>
+              </div>
+            </div>
+          )}
 
           <div>
             <div className="flex justify-between text-slate-400 mb-1">

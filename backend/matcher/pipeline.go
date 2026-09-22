@@ -48,8 +48,13 @@ type MatchResultItem struct {
 	TrigramScore    float64            `json:"trigram_score"`
 	MatchStatus     string             `json:"match_status"` // AUTO_MATCHED, REVIEW_NEEDED, CONFIRMED, REJECTED, NO_MATCH
 	MatchReasons    []string           `json:"match_reasons"`
-	Rank            int                `json:"rank"`         // 1 = best candidate for this source
-	ScoreMargin     float64            `json:"score_margin"` // best - runner_up, 0 when no runner-up
+	// SecondaryScore/SecondaryWeight are decision-time only (like JWScore, LevScore,
+	// TrigramScore) and are not persisted to match_results; SecondaryWeight is 0
+	// whenever no secondary pairing columns are configured for the run.
+	SecondaryScore  float64 `json:"secondary_score"`
+	SecondaryWeight float64 `json:"secondary_weight"`
+	Rank            int     `json:"rank"`         // 1 = best candidate for this source
+	ScoreMargin     float64 `json:"score_margin"` // best - runner_up, 0 when no runner-up
 	// CrossScript is deliberately NOT persisted to match_results (JWScore, LevScore, TrigramScore, RomanizedScore are likewise not persisted); it is decision-time only and recomputed on every run.
 	CrossScript  bool      `json:"cross_script"`
 	DecisionNote string    `json:"decision_note"` // why this row got its status
@@ -305,6 +310,8 @@ func (e *MatchEngine) ExecuteJob(
 							scoreRes.MatchReasons = append(scoreRes.MatchReasons, secReasons...)
 						}
 						if len(e.Config.ColumnMapping.SecondaryFields) > 0 {
+							scoreRes.SecondaryScore = secScore
+							scoreRes.SecondaryWeight = 0.2
 							scoreRes.TotalScore = (scoreRes.TotalScore * 0.8) + (secScore * 0.2)
 						}
 
@@ -422,6 +429,8 @@ func (e *MatchEngine) ExecuteJob(
 							TrigramScore:    scoreRes.TrigramScore,
 							MatchStatus:     status,
 							MatchReasons:    scoreRes.MatchReasons,
+							SecondaryScore:  scoreRes.SecondaryScore,
+							SecondaryWeight: scoreRes.SecondaryWeight,
 							Rank:            rankNum,
 							ScoreMargin:     margin,
 							CrossScript:     scoreRes.CrossScript,

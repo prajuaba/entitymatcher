@@ -474,6 +474,13 @@ type ScoreResult struct {
 	// the decision layer uses it to pick the auto-match threshold.
 	CrossScript  bool     `json:"cross_script"`
 	MatchReasons []string `json:"match_reasons"`
+	// SecondaryScore/SecondaryWeight are filled in by the pipeline after this
+	// function returns (secondary pairing is evaluated per-candidate, not here).
+	// SecondaryWeight is the fraction of TotalScore secondary pairing actually
+	// contributed; it stays 0 when no secondary fields are configured, which is
+	// the signal callers use to decide whether to show it at all.
+	SecondaryScore  float64 `json:"secondary_score"`
+	SecondaryWeight float64 `json:"secondary_weight"`
 }
 
 // CalculateCompositeScoreWithCorpusTuned calculates name and date metrics with optional corpus IDF weighting.
